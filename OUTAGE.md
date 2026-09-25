@@ -47,18 +47,9 @@ None of the production scripts set `storage-size` at all (`adapter/bin/stream-ca
 
 ### 1.2 §10.2's test cannot detect this, twice over
 
-The guide's outage test (§10.2) blocks port 443/8883 for **120 seconds** — exactly the
-SDK's own buffer duration, so KVS loses nothing and the test proves nothing about
-buffering. And its suggested grep:
-
-```bash
-journalctl -u kvs-cam01 -f | grep -Ei "retry|reconnect|error"
-```
-
-does not match `droppedFrame`, `storage overflow`, or `Overall storage byte size`
-(`KinesisVideoStream.cpp:45-68`) — the only lines that would actually show the buffer
-filling. §10.2 has also never been executed: `measurements/reconnect_timeline.md`, listed
-in the repo layout at guide:2004, does not exist.
+The guide's outage test was 120 s (exactly the SDK's own buffer duration, so nothing is
+lost), grepped for none of the lines that show a buffer filling, and had never been run
+(FoundAndFixed.md #18).
 
 ### 1.3 Two conflicting specs already existed, neither implemented
 
@@ -73,7 +64,7 @@ This work supersedes both. **§17/M1's MPEG-TS choice was a latent bug** — see
 cannot carry either camera's audio and would have recorded mute, silently.
 
 The one rule worth carrying over verbatim is M3's: **delete only after a confirmed 200**
-(guide:2648-2651).
+(guide §17/M3).
 
 ---
 
@@ -150,7 +141,7 @@ Disassembling both recorder back-ends gives the actual codec tables:
 Two consequences:
 
 - **`recordFormat: fmp4` is mandatory, not a preference.** MPEG-TS would silently record
-  video-only with one WARN line — which is what guide §17/M1 specified.
+  video-only — what guide §17/M1 had specified (FoundAndFixed.md #19).
 - **The merge step must transcode audio to AAC.** No browser decodes `ipcm` or
   `ulaw`/`alaw` inside MP4, so `-c copy` would yield a clip that plays in `ffplay` and is
   silent in the cloud client. This is the same ingest-permissive / playback-strict trap
@@ -179,7 +170,7 @@ live publisher untouched — `readyTime` and source id unchanged across the add.
 
 Distinct from §3.2: the path survives, but `path.doReloadConf → startRecording` tears down
 and rebuilds the recorder, so the next fMP4 segment can only begin at a random-access
-unit. With `h264_i_frame_period=30` at 15 fps (`publish-cam01.sh:39`) that is up to ~2 s
+unit. With `h264_i_frame_period=30` at 15 fps (`publish-cam01.sh`, the encoder caps) that is up to ~2 s
 of video; `cam-02`'s GOP is unknown and may be longer.
 
 This killed the original design, which flipped `recordDeleteAfter` at T0 and so placed
@@ -232,11 +223,11 @@ plus ext4 journal and directory churn from a file created and deleted every 30 s
 
 Both prior sketches bolt a `tee`+`splitmuxsink` leg onto the producer pipelines. That
 means rewriting the pipelines that took the `profile=high`, LATM-CPD and shared-DTS bugs
-to get right, and it ties buffering to the producer, which is normally **stopped**.
+to get right (FoundAndFixed.md #13, #16, #15), and it ties buffering to the producer, which is normally **stopped**.
 
 MediaMTX already runs, already holds both feeds, survives producer start/stop, and its
-record fields are live-patchable through the same control API
-`adapter/onvif-admin/app.py:113` already uses. **No GStreamer pipeline changes at all.**
+record fields are live-patchable through the same control API the admin GUI's
+registration already uses (`adapter/onvif-admin/app.py`, `register_camera`). **No GStreamer pipeline changes at all.**
 
 ### 4.2 The supervisor owns retention — MediaMTX's cleaner is never used
 
@@ -375,7 +366,7 @@ from `ffprobe` on the merged file — never computed from the limit.
 ```
 
 The sentinel is not belt-and-braces. If the mount disappears but the directory remains,
-MediaMTX writes onto `mmcblk0` — and with 25 GB free a long buffer **fits**, which is
+MediaMTX writes onto `mmcblk0` — and with tens of GB free a long buffer **fits**, which is
 worse than failing, because it puts exactly the write load the USB stick exists to absorb
 onto the SD card.
 
@@ -428,28 +419,13 @@ before the 300 s test limit elapsed. They are implemented but unproven — treat
 
 #### Three bugs found by testing, all silent
 
-1. **Segment filenames are local time, not UTC.** `recordPath`'s `%Y-%m-%d_%H-%M-%S` is
-   formatted in the machine's zone; parsing it as UTC put every segment two hours in the
-   future on a CEST box, so the retention cutoff never matched. **Measured 9 segments
-   where 4–5 were expected — the rolling window grew without bound and would have filled
-   the stick silently.** Now parsed with `astimezone()`, with an mtime fallback so an
-   unparseable name can never become un-prunable.
-
-2. **The supervisor blocked on AWS during an outage — the one time it must not.**
-   `load_registry()` called DynamoDB on the tick path with boto3's defaults (60 s connect
-   / 60 s read, with retries). When AWS went away the process sat in
-   `poll_schedule_timeout` for **45 minutes**, never reaching the connectivity check,
-   never detecting the outage it existed to watch for. Fixed two ways: all AWS access
-   moved to a background thread so the tick loop makes no network call at all, and the
-   scan pinned to `connect_timeout=3, read_timeout=5, max_attempts=1`.
-
-3. **Recovery on a single successful probe caused flapping.** The IoT endpoint's DNS
-   rotates across AWS ranges; one rotation briefly landed on a reachable address and the
-   supervisor declared recovery, finalising the capture and opening another. **Measured 3
-   finalise/reopen cycles within one outage**, fragmenting it into separate clips. Fixed
-   with asymmetric thresholds — 2 consecutive failures to declare an outage, **3
-   consecutive successes** to declare recovery. Acting early on failure is cheap (record
-   footage that may not be needed); acting early on recovery is not (stop recording).
+Local-time segment names made the rolling window grow without bound (FoundAndFixed.md
+#20); the supervisor blocked 45 minutes on AWS during the very outage it watches for
+(#21); and recovery on a single probe made it flap (#22). They left three rules:
+segment times are parsed as local time with an mtime fallback, the tick loop makes no
+network call (AWS access is on a background thread with `connect_timeout=3,
+read_timeout=5, max_attempts=1`), and recovery needs **3** consecutive successful probes
+against **2** failures for an outage.
 
 ### 5.3 B2 — backfill — **DONE**
 
@@ -480,15 +456,9 @@ because it makes the gap a long-outage phenomenon rather than a routine one.
 
 #### A fourth bug: the probe cost twice its timeout
 
-`socket.create_connection` applies its timeout **per resolved address**, and the IoT
-endpoint has both A and AAAA records — so `PROBE_TIMEOUT = 4` cost **8 s per probe**,
-measured. With two probes needed, detection took **86 s against a 120 s pre-roll**: it
-still worked, but on a third of the margin §2.1 claims, and that margin would vanish
-entirely on a host returning more addresses.
-
-Replaced with an explicit resolve-then-try loop under a total `PROBE_BUDGET_SEC = 4`, so
-detection latency is a property of the configuration rather than of DNS. Measured after:
-0.02 s when reachable, hard-capped at 4 s when not.
+A per-address socket timeout doubled the probe time on a dual-stack endpoint
+(FoundAndFixed.md #23). The probe is now an explicit resolve-then-try loop under a total
+`PROBE_BUDGET_SEC = 4`: 0.02 s when reachable, hard-capped at 4 s when not.
 
 ### 5.4 B3 — user control — **DONE**
 
@@ -528,8 +498,9 @@ copy pointing at the others. Noted here so the next person changing it knows whe
 ### 5.5 B4 — measure and document — **DONE**
 
 New: `adapter/bin/gap-fill.py` (the measurement tool), `adapter/bin/awsblock.sh` (a
-working outage simulator), `measurements/reconnect_timeline.md` — the file the repo layout
-at guide:2004 has always listed and which never existed.
+working outage simulator; needs the `iptables` package, not on a fresh image — LAUNCH Part C),
+`measurements/reconnect_timeline.md` — the file the guide's §12 repo layout has always
+listed and which never existed.
 
 **The result the feature exists to produce**, measured on `cam-02`, both runs identical
 apart from the setting:
@@ -574,7 +545,7 @@ its MPEG-TS choice identified as a latent silent-mute bug), §16.2's gap-analysi
 
 ### 6.1 Reconcile continuously, never on transitions alone
 
-The supervisor must be a **reconciler**, the shape `event_watcher.py:197-226` already uses.
+The supervisor must be a **reconciler**, the shape `event_watcher.py`'s `main` loop already uses.
 Every ~5 s it compares desired against actual and patches the difference.
 
 | Failure | Handling |
@@ -681,20 +652,12 @@ The feature's whole point is a measurement, so verification *is* the deliverable
    sudo iptables -A OUTPUT -p tcp --dport 443  -j DROP
    sudo iptables -A OUTPUT -p tcp --dport 8883 -j DROP
    ```
-   **§10.2's snippet does not work on this network, and the failure is silent.**
-   Three things were measured while building B1:
-
-   - **It is IPv4-only.** This LAN has working IPv6, and AWS resolves to
-     `2a05:d014:…`, so every "blocked" connection simply went over IPv6 and returned
-     HTTP 200. The block appears applied, packet counters even increment on unrelated
-     traffic, and nothing is actually blocked. **`ip6tables` rules are required too.**
-   - **Blocking a resolved IP is useless.** The IoT endpoint rotates across AWS ranges —
-     observed at `18.196.251.80`, `3.69.141.146`, `18.185.210.34` and `18.153.244.214`
-     within minutes. Block ranges (`3/8, 18/8, 35/8, 52/8, 54/8` and `2a05::/16`), not
-     addresses. Anthropic's API is on `160.79.104.10` / `2607:6bc0::`, outside all of
-     them, so a developer session survives the block.
-   - `iptables` here is `v1.8.11 (nf_tables)`, the nft-backed shim — present and working,
-     despite the guide's warning that it can be absent on Debian trixie.
+   **§10.2's snippet does not work on this network, and the failure is silent**
+   (FoundAndFixed.md #18): block **both** address families (`ip6tables` too), and block AWS
+   **ranges**, not a resolved IP — the endpoint rotates addresses within minutes.
+   `adapter/bin/awsblock.sh` does both, and keeps Anthropic's API (`160.79.x`,
+   `2607:6bc0::`) reachable. `iptables` here is `v1.8.11 (nf_tables)`, present and working
+   despite the guide's warning that it can be absent on Debian trixie.
 
    **Confirm both families are genuinely blocked before believing any outage result**, by
    curling an AWS endpoint and checking it fails, not by trusting that the rule was added.
@@ -713,13 +676,13 @@ The feature's whole point is a measurement, so verification *is* the deliverable
 
 | Reuse | Where |
 |---|---|
-| `mediamtx_path_name()` / `unit_name()` | `adapter/camera_control.py:17,27` — CLAUDE.md documents a real bug from reimplementing the `cam-01`→`cam01` strip |
-| `get_stream_status()` | `adapter/camera_control.py:36` — but harden per §6.1 before arming on it |
+| `mediamtx_path_name()` / `unit_name()` | `adapter/camera_control.py` — reimplementing the `cam-01`→`cam01` strip, or missing the `kvs-cam@` family, made Start/Stop silently no-op twice (FoundAndFixed.md #7, #37) |
+| `get_stream_status()` | `adapter/camera_control.py` — but harden per §6.1 before arming on it |
 | `get_session()` | `adapter/aws_device_creds.py` — fresh per call; never cache at process start |
-| Daemon shape, registry poll, offline tolerance | `adapter/event_watcher.py:60,206` — including "registry read failed … keeping current set", which is essential since DynamoDB is unreachable exactly when `outageBufferSec` matters |
-| `ClipGate` + `bin/replay-gate.py` | `adapter/event_watcher.py:67` — put the connectivity edge/debounce logic in a pure class replayable against a recorded log, rather than testing by pulling the network cable |
+| Daemon shape, registry poll, offline tolerance | `adapter/event_watcher.py` (`load_registry`, `main`) — including "registry read failed … keeping current set", which is essential since DynamoDB is unreachable exactly when `outageBufferSec` matters |
+| `ClipGate` + `bin/replay-gate.py` | `adapter/event_watcher.py` (`class ClipGate`) — put the connectivity edge/debounce logic in a pure class replayable against a recorded log, rather than testing by pulling the network cable |
 | Clip key shape, labels, `clips` schema | `cloud/lambda/record_clip.py:46`, `clip_to_s3.py:31` — `-manual` is the precedent for `-outage` |
 | Clip list UI | `client/index.html:658,663` — labels and tier badges render for free |
 | The `set_camera_audio` triple | Lambda + route + adapter route + checkbox, including the `appliesOn` message pattern |
-| MediaMTX API access | `adapter/onvif-admin/app.py:35,113,136` — factor into `adapter/mediamtx_api.py` before a third copy appears |
-| `sweep_cap()` concept | guide:2662-2673 — reuse the idea as the disk guard; discard the `/var/spool`+MPEG-TS mechanism (§3.1) |
+| MediaMTX API access | `adapter/onvif-admin/app.py` — factored into `adapter/mediamtx_api.py` (done for the outage buffer and path sync; `app.py` still calls the API directly) |
+| `sweep_cap()` concept | guide §17/M3 — reuse the idea as the disk guard; discard the `/var/spool`+MPEG-TS mechanism (§3.1) |

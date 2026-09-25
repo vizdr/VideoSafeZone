@@ -29,13 +29,34 @@ def scan(timeout: int = 4):
         wsd.stop()
 
 
+def xaddr_host_port(xaddr: str) -> tuple[str, int]:
+    """'http://192.168.178.67:8080/onvif/device_service' -> ('192.168.178.67', 8080)."""
+    addr_port = xaddr.split("://")[1].split("/")[0]
+    host, _, port = addr_port.partition(":")
+    return host, int(port) if port else 80
+
+
+def locate(timeout: int = 4) -> dict[str, tuple[str, int]]:
+    """Scan, then map each device's WS-Discovery endpoint reference to its current
+    (host, port). The endpoint reference (`urn:uuid:...`) is the device's own stable
+    identity -- often derived from its MAC -- and unlike the address it survives a DHCP
+    lease change, which is what rematch_cameras.py relies on. A device announcing several
+    XAddrs (IPv6, second NIC) is reported at its first IPv4 one."""
+    found = {}
+    for svc in scan(timeout):
+        epr, xaddrs = svc.getEPR(), svc.getXAddrs()
+        if not epr or not xaddrs:
+            continue
+        ipv4 = [x for x in xaddrs if xaddr_host_port(x)[0].replace(".", "").isdigit()]
+        found[epr] = xaddr_host_port((ipv4 or xaddrs)[0])
+    return found
+
+
 async def enrich(xaddr: str, user: str, password: str) -> dict:
     """Authenticated second stage: turns a bare XAddrs into device info + a real RTSP
     stream URI, and reports whether the device exposes IR-cut control (so the caller can
     set hasIrControl without a second round trip)."""
-    host = xaddr.split("://")[1].split("/")[0].split(":")[0]
-    addr_port = xaddr.split("://")[1].split("/")[0]
-    port = int(addr_port.split(":")[1]) if ":" in addr_port else 80
+    host, port = xaddr_host_port(xaddr)
 
     cam = ONVIFCamera(host, port, user, password, wsdl_dir=WSDL_DIR)
     await cam.update_xaddrs()

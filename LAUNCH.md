@@ -2,9 +2,9 @@
 
 Companion to `Demo-AWS-Video-revCosts4.md` (the narrative build guide). This file is the
 short version: what to run to actually get the system up, after everything in the guide
-has already been built once. If something here doesn't work, the guide has the full
-story — including the real bugs and fixes found while building this — search it for the
-matching section number.
+has already been built once. If something here doesn't work, the guide explains why it
+is built this way (search it for the section number), and `FoundAndFixed.md` has every
+bug found so far, cited here as `#N`.
 
 **Current live values for this deployment** (Account `596633517506`, region
 `eu-central-1`) are baked into the commands below. If you rebuild this from scratch on a
@@ -22,16 +22,21 @@ missing and which step creates it (needs A2's environment):
 for s in "A3 $KVS_SDK/build/libgstkvssink.so" \
          "A4 $VMS_HOME/venv-adapter/bin/python3" \
          "A5 $VMS_HOME/mediamtx/mediamtx" \
+         "A7 /etc/adapter/adapter.env" \
          "A7 $VMS_HOME/certs/adapter.private.key" \
-         "A8 $HOME/.config/systemd/user/kvs-agent.service"; do
+         "A8 $HOME/.config/systemd/user/kvs-agent.service" \
+         "A10 /mnt/vms-buffer/.vms-buffer-ok"; do             # A10 is optional
   set -- $s; [ -e "$2" ] && echo "ok       $1  $2" || echo "MISSING  $1  $2"
 done
 command -v aws >/dev/null && echo "ok       A6  aws CLI" || echo "MISSING  A6  aws CLI"
 ```
 
-If everything is there you only need **Part B** — unless the repo was cloned to a new
-folder, in which case re-run **A8** first so the unit files point at it. A fresh Pi runs
-A1 → A8 in order, except that A3's build runs for hours in the background, so A4–A7 fit
+If everything is there, Part A is done: run **Part B** once if the units aren't enabled
+yet, otherwise just verify with **Part C** — enabled units start at every boot by
+themselves. If the repo was cloned to a new folder, re-run **A8** (then Part B) so the
+unit files point at it. A fresh Pi runs
+A1 → A10 in order (A10 only if you want outage buffering), except that A3's build runs
+for hours in the background, so A4–A7 fit
 inside it.
 
 ### A1. System stability hardening (§1.4) — do this before anything else
@@ -49,8 +54,33 @@ echo "/swapfile none swap sw,pri=10 0 0" | sudo tee -a /etc/fstab
 echo "vm.swappiness=10" | sudo tee /etc/sysctl.d/99-low-swappiness.conf
 sudo sysctl -p /etc/sysctl.d/99-low-swappiness.conf
 
+# Persistent journal (FoundAndFixed.md #33). Pi OS keeps it in RAM, so every `journalctl
+# --user -u` check in this file finds nothing. Its own drop-in sets Storage=volatile, so
+# creating /var/log/journal alone does nothing: a later /etc drop-in has to override it.
+# The size caps keep the SD-card cost bounded.
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/90-vms-persistent.conf > /dev/null <<'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=200M
+SystemMaxFileSize=20M
+EOF
+sudo systemctl restart systemd-journald
+sudo journalctl --flush        # move what's in RAM so far into /var/log/journal
+
 sudo rpi-eeprom-update -a && sudo reboot   # only if an update is actually staged
 ```
+
+**Proof (journal):**
+
+```bash
+systemd-analyze cat-config systemd/journald.conf | grep '^Storage='   # last line: Storage=persistent
+ls /var/log/journal/*/                 # system.journal, and user-1000.journal once a user unit logs
+journalctl --user -n 1                 # a log line, not "No journal files were found"
+journalctl --list-boots | tail -2      # after the next reboot: two boots, the older one still readable
+```
+
+Until then, `journalctl _SYSTEMD_USER_UNIT=<unit>.service` reads a user unit's log.
 
 ### A2. Environment — persisted to `~/.bashrc`
 
@@ -67,13 +97,19 @@ EOF
 source ~/.bashrc
 ```
 
-**Proof:** `echo "$VMS_HOME" && ls "$VMS_HOME/LAUNCH.md"` prints the path, then the file.
+**Proof**, in a **new** terminal (or after `source ~/.bashrc` in the current one):
+`echo "$VMS_HOME" && ls "$VMS_HOME/LAUNCH.md"` prints the path, then the file. Once A3
+has built the SDK, `gst-inspect-1.0 kvssink` also finds the plugin with no further setup.
+
+These exports reach **interactive shells only**: Raspberry Pi OS's `~/.bashrc` begins
+with `case $- in *i*) ;; *) return;; esac`, so a script that runs `source ~/.bashrc`
+gets nothing, and neither does any systemd unit.
 
 **Non-interactive shells (systemd units, this file's own scripts) do NOT source
 `.bashrc`** — every KVS producer unit in A8 sets `GST_PLUGIN_PATH`/`LD_LIBRARY_PATH`
 explicitly for this reason (§4.3). `VMS_HOME` itself is the exception: the adapter's
 scripts (`adapter/bin/*.sh`) and Python modules (`adapter/*.py`) use it if exported and
-otherwise fall back to the repo root they live in, so certs, venv and helper paths resolve
+otherwise fall back to the repo root they live in (FoundAndFixed.md #25), so certs, venv and helper paths resolve
 without it. Unit files are different — they need **literal** absolute paths; see A8.
 
 ### A3. Build the KVS Producer SDK (§4) — the long step, budget 1.5–2.5h
@@ -85,8 +121,11 @@ sudo apt install -y cmake m4 git build-essential pkg-config \
   libssl-dev libcurl4-openssl-dev liblog4cplus-dev \
   gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly \
-  gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-# NOTE: gstreamer1.0-omx-generic from the original guide text does not exist on
+  gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-rtsp v4l-utils
+# gstreamer1.0-rtsp provides rtspclientsink, which publish-cam01.sh needs to publish into
+# MediaMTX -- without it cam-01 never appears (FoundAndFixed.md #40). v4l-utils: v4l2-ctl.
+# gstreamer1.0-omx-generic from the original guide text does not exist on
 # current Debian trixie — already dropped from this list.
 
 mkdir -p "$VMS_HOME/vendor" && cd "$VMS_HOME/vendor"
@@ -95,12 +134,10 @@ mkdir -p "$VMS_HOME/vendor" && cd "$VMS_HOME/vendor"
 mkdir -p "$KVS_SDK/build"
 ```
 
-**Three source patches** — §4.2 has the story behind each. Skipping 1 or 2 is not a
-slow-build problem, it is a failed build: without patch 1 OpenSSL compiles with one job per
-core regardless of `-j1`/`-DPARALLEL_BUILD=OFF`, memory drops under earlyoom's 20 % line,
-and earlyoom (A1 tells it to prefer compilers) SIGTERMs every `cc1` at once —
-`build.log` then shows a burst of `cc: fatal error: Terminated signal terminated program
-cc1` and `EXIT_CODE=1`. Nothing is wrong with the code when you see that; a patch is missing.
+**Three source patches** (FoundAndFixed.md #2, #3, #4). Skipping 1 or 2 is not a slow
+build, it is a failed one. If `build.log` shows a burst of `cc: fatal error: Terminated
+signal terminated program cc1`, earlyoom killed a parallel OpenSSL compile: a patch is
+missing, and nothing is wrong with the code.
 
 Patches 1 and 2 — before anything is built:
 
@@ -174,6 +211,7 @@ systemd-run --user --unit=kvs-build --collect --working-directory="$PWD" \
 grep EXIT_CODE build.log                 # EXIT_CODE=0
 ls -la "$KVS_SDK/build/libgstkvssink.so" # the plugin exists
 gst-inspect-1.0 kvssink | head -5        # GStreamer loads it — needs A2's env vars
+gst-inspect-1.0 rtspclientsink | head -3 # cam-01's publisher element (gstreamer1.0-rtsp)
 ```
 
 **Retrying after a failure: don't wipe `build/`.** Finished dependencies install to
@@ -188,7 +226,7 @@ python3 -m venv "$VMS_HOME/venv-adapter"
 "$VMS_HOME/venv-adapter/bin/pip" install boto3 awsiotsdk onvif-zeep-async WSDiscovery flask requests lxml
 ```
 
-That is every third-party module `adapter/` imports: `boto3` (AWS APIs), `awsiotsdk`
+That is every third-party module `adapter/` imports (the list was once incomplete, FoundAndFixed.md #27): `boto3` (AWS APIs), `awsiotsdk`
 (MQTT, `agent.py`), `onvif-zeep-async` + `lxml` (ONVIF), `WSDiscovery` (LAN discovery),
 `flask` + `requests` (admin GUI).
 
@@ -206,11 +244,12 @@ print(c.WSDL_DIR, os.path.isdir(c.WSDL_DIR))"          # must end in True
 ### A5. MediaMTX binary (§2.5)
 
 The repo tracks the project's own `mediamtx/mediamtx.yml`; only the binary is downloaded.
-**The release tarball also contains a default `mediamtx.yml`** — a plain `tar xzf` (as in
-the guide) silently overwrites the project config, so extract the binary by name:
+**The release tarball also contains a default `mediamtx.yml`**, and a plain `tar xzf`
+silently overwrites the project's (FoundAndFixed.md #26), so extract the binary by name:
 
 ```bash
 cd "$VMS_HOME/mediamtx"
+sha256sum mediamtx.yml > /tmp/mediamtx.yml.sha256      # to prove extraction leaves it alone
 curl -fL -o mediamtx.tar.gz \
   https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1_linux_arm64.tar.gz
 tar xzf mediamtx.tar.gz mediamtx
@@ -225,7 +264,9 @@ not by accident.
 ```bash
 file mediamtx                                    # ELF 64-bit LSB executable, ARM aarch64
 ./mediamtx --version                             # v1.20.1
-git -C "$VMS_HOME" status --short mediamtx/      # must NOT list mediamtx.yml as modified
+sha256sum -c /tmp/mediamtx.yml.sha256            # mediamtx.yml: OK  (the tarball ships its own)
+git -C "$VMS_HOME" status --short --ignored mediamtx/   # binary, tarball, and after the first
+                                                        # start auto.crt/auto.key: all '!!' (ignored, FoundAndFixed.md #35)
 # starts with the project config and the control API answers
 # (skip if kvs-mediamtx is already running — the ports would clash):
 ( timeout 6 ./mediamtx >/dev/null 2>&1 & sleep 3; curl -s http://127.0.0.1:9997/v3/paths/list | head -c 200; echo )
@@ -236,21 +277,43 @@ git -C "$VMS_HOME" status --short mediamtx/      # must NOT list mediamtx.yml as
 Used on the Pi by this runbook (Part B's `aws iot-data publish`, Part C's cloud-path check,
 creating a device certificate in A7) and by the deploy commands in `CLAUDE.md`. **The
 adapter's services never use it** — they authenticate with the device certificate (A7).
-Not in the Raspberry Pi OS image; install AWS's own arm64 build:
+Not in the Raspberry Pi OS image. Install AWS's own arm64 build **per user** — no sudo
+needed, and it is only ever run by you. Verify its signature first: the download is 70 MB
+of code that will hold your AWS credentials.
 
 ```bash
 cd "$(mktemp -d)"
 curl -fsSL -o awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip
-unzip -q awscliv2.zip && sudo ./aws/install
-aws --version        # aws-cli/2.x ... aarch64
+curl -fsSL -o awscliv2.sig https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip.sig
+export GNUPGHOME="$PWD/gnupg"; mkdir -m 700 "$GNUPGHOME"      # throwaway keyring
+gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys FB5DB77FD5C118B80511ADA8A6310ACC4672475C
+gpg --verify awscliv2.sig awscliv2.zip    # must say: Good signature from "AWS CLI Team"
+unzip -q awscliv2.zip && ./aws/install -i "$HOME/.local/aws-cli" -b "$HOME/.local/bin"
+
+# ~/.profile adds ~/.local/bin only if it existed at login -- make every new shell see it:
+grep -q 'HOME/.local/bin' ~/.bashrc || cat >> ~/.bashrc <<'EOF'
+# ~/.local/bin (per-user AWS CLI, LAUNCH.md A6): ~/.profile only adds it if it existed at login
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+EOF
 ```
 
-(Upgrading later: same commands with `sudo ./aws/install --update`.)
+Then in a **new** terminal: `aws --version` → `aws-cli/2.x … exe/aarch64`. Upgrading later:
+the same commands with `./aws/install -i "$HOME/.local/aws-cli" -b "$HOME/.local/bin" --update`.
+(System-wide instead: `sudo ./aws/install`, no `-i`/`-b`, no `.bashrc` line.)
+
+`gpg` may add `[expired]` / "This key has expired": AWS extends this key's expiry
+periodically and a keyserver's copy can lag. What matters is **Good signature** and the
+fingerprint `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`; a `BAD signature` means
+don't install.
 
 **Credentials — pick one:**
 
-- **`aws configure sso`** (IAM Identity Center) — recommended. Short-lived, re-issued by
-  `aws sso login`; nothing long-lived is written to the Pi.
+- **`aws login --remote`** — recommended. Signs in with your normal AWS Console login
+  and issues short-lived credentials, so no IAM Identity Center setup and no long-lived
+  key on the Pi. `--remote` prints a URL to open on any device with a browser; the Pi
+  over SSH has none. Re-run it when the session expires.
+- **`aws configure sso`** (IAM Identity Center), if the account already uses it.
+  Also short-lived, renewed by `aws sso login`.
 - **`aws configure`** with an IAM user's access keys — works, but writes a static key to
   `~/.aws/credentials`: exactly the kind of credential this architecture keeps off the
   device. If you use it, give that user only what you run from here and delete the key
@@ -271,12 +334,41 @@ aws configure get region                                     # eu-central-1
 ### A7. AWS resources and the device certificate
 
 **AWS resources (§3, §6, §8) — once per AWS account.** Already created for this account —
-see `$VMS_HOME/cloud/` for every JSON policy document used. In order: KVS stream (`cam-01`,
-24h retention) → IAM role `KVSAdapterRole` + role alias `KVSAdapterRoleAlias` → IoT Thing
-`adapter-01` + X.509 cert + `KVSAdapterThingPolicy` → Cognito user pool `kvs-demo-users` →
-Lambdas `get-hls-url` / `publish-cmd` → API Gateway `kvs-demo-api` → S3 static site
-`vms-demo-client-596633517506`. Full commands for each are in the guide's §3/§6/§8 — do not
-re-run them against this account, they'd fail on "already exists."
+see `$VMS_HOME/cloud/` for every JSON policy document used. In order: KVS streams (`cam-01`,
+`cam-02`, 24h retention) → IAM role `KVSAdapterRole` + role alias `KVSAdapterRoleAlias` →
+IoT Thing `adapter-01` + X.509 cert + `KVSAdapterThingPolicy` → DynamoDB tables `cameras`
+and `clips` → Cognito user pool `kvs-demo-users` → Lambdas (one file each in
+`cloud/lambda/`) → API Gateway `kvs-demo-api` → S3 bucket `vms-demo-client-596633517506`
+behind CloudFront. Full commands for each are in the guide's §3/§6/§8/§9 — do not re-run
+them against this account, they'd fail on "already exists."
+
+**Deployment config — once per Pi.** Which region, IoT Thing, role alias, endpoints and
+evidence bucket this adapter uses lives in one machine-wide file, `/etc/adapter/adapter.env`,
+read by `adapter/config.py` (Python) and `adapter/bin/adapter-config.sh` (the producer
+scripts). There are no built-in defaults: without the file every service exits at startup
+with `<KEY> is not set: add it to /etc/adapter/adapter.env`. The repo's template already
+carries this account's values:
+
+```bash
+sudo install -D -m 644 "$VMS_HOME/config/adapter.env.example" /etc/adapter/adapter.env
+# different AWS account or Thing: edit the file — the lookup commands are in its header
+```
+
+Environment variables override the file. A2 exports `AWS_REGION` and `THING_NAME`, so an
+interactive shell uses *those* while systemd services (no `.bashrc`) use the file — keep
+them equal, or a manual run and the service will quietly talk to different things.
+
+**Proof** — both loaders read it, and the same values come out:
+
+```bash
+bash -c 'source "$VMS_HOME/adapter/bin/adapter-config.sh" && echo "shell:  $THING_NAME $AWS_REGION $IOT_DATA_ENDPOINT"'
+env -u AWS_REGION -u THING_NAME "$VMS_HOME/venv-adapter/bin/python3" -c "
+import sys; sys.path.insert(0, '$VMS_HOME/adapter'); import config
+print('python:', config.THING_NAME, config.AWS_REGION, config.IOT_DATA_ENDPOINT)"
+```
+
+Proofs (b) and (c) below then read their endpoints from this file, so they also confirm
+the file points at the right AWS account.
 
 **Device certificate — once per Pi.** `certs/` is gitignored, so a fresh clone has none.
 Four files must end up in `$VMS_HOME/certs/`:
@@ -286,7 +378,7 @@ Four files must end up in `$VMS_HOME/certs/`:
 | `adapter.cert.pem` | device certificate for Thing `adapter-01` | everything |
 | `adapter.private.key` | its private key — **cannot be re-downloaded from AWS** | everything |
 | `cacert.pem` | Starfield root (`SFSRootCAG2`) — credentials endpoint | `kvssink`, `aws_device_creds.py` |
-| `AmazonRootCA1.pem` | Amazon root CA 1 — MQTT data endpoint | `agent.py` |
+| `AmazonRootCA1.pem` | Amazon root CA 1 — MQTT data endpoint (FoundAndFixed.md #29) | `agent.py` |
 
 The two CAs are **different** and not interchangeable; the wrong one gives a TLS error
 that looks like a permissions problem (§6.4).
@@ -304,6 +396,7 @@ Never run `kvs-agent` on both Pis at the same time: both connect as MQTT client
 on the Pi with A6's CLI, or in CloudShell and then copy the two files to the Pi:
 
 ```bash
+umask 077                                  # the private key is born 0600, not chmod-ed later
 mkdir -p "$VMS_HOME/certs" && cd "$VMS_HOME/certs"
 aws iot list-policies --query 'policies[].policyName'     # confirm KVSAdapterThingPolicy exists
 CERT_ARN=$(aws iot create-keys-and-certificate --set-as-active \
@@ -311,14 +404,17 @@ CERT_ARN=$(aws iot create-keys-and-certificate --set-as-active \
   --public-key-outfile adapter.public.key \
   --private-key-outfile adapter.private.key \
   --query certificateArn --output text)
+echo "$CERT_ARN" > .cert-arn               # which Thing principal is THIS Pi's (retire step)
 aws iot attach-policy --policy-name KVSAdapterThingPolicy --target "$CERT_ARN"
 aws iot attach-thing-principal --thing-name adapter-01 --principal "$CERT_ARN"
 ```
 
-Once the proofs below pass, retire the old certificate so there's only one live identity:
+Once the proofs below pass, retire the old certificate so there's only one live identity.
+Deactivating it cuts off any device still using it, which is the point if the old Pi is
+gone, and a surprise if it's still running:
 
 ```bash
-aws iot list-thing-principals --thing-name adapter-01    # old ARN is the one ≠ $CERT_ARN
+aws iot list-thing-principals --thing-name adapter-01    # old = the one not in certs/.cert-arn
 aws iot update-certificate --certificate-id <old-cert-id> --new-status INACTIVE
 ```
 
@@ -335,6 +431,7 @@ chmod 700 . && chmod 600 adapter.private.key
 
 ```bash
 cd "$VMS_HOME/certs"
+source "$VMS_HOME/adapter/bin/adapter-config.sh"   # endpoints, Thing, role alias from adapter.env
 # a) cert is valid and belongs to this key
 openssl x509 -in adapter.cert.pem -noout -enddate
 diff <(openssl x509 -in adapter.cert.pem -noout -pubkey) \
@@ -343,12 +440,12 @@ diff <(openssl x509 -in adapter.cert.pem -noout -pubkey) \
 # b) credentials endpoint (kvssink, boto3): cert active + attached to adapter-01 + allowed to
 #    assume KVSAdapterRole. Prints only the expiry, never the secret. 403 = attach step missing.
 curl -fsS --cert adapter.cert.pem --key adapter.private.key --cacert cacert.pem \
-  -H "x-amzn-iot-thingname: adapter-01" \
-  https://c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com/role-aliases/KVSAdapterRoleAlias/credentials \
+  -H "x-amzn-iot-thingname: $THING_NAME" \
+  "https://$IOT_CRED_ENDPOINT/role-aliases/$IOT_ROLE_ALIAS/credentials" \
   | python3 -c 'import json,sys; print("credentials OK, expire", json.load(sys.stdin)["credentials"]["expiration"])'
 
 # c) MQTT data endpoint (agent.py), with the other CA — TLS handshake only, no MQTT session
-openssl s_client -connect a3dp4umq4qv6ul-ats.iot.eu-central-1.amazonaws.com:8443 \
+openssl s_client -connect "$IOT_DATA_ENDPOINT:8443" \
   -CAfile AmazonRootCA1.pem -cert adapter.cert.pem -key adapter.private.key </dev/null 2>/dev/null \
   | grep 'Verify return code'            # Verify return code: 0 (ok)
 
@@ -360,7 +457,7 @@ print(get_session().client('sts').get_caller_identity()['Arn'])"   # …assumed-
 
 ### A8. Install the systemd units — once per Pi, again whenever the clone moves
 
-Part B only *enables and starts* units; this step creates their files. Unit files live
+Part B only *enables and starts* units; this step creates their files (FoundAndFixed.md #30). Unit files live
 outside the repo and are not in git, so a fresh Pi (or a fresh clone) has none of them
 until this step runs.
 
@@ -382,6 +479,7 @@ goes, which `systemctl` flavour controls it, and where its logs are:
 | `kvs-event-watcher` | user | `~/.config/systemd/user/kvs-event-watcher.service` | `adapter/event_watcher.py` |
 | `kvs-outage-buffer` | user | `~/.config/systemd/user/kvs-outage-buffer.service` | `adapter/outage_buffer.py` |
 | `kvs-outage-uploader` | user | `~/.config/systemd/user/kvs-outage-uploader.service` | `adapter/outage_uploader.py` |
+| `kvs-camera-rematch` | user | `~/.config/systemd/user/kvs-camera-rematch.{service,timer}` | `adapter/rematch_cameras.py`, every 5 min (E3) |
 | `kvs-cam01` | **system** | `/etc/systemd/system/kvs-cam01.service` | `adapter/bin/stream-cam01.sh` |
 | `kvs-cam02` | **system** | `/etc/systemd/system/kvs-cam02.service` | `adapter/bin/stream-cam02.sh` |
 | `kvs-cam@` | **system** | `/etc/systemd/system/kvs-cam@.service` (+ `/etc/adapter/channels/<path>.env` per instance) | `adapter/bin/stream-channel.sh` |
@@ -394,7 +492,7 @@ goes, which `systemctl` flavour controls it, and where its logs are:
   created by the ONVIF admin GUI through `adapter/bin/provision-camera.sh` (Part E), never
   by hand.
 - A unit in one manager cannot `Requires=`/`After=` a unit in the other — they are separate
-  systemd instances (guide §16).
+  systemd instances (FoundAndFixed.md #12).
 
 **systemd does not expand `$VMS_HOME`** — or `~`, or any shell variable. It never reads
 `.bashrc`, and `ExecStart=`, `WorkingDirectory=`, `Environment=` and `EnvironmentFile=` are
@@ -413,9 +511,11 @@ the file*, and the unit on disk contains the literal path. Run them from a shell
 echo "$VMS_HOME"; ls "$VMS_HOME/adapter/agent.py"   # must print the path, then the file
 ```
 
-User units — the first three are the guide's §2 units verbatim; the other five were never
-written down in the guide and are reconstructed from the code (entry points, working
-directories, imports):
+User units — the first three are the guide's §2.8 units, plus `kvs-mediamtx`'s
+`ExecStartPost=` path sync (#32); the other six (five Python daemons and the rematch
+timer's pair) were never written down in the guide and are reconstructed from the code —
+entry points, working directories, imports (#30). **This step, not the guide, is the
+authoritative source for unit files.**
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -443,6 +543,9 @@ After=network.target
 Type=simple
 WorkingDirectory=${VMS_HOME}/mediamtx
 ExecStart=${VMS_HOME}/mediamtx/mediamtx
+# Network cameras' paths come from the registry after every start (mediamtx.yml has none):
+# '-' so an unreachable registry *and* no cache can't stop MediaMTX itself.
+ExecStartPost=-${VMS_HOME}/venv-adapter/bin/python3 ${VMS_HOME}/adapter/sync_mediamtx_paths.py
 Restart=on-failure
 RestartSec=5
 
@@ -497,6 +600,30 @@ py_unit kvs-outage-buffer   "Durable outage buffering supervisor (OUTAGE.md)" \
         "After=kvs-mediamtx.service"
 py_unit kvs-outage-uploader "Backfill buffered outage footage to S3 (OUTAGE.md)" \
         "${VMS_HOME}/adapter"             "${VMS_HOME}/adapter/outage_uploader.py"
+
+# Not a daemon: a oneshot on a timer. Follows ONVIF cameras to a new IP address (E3).
+cat > ~/.config/systemd/user/kvs-camera-rematch.service <<EOF
+[Unit]
+Description=Follow ONVIF cameras to a changed IP address (registry + MediaMTX)
+After=kvs-mediamtx.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${VMS_HOME}/adapter
+ExecStart=${VMS_HOME}/venv-adapter/bin/python3 -u ${VMS_HOME}/adapter/rematch_cameras.py
+EOF
+
+cat > ~/.config/systemd/user/kvs-camera-rematch.timer <<EOF
+[Unit]
+Description=Rescan for moved ONVIF cameras every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
 
 systemctl --user daemon-reload
 ```
@@ -554,8 +681,8 @@ sudo systemctl daemon-reload
 ```
 
 `kvs-cam@.service` above adds `User=` and the two `Environment=` lines that the guide's
-§16.6 sketch omits — without them the producer runs as root and fails with
-`No such element "kvssink"`, since `GST_PLUGIN_PATH` isn't set.
+§16.6 sketch omits — without them the producer fails with `No such element "kvssink"`
+(#30).
 
 **Check what was written:**
 
@@ -565,30 +692,181 @@ grep -h 'ExecStart\|WorkingDirectory\|Environment' \
 # every path must be absolute and exist — no '$', no '~', no 'MyProjects'
 systemd-analyze --user verify ~/.config/systemd/user/kvs-agent.service
 systemctl --user cat kvs-agent        # what systemd actually loaded
-sudo -n true && echo "passwordless sudo OK"   # agent + admin GUI call `sudo systemctl`
-                                              # non-interactively (RPi OS default grants it)
+sudo -k -n true && echo "NOPASSWD sudo OK"   # see "Privileged commands" below. Without -k a
+                                             # recently typed password fakes a pass (FoundAndFixed.md #34)
 ```
 
+**Privileged commands — a narrow sudo rule.** Two things the services run need root, and
+they run it with no terminal to type a password into: producer Start/Stop
+(`camera_control.py` → `sudo systemctl start|stop kvs-camNN.service`, or
+`kvs-cam@camNN.service` for GUI-registered cameras (#37), used by the agent and both GUIs) and camera provisioning (admin GUI → `sudo provision-camera.sh`). Current
+Raspberry Pi OS images don't grant passwordless sudo (FoundAndFixed.md #34), so allow
+exactly those two and nothing else:
+
+```bash
+cat > /tmp/020_vms-adapter <<EOF
+# VideoSafeZone adapter (LAUNCH.md A8): exactly the two privileged actions its services run
+# non-interactively -- producer Start/Stop (camera_control.py) and camera provisioning
+# (admin GUI -> provision-camera.sh). Regex arguments need sudo >= 1.9.10.
+${USER} ALL=(root) NOPASSWD: /usr/bin/systemctl ^(start|stop) kvs-cam(@cam)?[0-9]{2}\\.service\$, \\
+    ${VMS_HOME}/adapter/bin/provision-camera.sh ^cam-[0-9]{2} cam[0-9]{2}\$
+EOF
+/usr/sbin/visudo -cf /tmp/020_vms-adapter     # must say "parsed OK" -- never install it otherwise:
+                                              # a broken sudoers file can lock you out of sudo
+sudo install -m 0440 -o root -g root /tmp/020_vms-adapter /etc/sudoers.d/020_vms-adapter
+sudo visudo -c                                # the whole configuration, all "parsed OK"
+```
+
+**Proof.** `-k` ignores any cached password, so this shows the rule and not your last
+`sudo`. Unit names that don't exist keep it harmless:
+
+```bash
+sudo -k -n systemctl stop kvs-cam99.service   # "Unit kvs-cam99.service not loaded" = allowed
+sudo -k -n systemctl restart kvs-cam99.service   # "a password is required" = refused, good
+sudo -k -n true                                  # "a password is required": nothing else opened
+sudo -k -n -l | tail -2                          # the NOPASSWD line as sudo loaded it
+```
+
+This narrows what the services *ask* for; it is not a hard boundary. `provision-camera.sh`
+lives in your own, writable checkout, so anyone who is `$USER` could edit it first (the
+script says as much). A real boundary would mean installing it root-owned under
+`/usr/local/sbin`.
+
 **If the clone moves** (new folder, new Pi, different user): update `VMS_HOME` in
-`~/.bashrc`, `source ~/.bashrc`, re-run this whole step (it overwrites the files), then
+`~/.bashrc`, `source ~/.bashrc`, re-run this whole step (it overwrites the files, and the
+sudo rule, which names the clone's path, has to be regenerated too), then
 `systemctl --user restart` the running user units. Stale unit paths fail quietly —
 `Restart=on-failure` just keeps retrying a missing file — so the `grep` check above is
 the quick way to spot them.
 
+### A9. Local camera hardware (cam-01, USB webcam) — detected at every start
+
+Nothing to configure while one USB camera is attached. `camera-init.sh` and
+`publish-cam01.sh` find it themselves (`adapter/bin/detect-hw.sh`): the one
+MJPG-capable `/dev/v4l/by-id/…` capture node, and the microphone on the **same USB
+device**, matched through sysfs rather than by ALSA card name (many webcams all call
+theirs "Webcam"). Both are logged at start (`journalctl --user -u kvs-camera-publish`).
+Detection never guesses: no camera, or more than one, is an error naming the candidates.
+
+**Proof:**
+
+```bash
+"$VMS_HOME/adapter/bin/detect-hw.sh" --print
+# video device  : /dev/v4l/by-id/usb-…-video-index0 -> /dev/video0
+# audio device  : hw:CARD=…,DEV=0
+# buffer mount  : …                (A10's stick, found by LABEL=vms-buffer)
+# isolated CPUs : …                (empty = no isolcpus; A3's taskset pinning protects nothing)
+```
+
+**Only if needed** — a second USB camera, a different model, or other lighting — create
+`/etc/adapter/cameras/cam01.env` from the template (every key is optional; unset keys keep
+the PW310 defaults shown in it):
+
+```bash
+sudo install -D -m 644 "$VMS_HOME/config/cameras/cam01.env.example" /etc/adapter/cameras/cam01.env
+sudoedit /etc/adapter/cameras/cam01.env    # CAM_MATCH / CAM_DEVICE, CAPS, V4L2_*_CTRLS
+"$VMS_HOME/adapter/bin/detect-hw.sh" --print                 # shows "(present)" and the result
+systemctl --user restart kvs-camera-init kvs-camera-publish  # settings apply on restart
+```
+
+A changed `CAPS` or control set is a pipeline change: verify with a decoded frame, not
+just a running unit (Part C, and `CLAUDE.md` "Verifying changes").
+
+### A10. USB outage-buffer stick (optional) — once per Pi
+
+Only for durable outage buffering (`OUTAGE.md`); skip it and the outage units just idle
+("buffer unavailable … idle", FoundAndFixed.md #39). The stick is found by its filesystem
+**label** `vms-buffer`, mounted at `/mnt/vms-buffer` by UUID.
+
+**1. Identify it** — `sdX1` below is a placeholder, never a device name:
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS    # usually sda, partition sda1
+```
+
+**2. Format only a new stick.** If the partition is already `ext4` labelled `vms-buffer`
+(a stick moved over from another Pi), **skip this** — formatting erases the footage on it.
+Otherwise it erases everything on that partition, so check size and name twice:
+
+```bash
+sudo mkfs.ext4 -m 0 -L vms-buffer /dev/sdX1          # X = the letter lsblk showed
+```
+
+**3. Mount it by UUID**, with `nofail` so a missing stick never blocks boot:
+
+```bash
+UUID=$(lsblk -no UUID /dev/sdX1)                     # or copy it from step 1
+sudo mkdir -p /mnt/vms-buffer
+echo "UUID=$UUID  /mnt/vms-buffer  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" \
+  | sudo tee -a /etc/fstab
+sudo systemctl daemon-reload                         # systemd builds mount units from fstab
+sudo mount /mnt/vms-buffer
+ls -la /mnt/vms-buffer        # a moved stick: look first -- old live/ and outage/ captures
+                              # are footage; outage/*/state.json not "uploaded" still uploads
+```
+
+**4. Hand it to the adapter** — owner, directories, and the sentinel:
+
+```bash
+sudo chown "$USER:$USER" /mnt/vms-buffer
+mkdir -p /mnt/vms-buffer/live /mnt/vms-buffer/outage
+touch /mnt/vms-buffer/.vms-buffer-ok        # sentinel: nothing arms without it
+```
+
+The sentinel is not belt-and-braces. If the stick is unplugged but the mountpoint still
+exists, recording would land on the SD card — and with tens of GB free it *fits*, which is
+worse than failing.
+
+**Proof:**
+
+```bash
+findmnt /mnt/vms-buffer                              # SOURCE /dev/sda1, FSTYPE ext4
+"$VMS_HOME/adapter/bin/detect-hw.sh" --print | grep buffer   # buffer mount  : /mnt/vms-buffer
+journalctl --user -u kvs-outage-buffer -n 3 --no-pager       # "buffer ready" within ~5 s
+                                                             # (+ any orphan captures it found)
+```
+
+Recording itself stays off until outage buffering is switched on per camera (either GUI),
+and arms only while that camera's producer runs — Part C "If outage buffering is enabled".
+
 ---
 
-## Part B — Launch (every session / after a reboot)
+## Part B — Launch (once per Pi; after that everything starts at boot)
+
+**Run this part once, not every session.** `systemctl --user enable --now` does two
+things: `--now` starts the units immediately, and `enable` makes each one start at every
+boot from then on (`WantedBy=default.target`). Lingering (`loginctl enable-linger`, A3)
+starts user units at boot without anyone logging in. So after a reboot the camera
+pipeline, MediaMTX (with its camera paths re-added), the agent, admin GUI, event watcher,
+outage units and rematch timer all come back **by themselves** — nothing here needs
+repeating.
+
+| When | What to do |
+|---|---|
+| **Once**, after A8 on a new Pi or a moved clone | this Part B |
+| **After every reboot** | nothing to start — just verify with **Part C** |
+| **Each session you want cloud video** | Start the producer (either GUI's Start, or the `sudo systemctl start` below). The producers (`kvs-cam*`) are deliberately **not** enabled, because they cost money while running (§1.2) — and Part F at the end |
+
+**Proof** that the one-time step is still in effect (e.g. after a reboot):
+
+```bash
+loginctl show-user "$USER" -p Linger                 # Linger=yes
+systemctl --user is-enabled kvs-camera-init kvs-mediamtx kvs-camera-publish kvs-agent \
+  onvif-admin kvs-event-watcher kvs-outage-buffer kvs-outage-uploader kvs-camera-rematch.timer
+                                                     # enabled, one line each
+systemctl is-enabled kvs-cam01 kvs-cam02             # disabled — on purpose
+```
+
+Re-run Part B only if one of those says `disabled`, or after re-running A8 for a moved
+clone (then `systemctl --user daemon-reload` first).
 
 Everything below is a proper systemd unit — nothing here needs a manually-run background
 process anymore. The unit files themselves are created in **A8**; if `systemctl --user
 enable` says `Unit … not found`, that step hasn't been run on this Pi.
 
-**A partial launch fails silently, not obviously.** A real incident
-(2026-08-20): `kvs-camera-publish` was missing from an earlier version of this list.
-Everything else came up "active" and *looked* healthy — `kvs-cam01.service` was even
-`activating` with `Restart=on-failure` doing its job — but with nothing actually feeding
-`rtsp://127.0.0.1:8554/cam01`, the whole chain was quietly producing nothing. Run them
-all, then verify with **Part C**, not just `systemctl ... is-active`.
+**A partial launch fails silently, not obviously** (FoundAndFixed.md #5): leave one unit
+out and everything else still reports "active" while producing nothing. Run them all,
+then verify with **Part C**, not just `systemctl ... is-active`.
 
 ```bash
 systemctl --user enable --now kvs-camera-init     # one-shot: locks exposure/WB/focus
@@ -597,11 +875,14 @@ systemctl --user enable --now kvs-camera-publish  # camera → rtsp://127.0.0.1:
 systemctl --user enable --now kvs-agent           # MQTT control agent (adapter-01)
 systemctl --user enable --now onvif-admin         # local camera admin GUI, port 8080 (Part E)
 systemctl --user enable --now kvs-event-watcher   # ONVIF detection -> evidence clips
+systemctl --user enable --now kvs-outage-buffer kvs-outage-uploader  # OUTAGE.md; idle unless enabled per camera
+systemctl --user enable --now kvs-camera-rematch.timer  # follow ONVIF cameras to a new IP (E3)
 ```
 
-The last two are additions since the original list. `onvif-admin` is only needed when you
-want to discover/register/control cameras (Part E); `kvs-event-watcher` only does anything
-for a camera whose `recordingMode` is a detection mode — it idles otherwise, at no cost.
+`onvif-admin` is only needed when you want to discover/register/control cameras (Part E).
+`kvs-event-watcher` only acts for a camera whose `recordingMode` is a detection mode, and
+the outage units only for a camera with outage buffering switched on; otherwise they idle
+at no cost. Same list as README's "Start it".
 
 That's it — the actual KVS producer (`kvs-cam01.service`, a **system** unit, not user) is
 deliberately *not* auto-started here. It's controlled on demand by the agent, either via
@@ -615,6 +896,9 @@ sudo systemctl start kvs-cam01.service   # or: aws iot-data publish --topic adap
                                           #     --payload '{"action":"start"}' --region eu-central-1
 ```
 
+**If `kvs-camera-init` or `kvs-camera-publish` fails**, run `adapter/bin/detect-hw.sh --print`
+first: "no MJPG-capable USB camera" or "2 cameras" there is the whole answer (A9).
+
 **If any unit fails to start**, check in this order: `who -b` / `uptime` (did the Pi just
 crash-reboot? see §1.4), `journalctl --user -u <unit> -n 50`, `free -h` (memory
 pressure), `sudo systemctl is-active earlyoom nftables` (should both be `active`).
@@ -624,7 +908,7 @@ pressure), `sudo systemctl is-active earlyoom nftables` (should both be `active`
 ## Part C — Verify
 
 **Check in this order — `systemctl ... is-active` alone is not proof of anything.** Every
-unit can report `active` while the stream is genuinely dead (§2.8's incident). Only
+unit can report `active` while the stream is genuinely dead (FoundAndFixed.md #5). Only
 the first two commands below actually prove media is flowing; the systemd check at the
 end is a secondary sanity check, not the primary one.
 
@@ -653,7 +937,7 @@ tracks appear, and `ffprobe` is happy:
 
 ```bash
 # 4. frames being rejected? want exactly 0.
-#    Anything above zero is the shared-DTS trap (§18.3) and you are losing audio.
+#    Anything above zero is the shared-DTS trap (§18.3, FoundAndFixed.md #15): you are losing audio.
 journalctl -u kvs-cam01.service --since "-60 s" | grep -c 0x30000005
 
 # 5. is the audio actually all arriving, and is it real?
@@ -667,7 +951,7 @@ ffmpeg -i /tmp/s.mp4 -vn -af astats=metadata=1 -f null - 2>&1 | grep -E 'RMS|Fla
 Note that step 2 is the step that catches codec-private-data errors: a stream can ingest
 perfectly and still fail `GetHLSStreamingSessionURL` with
 `InvalidCodecPrivateDataException`. And as always, finish in a **browser** — MSE is
-stricter than `ffmpeg` and has caught two regressions here that `ffmpeg` passed.
+stricter than `ffmpeg` and has caught two regressions here that `ffmpeg` passed (#13, #16).
 
 To toggle audio: tick "Record audio with video" in the cloud client, or "with audio" in
 the local admin table. It applies on the camera's **next Start**, by design (§18.7).
@@ -693,11 +977,13 @@ ls -d /mnt/vms-buffer/outage/*/ 2>/dev/null
 
 **The stick must be mounted or nothing is armed** — the supervisor checks `ismount` plus
 the `/mnt/vms-buffer/.vms-buffer-ok` sentinel every tick, because an unplugged stick with
-the mountpoint still present would send MediaMTX's writes to the SD card, and 25 GB free
-means a long outage *fits*, which is worse than failing.
+the mountpoint still present would send MediaMTX's writes to the SD card, and with tens of
+GB free there a long outage *fits*, which is worse than failing.
 
 To test it, use `adapter/bin/awsblock.sh on|off` — **not** §10.2's `iptables` snippet,
-which is IPv4-only and silently ineffective here. Then
+which is IPv4-only and silently ineffective here (#18). `awsblock.sh` needs `iptables` and
+`ip6tables`, which a fresh Raspberry Pi OS image does not have (it ships `nft` only):
+`sudo apt install -y iptables` first — its output then shows both families blocked. Then
 `adapter/bin/gap-fill.py --stream cam-02 --last 600`.
 
 ---
@@ -760,7 +1046,7 @@ Press **Register this camera**, check the pre-filled fields, and give it an ID m
 
 | Step | What happens |
 |---|---|
-| MediaMTX path | added **live** via its local API — no config rewrite, no restart, so other cameras keep streaming |
+| MediaMTX path | added **live** via its local API — no config rewrite, no restart, so other cameras keep streaming; re-added from the registry after every MediaMTX restart (E3) |
 | systemd | `/etc/adapter/channels/camNN.env` written, then `kvs-cam@camNN.service` enabled (templated unit, guide §16.6) |
 | KVS | stream `cam-NN` created, 24 h retention |
 | Registry | row written to the `cameras` DynamoDB table |
@@ -771,10 +1057,50 @@ immediately, with no code change and no redeploy**.
 
 ### E3. Re-register an existing camera
 
-Use this when a camera's IP moved (no DHCP reservation) or its credentials changed. It
-updates the MediaMTX path source and the registry row — and deliberately **does not touch
+Use this when a camera's credentials changed. (A moved IP is followed automatically — see
+below; Re-register is only the manual fallback.) It updates the MediaMTX path source and
+the registry row — and deliberately **does not touch
 systemd**, because `cam-01`/`cam-02` predate the `kvs-cam@` template and re-provisioning
 them would start a second, conflicting producer for the same KVS stream.
+
+**The registry is where a network camera's address and credentials live** — `rtspUrl` on
+its `cameras` row, nowhere in git (FoundAndFixed.md #31, #32). `mediamtx.yml` has no camera paths: after every
+MediaMTX start (crash restarts included) `adapter/sync_mediamtx_paths.py` re-adds them
+from the registry, or from a local cache (`~/.local/state/vms-adapter/cameras-cache.json`,
+mode 600) when AWS is unreachable. So after changing a camera's password *on the camera*,
+Re-register it here; that updates the registry, and the path follows immediately and on
+every later restart.
+
+**Proof** — what the sync would do right now, and what MediaMTX has:
+
+```bash
+"$VMS_HOME/venv-adapter/bin/python3" "$VMS_HOME/adapter/sync_mediamtx_paths.py" --dry-run
+# cam-02: cam02 up to date            <- good
+# cam-02: passthrough but no rtspUrl  <- this camera was never registered through the GUI:
+#                                        Re-register it, or it has no path after a restart
+curl -s http://127.0.0.1:9997/v3/config/paths/list | python3 -c \
+  'import json,sys; print([p["name"] for p in json.load(sys.stdin)["items"]])'
+journalctl --user -u kvs-mediamtx | grep sync-paths    # each start's sync, credentials masked
+```
+
+**A moved camera is followed automatically**, so Re-register is only needed for changed
+credentials. Every 5 minutes `kvs-camera-rematch.timer` scans the LAN. It recognises each
+camera by its WS-Discovery identity (`onvifEndpointRef`, a `urn:uuid:…` that survives
+DHCP changes), and when one answers at a new address it rewrites `onvifHost` and the
+host in `rtspUrl` (registry, then MediaMTX path). Cameras registered before this existed
+get their identity learned automatically the first time they answer at their registered
+address. It never guesses: duplicates and address clashes are logged and skipped.
+
+**Proof:**
+
+```bash
+"$VMS_HOME/venv-adapter/bin/python3" "$VMS_HOME/adapter/rematch_cameras.py" --dry-run
+# rematch: scan: 1 ONVIF device(s) answered
+# rematch: cam-02: learned identity urn:uuid:…    <- first run for an older registration
+# rematch: cam-02: moved <old> -> <new>; …        <- what a real move looks like
+systemctl --user list-timers kvs-camera-rematch.timer     # next and last run
+journalctl --user -u kvs-camera-rematch | grep rematch    # what each run did
+```
 
 ### E4. Control, from the same table
 
@@ -812,7 +1138,7 @@ Then Part C's KVS check to confirm media is reaching the cloud.
   exists, plus Lambda time), then up to 30 s more before the browser client announces it.
   Not a fault — pressing Refresh sooner simply finds nothing.
 - **Registration is not idempotent against a half-finished attempt.** If provisioning
-  fails the MediaMTX path is rolled back, but check `/etc/adapter/channels/` before
+  fails the MediaMTX path is rolled back (#36), but check `/etc/adapter/channels/` before
   retrying with the same ID.
 
 ---
@@ -822,7 +1148,8 @@ Then Part C's KVS check to confirm media is reaching the cloud.
 Per §1.2's cost rule — never leave the producer running unattended:
 
 ```bash
-sudo systemctl stop kvs-cam01.service   # stop billing (PutMedia ingest)
+sudo systemctl stop 'kvs-cam*'   # every producer, GUI-registered kvs-cam@camNN too: stops PutMedia billing
+systemctl list-units 'kvs-cam*' --state=active --no-legend   # nothing listed = nothing billing
 # camera/MediaMTX/agent can stay running; they cost nothing idle
 ```
 
@@ -844,15 +1171,16 @@ Full teardown (deletes the KVS stream — recreating it takes seconds, see §11)
   adapter's certificate) for something that needs your own admin AWS identity. `unset
   AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY` to fall back to your default profile.
 - **`AWS_ERROR_MQTT_UNEXPECTED_HANGUP` connecting the agent** — check nothing in the
-  connection declares a Last Will with `retain=True`; this IoT Core account/policy
-  rejects the CONNECT outright for retained LWTs (§7.2).
+  connection declares a Last Will with `retain=True`; IoT Core rejects the CONNECT for a
+  retained LWT (#6).
 - **`UnrecognizedClientException` / `security token invalid`** — check for a stray
   `AWS_SESSION_TOKEN` left from an earlier, unrelated credential export in the same
   shell; `unset` it.
-- **A sudden reboot mid-build** — see §1.4 in full; the short version is `earlyoom` +
-  swap + firmware update + CPU-pinning the build away from the WiFi IRQ cores
-  (`isolcpus=1,2` on this kernel) fixed it.
+- **A sudden reboot mid-build** — see §1.4 in full (#1); the short version is `earlyoom` +
+  swap + firmware update + CPU-pinning the build away from the WiFi IRQ cores. Pinning
+  only helps on a kernel with `isolcpus` (the first Pi had `1,2`; check yours with
+  `detect-hw.sh --print`, A9).
 - **"Is the stream alive?" → no, but every `systemctl` check said `active`** —
   `kvs-cam01.service` crash-loops silently against a 404 if `kvs-camera-publish` isn't
   also running; it has no way to tell "no camera feed" apart from any other transient
-  failure. Always verify with Part C's `ffprobe` commands, not unit status alone (§2.8).
+  failure. Always verify with Part C's `ffprobe` commands, not unit status alone (#5).

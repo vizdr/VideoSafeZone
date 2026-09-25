@@ -17,6 +17,9 @@ VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path
 WSDL_DIR = os.path.join(VMS_HOME, "venv-adapter", "lib",
     f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages", "onvif", "wsdl")
 ALLOWED_IR_MODES = {"AUTO", "ON", "OFF"}
+# provision-camera.sh writes <mediamtx-path>.env here for every GUI-registered camera --
+# the marker that its producer is a kvs-cam@ template instance (see unit_name).
+CHANNELS_DIR = "/etc/adapter/channels"
 
 
 def mediamtx_path_name(camera_id: str) -> str:
@@ -30,7 +33,16 @@ def mediamtx_path_name(camera_id: str) -> str:
 
 
 def unit_name(camera_id: str) -> str:
-    return f"kvs-{mediamtx_path_name(camera_id)}.service"
+    # Two producer unit families exist. cam-01/cam-02 predate the template and have their
+    # own unit files (kvs-cam01.service); every camera registered through the admin GUI runs
+    # as an instance of the template (kvs-cam@cam03.service), which provision-camera.sh
+    # enables after writing CHANNELS_DIR/<path>.env. Returning only the first form made
+    # Start/Stop and the status column silently no-op for every GUI-registered camera:
+    # systemctl reports a nonexistent unit as merely "inactive" (FoundAndFixed.md #37).
+    path = mediamtx_path_name(camera_id)
+    if os.path.exists(os.path.join(CHANNELS_DIR, f"{path}.env")):
+        return f"kvs-cam@{path}.service"
+    return f"kvs-{path}.service"
 
 
 def set_stream(camera_id: str, on: bool):

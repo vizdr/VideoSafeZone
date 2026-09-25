@@ -3,8 +3,9 @@
 A buildable, portfolio-grade implementation of the cloud-mediated outbound-connection
 architecture described in `OUTBOUND-CLOUD.md`.
 
-**Target:** a Raspberry Pi 4B acting as a *Cloud Adapter*. It pulls RTSP from a local
-camera (simulated), pushes media outbound to Kinesis Video Streams, takes commands over
+**Target:** a Raspberry Pi 4B acting as a *Cloud Adapter*. It pulls video from local
+cameras (a USB webcam, `cam-01`, and a real ONVIF IP camera, `cam-02`; the first draft
+simulated the source), pushes media outbound to Kinesis Video Streams, takes commands over
 an outbound MQTT session to AWS IoT Core, and serves a browser client through
 API Gateway — with **zero inbound ports opened** on the home router.
 
@@ -84,7 +85,8 @@ to be able to make in an interview.
 - Retention on the stream: **24 hours**, not the default.
 - Never leave the pipeline running unattended — use the systemd unit in §7 so `stop`
   actually stops it.
-- Run `./teardown.sh` (§10) when finished for the day.
+- Run `./teardown.sh` when finished for the day — you create it from §11; it isn't in
+  the repo. (`LAUNCH.md` Part F is the everyday stop.)
 
 ### 1.3 Environment
 
@@ -113,17 +115,15 @@ explicitly, since systemd doesn't expand `$VMS_HOME`. The adapter's own code doe
 depend on the export: every `adapter/bin/*.sh` script and `adapter/*.py` module uses
 `$VMS_HOME` if set and otherwise derives the repo root from its own location, so a fresh
 clone into any directory — or a unit that never sourced `.bashrc` — finds `certs/` and
-`venv-adapter/` without edits. (It used to hardcode the absolute path, which broke on the
-first move to a new folder.)
+`venv-adapter/` without edits (FoundAndFixed.md #25).
 
 ### 1.4 System stability hardening (do this before §4's SDK build)
 
 **Do this before attempting §4.** A Pi 4B running VS Code Remote-SSH's server stack
 (1.3+ GB of Node processes: extension host, Pylance, Copilot) plus a from-source C++ build
 is genuinely oversubscribed on 4 GB of RAM. Without the hardening below, the KVS SDK build
-in §4.2 reliably crashed the whole Pi — not just failed the build — via three distinct
-mechanisms discovered the hard way on 2026-08-20. Apply all four; each one closes a
-different failure mode, not variations on the same one.
+in §4.2 crashes the whole Pi, not just the build (FoundAndFixed.md #1). Apply all four;
+each one closes a different failure mode, not variations on the same one.
 
 **1. `earlyoom` — intervene before the kernel's blunt last-resort killer does.**
 
@@ -137,11 +137,8 @@ sudo systemctl restart earlyoom
 ```
 
 `-m 20 -s 95` acts on low RAM alone (20% available), essentially ignoring swap level —
-**this specific threshold matters**. An earlier, looser `-s 50` (act only once swap is
-*also* below 50% free) was tried to rescue a few large individual compiles, and instead
-let available memory crater from 64% to 12% in a single 60-second window before the
-looser condition could catch it — a full crash. `-m20 -s95` reliably intervenes early
-enough that it hasn't missed one since. `--avoid` protects `sshd`/`systemd` so remote
+**this specific threshold matters**: a looser `-s 50` acted too late and crashed the Pi
+(FoundAndFixed.md #1). `--avoid` protects `sshd`/`systemd` so remote
 access survives even when something else is sacrificed; `--prefer` targets compiler
 processes first, since a killed `cc1plus` just needs `make` re-run, unlike a killed VS
 Code server process.
@@ -159,9 +156,7 @@ sudo sysctl -p /etc/sysctl.d/99-low-swappiness.conf
 
 The default `zram` swap (RAM-compressed, ~2 GB) gives no headroom once RAM itself is
 exhausted. A disk-backed swapfile does — but **heavy sustained swapping to an SD card is
-itself a crash mechanism**: it happened once, mid-build, with no OOM-killer log and no
-panic — just a silent cutoff, correlated with `brcmfmac` (WiFi driver) SDIO timeout
-messages right before it. Low `vm.swappiness` keeps the kernel preferring fast page-cache
+itself a crash mechanism** (FoundAndFixed.md #1). Low `vm.swappiness` keeps the kernel preferring fast page-cache
 reclaim over slow disk I/O; the swapfile's low priority (`10`, vs. `zram`'s `100`) means
 it's only ever a last resort. Verify with `swapon --show` — during a healthy build, the
 disk swapfile should show `0B` used; if it starts climbing, expect trouble.
@@ -174,14 +169,14 @@ sudo rpi-eeprom-update -a       # stage the update
 sudo reboot                     # required to apply
 ```
 
-Found over a year out of date on this build (2025-05-08 installed vs. 2026-05-17
-available) despite the OS itself being current — firmware updates track separately.
-Raspberry Pi firmware releases regularly include power/USB/SDIO stability fixes.
+Firmware updates track separately from the OS (this build's was over a year behind,
+FoundAndFixed.md #1). Raspberry Pi firmware releases regularly include power/USB/SDIO stability fixes.
 
 **4. Keep heavy build load off the CPUs that service network interrupts.**
 
-This kernel is tuned for real-time work — check your own `/proc/cmdline` for
-`isolcpus=`/`irqaffinity=`; this Pi carries `isolcpus=1,2 irqaffinity=0,3`, meaning all
+The first Pi's kernel was tuned for real-time work — check your own `/proc/cmdline` for
+`isolcpus=`/`irqaffinity=` (or `detect-hw.sh --print`, `LAUNCH.md` A9); that Pi carried
+`isolcpus=1,2 irqaffinity=0,3`, meaning all
 hardware interrupts (including the WiFi chip's) are confined to cores 0 and 3, while 1
 and 2 sit isolated from the default scheduler. An unpinned build competes directly with
 WiFi interrupt servicing on the same cores. Put the build on the isolated cores instead —
@@ -193,11 +188,11 @@ this system, so `systemd-run --property=AllowedCPUs=` silently does nothing; use
 taskset -c 1,2 <your build command>   # inherited by all child processes via fork()
 ```
 
-(This is folded into the `systemd-run` invocation in §4.2.)
+(This is folded into the `systemd-run` invocation in §4.2. Without `isolcpus` — a stock
+image, like the second Pi's — the pinning is harmless but protects nothing.)
 
-**With all four in place:** the SDK build in §4.2 completed with zero crashes and zero
-`earlyoom` interventions on its final, successful run — a build that had crashed the Pi
-outright on five separate attempts beforehand.
+**With all four in place** the SDK build in §4.2 completes with zero crashes and zero
+`earlyoom` interventions.
 
 ---
 
@@ -265,6 +260,14 @@ with `ls -l /dev/v4l/by-id/` rather than copying a literal example). Two entries
 `-video-index0` and `-video-index1`; **use `index0`**, the capture node — `index1` is the
 UVC metadata/still-image node, not a second video stream.
 
+> **The scripts no longer carry this path.** Since the move to a second Pi (2026-09),
+> `adapter/bin/detect-hw.sh` finds the camera at every start: the one `/dev/v4l/by-id/`
+> node offering MJPG. That drops `index1` for the right reason (it lists no formats), not
+> by assuming "index0". It finds the microphone as the ALSA card on the same USB device in
+> sysfs. No camera, or more than one, stops the unit with a message; a second camera is
+> chosen with `CAM_MATCH` in `/etc/adapter/cameras/cam01.env` (`LAUNCH.md` A9). The manual
+> `export CAM=…` above is still how to explore a new camera by hand.
+
 ### 2.3 Lock exposure — this matters more than it sounds
 
 UVC auto-exposure lengthens integration time in dim light, and the camera silently drops
@@ -320,7 +323,10 @@ up) and converge toward 30 within the first ~10 frames; verified on this unit at
 lower `exposure_time_absolute` and add light.
 
 This sequence is codified in `adapter/bin/camera-init.sh` — run once at boot, before the
-publish pipeline starts, since these settings don't persist across power cycles.
+publish pipeline starts, since these settings don't persist across power cycles. The
+values above are its defaults; another camera or room overrides them with
+`V4L2_MODE_CTRLS` / `V4L2_VALUE_CTRLS` in `/etc/adapter/cameras/cam01.env` (`LAUNCH.md` A9),
+keeping the two-pass order: modes first, then the values they unlock.
 
 ### 2.4 Hardware H.264 encoding on the Pi 4B
 
@@ -360,11 +366,8 @@ curl -fL -o mediamtx.tar.gz \
 tar xzf mediamtx.tar.gz mediamtx && ./mediamtx &
 ```
 
-> **Extract the binary by name.** The release tarball also ships a default
-> `mediamtx.yml`, and this repo tracks its own customised one in `mediamtx/`. A bare
-> `tar xzf mediamtx.tar.gz` silently overwrites it with the upstream default. Nothing
-> fails loudly: MediaMTX starts fine, but it has lost this project's paths and API
-> settings. If that has already happened, `git checkout mediamtx/mediamtx.yml` restores it.
+> **Extract the binary by name**: the tarball's own `mediamtx.yml` would overwrite this
+> repo's (FoundAndFixed.md #26). If it already has, `git checkout mediamtx/mediamtx.yml`.
 
 > **Known trap:** the asset naming above is what MediaMTX currently ships (verified
 > 2026-08-20). An earlier draft of this guide referenced
@@ -373,7 +376,11 @@ tar xzf mediamtx.tar.gz mediamtx && ./mediamtx &
 > body instead of failing loudly. If this breaks again, check the real asset names with:
 > `curl -s https://api.github.com/repos/bluenviron/mediamtx/releases/latest | grep browser_download_url`
 
-`adapter/bin/publish-cam01.sh` (paths below are relative to `$VMS_HOME`):
+`adapter/bin/publish-cam01.sh` as first written (paths relative to `$VMS_HOME`). **This is
+the historical first version — don't copy it.** The current script decodes and converts
+in hardware (`v4l2jpegdec`/`v4l2convert`, §16.3(b)), forces `profile=(string)high` (the
+Baseline this version negotiates renders black in browsers, FoundAndFixed.md #13), finds
+the camera by detection (§2.2) and optionally carries audio (§18):
 
 ```bash
 #!/usr/bin/env bash
@@ -461,12 +468,8 @@ RTP session stats over the same window showed `packets-sent` climbing steadily a
 `bitrate≈1.2 Mbps` (close to the configured 1.0 Mbps target plus RTP/RTCP overhead),
 confirming sustained streaming rather than a single preroll frame.
 
-One divergence worth noting: `/dev/video11`'s `h264_profile` control defaults to `High`,
-but the negotiated stream came out **Baseline** — nothing in the pipeline explicitly
-requests this, it's presumably `v4l2h264enc` negotiating down against the
-`level=(string)4` caps filter. Not a problem — Baseline is actually the safer choice for
-broad HLS/browser compatibility later — but worth knowing if you go looking for where
-"High" went.
+The `Baseline` above is a bug, not a detail: it rendered black in browsers, and the
+pipeline now forces `profile=(string)high` (FoundAndFixed.md #13).
 
 ### 2.7 Frame-rate policy — why 15 fps
 
@@ -522,16 +525,11 @@ demonstrated more than one who matched the product's number.
 
 ### 2.8 Persist this across reboots — don't skip it
 
-**A real incident (2026-08-20):** hours into working on later phases, "is the stream
-alive?" got the answer "no" — not because of anything downstream, but because
-`camera-init.sh` → MediaMTX → `publish-cam01.sh` (this whole section) had only ever been
-run manually, never turned into a systemd unit. Everything built *on top* of it — the
-`kvs-cam01.service` producer (§7.1), the control agent (§7.2) — was correctly persisted
-and auto-recovering, but with nothing feeding local RTSP, `kvs-cam01.service` just
-crash-looped (`Restart=on-failure`) against a 404 with nothing to show for it until
-someone thought to check the bottom of the chain. **Persist all three pieces, not just
-the cloud-facing ones** — a partial persistence story is worse than an obviously manual
-one, because it fails silently instead of just not starting:
+**Persist all three pieces, not just the cloud-facing ones** — a partial persistence
+story fails silently instead of just not starting (FoundAndFixed.md #5). The units below
+are the original three; **`LAUNCH.md` A8 is the authoritative, current set** — it
+generates all of them for your clone's path, and its `kvs-mediamtx` adds the
+`ExecStartPost=` that restores camera paths after every start (FoundAndFixed.md #32):
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -622,9 +620,8 @@ Note the `StreamARN` — you need it for the IAM policies below.
 
 This is the longest step. The SDK builds several open-source dependencies from source;
 budget **45–90 minutes** on a Pi 4B under ideal conditions — see §4.2 for why the real
-number is usually higher. **Apply §1.4's hardening first** — on this hardware, skipping
-it meant this step crashed the Pi outright rather than just failing the build. Do it
-once, then never again.
+number is usually higher. **Apply §1.4's hardening first** — without it this step crashes
+the Pi, not just the build (FoundAndFixed.md #1). Do it once, then never again.
 
 ### 4.1 Dependencies
 
@@ -634,9 +631,12 @@ sudo apt install -y \
   libssl-dev libcurl4-openssl-dev liblog4cplus-dev \
   gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly \
-  gstreamer1.0-tools gstreamer1.0-omx-generic libgstreamer1.0-dev \
-  libgstreamer-plugins-base1.0-dev
+  gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 ```
+
+(`gstreamer1.0-rtsp`, for `rtspclientsink`, was installed back in §2.4 — a setup that
+starts here instead needs it too, FoundAndFixed.md #40. `gstreamer1.0-omx-generic`, in the upstream instructions, does not exist on Debian
+trixie — asking for it fails the whole `apt install`.)
 
 ### 4.2 Build
 
@@ -657,28 +657,11 @@ make -j1
 it in place doesn't hurt anything.
 
 **`-DPARALLEL_BUILD=OFF` is not optional on a 4 GB Pi — capping `make -j` alone does
-not protect you.** This cost real debugging time (2026-08-20), so the mechanism is worth
-understanding: `CMake/Utilities.cmake`'s `build_dependency()` function — which drives the
-from-source builds of `log4cplus`, `openssl`, `curl`, etc. — invokes each one via
-`cmake --build . --parallel` with **no explicit job count**. A bare `--parallel` resolves
-to `-j$(nproc)` as a literal command-line argument, which **always overrides** an
-inherited `MAKEFLAGS` or `CMAKE_BUILD_PARALLEL_LEVEL` environment variable — so setting
-those, or passing `-j1`/`-j2` only to the *outer* `make`, does nothing to constrain the
-*dependency* sub-builds. On this Pi 4B (4 GB RAM), that let `log4cplus`'s own build spawn
-**370 concurrent tasks** (it wasn't just compiling the library — it was also building
-`log4cplus`'s entire bundled test suite in parallel: `fileappender_test`, `filter_test`,
-`socket_test`, `unit_tests`, and a dozen more independent binaries, each spinning up its
-own `cc1plus`). Combined with the VS Code Remote-SSH server's own memory footprint, this
-reliably triggered repeated OOM kills and — before the hardening in §1 was in place —
-full system reboots (kernel OOM-killer fired on `cc1plus`, followed by a silent
-watchdog/brownout-style crash with no further log trace).
-
-`PARALLEL_BUILD` is a real, supported CMake `option()` (`CMakeLists.txt` line 18,
-`ON` by default) that gates that exact `--parallel` flag. Passing `-DPARALLEL_BUILD=OFF`
-on the *outer* configure call propagates down and forces every dependency sub-build to
-build single-threaded too. Verified fix: dependency build cgroup task count dropped from
-**370 → 14**, and `earlyoom` interventions dropped from double digits per attempt to
-**zero** for the remainder of the build.
+not protect you.** `CMake/Utilities.cmake`'s `build_dependency()` builds every dependency
+with a bare `cmake --build . --parallel`, i.e. `-j$(nproc)`, which overrides any inherited
+`MAKEFLAGS` or outer `-j`. `PARALLEL_BUILD` (`CMakeLists.txt` line 18, `ON` by default)
+gates that flag, and `-DPARALLEL_BUILD=OFF` on the outer configure propagates to every
+top-level dependency build: 370 → 14 concurrent tasks (FoundAndFixed.md #2).
 
 **Budget more than the original 45–90 minutes if you apply this fix** — forcing every
 dependency to build single-threaded (not just the outer SDK) is meaningfully slower, but
@@ -689,16 +672,10 @@ throughout — but validate it the same way: watch `earlyoom`'s kill count
 (`journalctl -u earlyoom | grep -c 'sending SIGTERM to process'`) across the attempt, not
 just whether it finishes.
 
-**`-DPARALLEL_BUILD=OFF` only fixes the top-level `build_dependency()`. There is a
-second, separate copy of the same function with the identical bug, and it isn't gated by
-any option at all.** OpenSSL isn't built by the SDK's own top-level `CMakeLists.txt` —
-it's built by a *nested*, independently-vendored dependency at
-`dependency/libkvscproducer/kvscproducer-src/`, which has its own
-`CMake/Utilities.cmake` with its own `build_dependency()`. That copy hardcodes
-`cmake --build . --parallel` with **no `PARALLEL_BUILD` check whatsoever** — our outer
-flag never reaches it. This is why `log4cplus` (built by the top-level function) respected
-`-j1` cleanly while `OpenSSL`'s build still spawned **398 concurrent tasks** and crashed
-the box, even with the top-level fix already applied. Patch it directly:
+**`-DPARALLEL_BUILD=OFF` only fixes the top-level `build_dependency()`.** OpenSSL is
+built by a *nested* vendored copy, `dependency/libkvscproducer/kvscproducer-src/`, whose
+own `CMake/Utilities.cmake` hardcodes `--parallel` with no option at all
+(FoundAndFixed.md #2). Patch it directly — **patch 1**:
 
 ```bash
 # in dependency/libkvscproducer/kvscproducer-src/CMake/Utilities.cmake, around line 89:
@@ -708,13 +685,9 @@ sed -i 's/--build \. --parallel/--build ./' \
   "$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/dependency/libkvscproducer/kvscproducer-src/CMake/Utilities.cmake"
 ```
 
-**OpenSSL's `ExternalProject_Add` also fetches four large, unnecessary git submodules —
-`boringssl`, `krb5`, `pyca-cryptography`, `wycheproof`.** These are OpenSSL's own
-optional differential-fuzzing/test-vector dependencies, not required to build the library
-`make install_sw` actually needs. Left unconstrained, cloning `boringssl` alone (a huge
-repository) caused **repeated system crashes** during the clone/checkout itself — likely
-sustained SD-card I/O pressure, the same failure mode as the swap-thrashing crash in §1.4,
-just triggered by git instead of swap. Fix it in
+**OpenSSL's `ExternalProject_Add` also fetches four large, unnecessary git submodules**
+(`boringssl`, `krb5`, `pyca-cryptography`, `wycheproof`; FoundAndFixed.md #3). **Patch 2**,
+in
 `dependency/libkvscproducer/kvscproducer-src/CMake/Dependencies/libopenssl-CMakeLists.txt`
 by adding one line to the `ExternalProject_Add(project_libopenssl ...)` block:
 
@@ -729,12 +702,8 @@ ExternalProject_Add(project_libopenssl
     ...
 ```
 
-**GCC 14 breaks the SDK's own source** — `Thread.c`'s use of `pthread_getname_np` (a
-glibc/GNU extension) needs `_GNU_SOURCE` defined before `<pthread.h>` is included, which
-this SDK version's source doesn't do. Older GCC only warned about the resulting implicit
-declaration; **GCC 14 made implicit function declarations a hard error by default**, so
-this fails the build outright on current Debian trixie. Fix it once, globally, rather than
-patching individual source files as they're discovered — add to
+**GCC 14 breaks the SDK's own source** — `Thread.c`'s implicit `pthread_getname_np` is a
+hard error there (FoundAndFixed.md #4). **Patch 3**, once and globally — add to
 `dependency/libkvscproducer/kvscproducer-src/dependency/libkvspic/kvspic-src/CMakeLists.txt`,
 right after the `project(pic_project LANGUAGES C)` block's initial `add_definitions()` calls:
 
@@ -744,17 +713,11 @@ if(UNIX AND NOT APPLE)
 endif()
 ```
 
-**Patch 3 can't be applied up front — its file doesn't exist yet.** `kvspic-src/` is
-downloaded by the *configure* step (`fetch_repo(kvspic)` in `kvscproducer-src`'s
-`CMakeLists.txt`), while `Thread.c` is only compiled later by `make`. The single
-`cmake … && make` command below therefore works only if you let it fail once at
-`Thread.c`, patch, and re-run. `LAUNCH.md` A3 avoids that with two stages instead:
-patches 1–2 → `cmake` alone → patch 3 → `make -j1`. Patches 1–2, by contrast, **must**
-be in place before the first configure: that is when OpenSSL is compiled. (Rebuild on
-the new Pi, 2026-09-24: both were skipped, OpenSSL compiled one job per core, and
-earlyoom — told by §1.4 to prefer compilers — SIGTERMed every `cc1` at once, leaving a
-burst of `cc: fatal error: Terminated signal terminated program cc1` and
-`EXIT_CODE=1` in `build.log`. There was nothing wrong with the code.)
+**Order matters.** Patches 1–2 must be in place before the first configure (that is when
+OpenSSL is compiled); patch 3's file only exists *after* configure has downloaded kvspic.
+So the single `cmake … && make` command below only works if you let it fail once at
+`Thread.c`; `LAUNCH.md` A3 runs two stages instead — patches 1–2 → `cmake` → patch 3 →
+`make -j1` (FoundAndFixed.md #24).
 
 **Run it detached, not in a plain background shell.** This step easily runs past any
 single terminal/IDE session. A bare `&`/`nohup`/`disown` background job is not enough — it
@@ -762,7 +725,7 @@ is still tied to the login session's cgroup and gets killed the moment that sess
 (VS Code Remote-SSH reconnects, an SSH client disconnects, etc.), which silently discards
 an hour of compilation. Use a `systemd --user` transient unit instead, with lingering
 enabled once so it survives independent of any login session. Also pin it to the isolated
-CPU cores (`taskset`) — see §1.4 for why this matters on this kernel's real-time tuning:
+CPU cores (`taskset`) — see §1.4 for why this matters on a kernel with `isolcpus`:
 
 ```bash
 loginctl enable-linger "$USER"   # one-time; lets user services outlive your login session
@@ -785,11 +748,9 @@ successful dependency survives `rm -rf build` and doesn't need to be rebuilt on 
 attempt. Only wipe `open-source/local/lib<name>` directly if a *specific* dependency's
 build is stuck in a bad partial state.
 
-**Realistic time budget, all fixes applied:** on a clean, uninterrupted run this is closer
-to **1.5–2.5 hours** single-threaded than the original 45–90 minute estimate — genuinely
-slower, but the difference between finishing and repeatedly crashing the Pi. Getting there
-took several hours of debugging in practice, almost all of it the CMake/build-script fixes
-above, not the compile time itself.
+**Realistic time budget, all fixes applied:** plan for **1.5–2.5 hours** single-threaded
+rather than the original 45–90 minutes. (Measured 2026-09-25 on the second Pi: 16 minutes,
+with log4cplus already built by an earlier attempt.)
 
 ### 4.3 Register the plugin
 
@@ -997,7 +958,7 @@ curl -o AmazonRootCA1.pem https://www.amazontrust.com/repository/AmazonRootCA1.p
 ```
 
 Note this is a **different CA** from the one used for MQTT data-plane connections
-(`AmazonRootCA1.pem`, used by `agent.py`). Using
+(`AmazonRootCA1.pem`, used by `agent.py`; FoundAndFixed.md #29). Using
 the wrong root certificate here produces a TLS error that looks like a permissions
 problem and wastes an hour.
 
@@ -1073,9 +1034,8 @@ Put the `gst-launch-1.0` command from §6.5 into `$VMS_HOME/adapter/bin/stream-c
 **This unit's `Restart=on-failure` will crash-loop silently, with nothing to show for
 it, if §2.8's three units aren't *also* persisted.** `kvs-cam01.service` is downstream of
 local RTSP existing at all — it has no way to distinguish "camera pipeline never started"
-from any other transient failure, so it just keeps retrying against a 404 indefinitely.
-This is exactly how a real incident happened here (§2.8) — every cloud-facing piece was
-correctly auto-recovering while the actual camera feed silently wasn't running at all.
+from any other transient failure, so it just keeps retrying against a 404 indefinitely
+(FoundAndFixed.md #5).
 
 ### 7.2 Control agent
 
@@ -1136,26 +1096,17 @@ conn.publish(topic=STATE_T, payload=json.dumps({"online": True}),
 threading.Event().wait()
 ```
 
-**`retain=True` on the Will gets the CONNECT itself rejected — `AWS_ERROR_MQTT_UNEXPECTED_HANGUP`.**
-This cost real debugging time (2026-08-20): the exact same certificate, policy, and topic
-work fine for a *normal* `publish()` call after connecting — the failure is specific to
-declaring a **retained** Last Will at CONNECT time. AWS IoT Core appears to apply a
-stricter authorization check to retained LWTs than to regular publishes, and with this
-account's policy it fails outright rather than degrading gracefully — the client just
-sees the TCP connection drop, with no CONNACK error code to explain why. Isolate this
-class of bug the same way: strip the connection down to nothing (no Will, no subscribe)
-and confirm that connects cleanly first; then add pieces back one at a time
-(`will=` with `retain=False`, then `retain=True`) until the specific failing piece is
-obvious, rather than debugging the full `agent.py` as one unit. `retain=False` is enough
-for Checkpoint 6 — the LWT firing for anyone currently subscribed doesn't require message
-retention, and enabling `awscrt.io.init_logging(awscrt.io.LogLevel.Debug, 'stderr')`
-before building the connection is what actually surfaces `AWS_ERROR_MQTT_UNEXPECTED_HANGUP`'s
-context (ALPN negotiation, CONNACK, or lack thereof) — the bare exception message alone
-doesn't say enough to diagnose it.
+**The Will must be `retain=False`** — a retained Last Will gets the CONNECT itself rejected
+(`AWS_ERROR_MQTT_UNEXPECTED_HANGUP`); `retain=False` is enough, since current subscribers
+still see it fire. And `conn.publish(...)` returns a **tuple** `(future, packet_id)` in this
+SDK version, so `.result()` needs `[0]` first (FoundAndFixed.md #6, including how to isolate
+a CONNECT failure).
 
-Also note `conn.publish(...)` returns a **tuple** `(future, packet_id)` in this SDK
-version (`awsiotsdk` 1.31.0 / `awscrt` 0.36.1), not a bare future — `.result()` needs
-`[0]` first, or errors from the publish are silently swallowed.
+**The listing above is this phase's minimal agent.** The current `adapter/agent.py` reads
+the Thing name and endpoint from `/etc/adapter/adapter.env` (`CLAUDE.md` "Paths"), routes
+Start/Stop through `camera_control.unit_name()` for any registered camera rather than a
+hardcoded `kvs-cam01.service` (FoundAndFixed.md #7, #37), and adds IR control and a
+heartbeat.
 
 The SDK's `mtls_from_path` connection already implements exponential-backoff reconnect
 (§14 of the source doc) — you do not write that yourself, but you should be able to say
@@ -1222,7 +1173,7 @@ sudo nft add table inet filter
 sudo nft add chain inet filter output '{ type filter hook output priority 0; }'
 sudo nft add rule inet filter output tcp dport 8883 drop
 
-sudo systemctl restart kvs-agent.service    # or your agent's actual unit name
+systemctl --user restart kvs-agent         # a *user* unit — no sudo (LAUNCH.md A8)
 journalctl --user -u kvs-agent -f           # should connect normally, no errors
 
 # confirm 8883 is genuinely dead — this should hang until it times out, not connect
@@ -1303,6 +1254,10 @@ def lambda_handler(event, context):
         "body": json.dumps({"url": url, "expires_in": 300}),
     }
 ```
+
+(This first version has two bugs found later: an exception escapes without CORS headers,
+and `Expires=300` kills every session after five minutes. The deployed
+`cloud/lambda/get_hls_url.py` fixes both — FoundAndFixed.md #8, #14.)
 
 **The `/cmd` Lambda the client calls isn't shown anywhere in the source material** —
 here's the actual implementation, `publish_cmd.py`:
@@ -1640,7 +1595,7 @@ Verified after deployment: `200` over HTTP/2 at `/` (proving `DefaultRootObject`
 on the HTTP URL, a valid chain (`CN=*.cloudfront.net`, Amazon RSA 2048 M04), and byte-identical
 content to the S3 object. One operational note: CloudFront is now a cache between you and
 S3, but the `--cache-control "no-cache, must-revalidate"` this project already uses on
-every client deploy (added after an earlier stale-client incident) makes it revalidate
+every client deploy (FoundAndFixed.md #11) makes it revalidate
 rather than serve stale — deploys show up as `x-cache: RefreshHit`. Without that header
 you would need `aws cloudfront create-invalidation` after each upload.
 
@@ -1653,155 +1608,24 @@ on a phone with Wi-Fi off — that's the whole point of §14's thesis, made visi
 screenshot.
 
 **§8.6 exists because that curl-based verification, while necessary, isn't sufficient** —
-it proves the backend, not the client. Every bug below only surfaced once a real person
-used the real page in a real browser, including one that made the player spin forever
-with no way out.
+it proves the backend, not the client. Every bug listed there only surfaced once a real
+person used the real page in a real browser.
 
 ### 8.6 Client-side bugs found through real use
 
-Five bugs, found in this order across actual browser sessions (the first four on
-2026-08-20, the fifth weeks later), none caught by any backend `curl` test — they are all
-specific to what a browser does with the responses over time, not whether the responses
-were correct at the moment they were issued. Bug 5 in particular was invisible to every
-health check the project had: each one passed while the page was unusable.
+Five bugs, none caught by any backend `curl` test — they are specific to what a browser
+does with the responses over time, not whether the responses were correct when issued.
+Full write-ups in `FoundAndFixed.md`:
 
-**1. A Lambda exception produces a browser-side `NetworkError`, not a readable error.**
+| # | Symptom | Rule it left behind |
+|---|---|---|
+| #8 | Lambda exception → bare browser `NetworkError` | every handler exit, error paths included, returns CORS headers |
+| #9 | `mediaSourceRequiresReset` on reload | one `Hls` instance; `destroy()` before creating the next |
+| #10 | endless retry and no "stopped" state after Stop | `userStopped` flag, immediate teardown, state-driven overlay |
+| #14 | player died after exactly 5 minutes | `Expires=3600`, refresh at 80 % of `expires_in`, new session on fatal error |
 
-*Symptom:* pressing Start/reloading sometimes showed `NetworkError when attempting to
-fetch resource` in the client — a generic message with no indication of what actually
-went wrong.
-
-*Root cause:* `get_hls_url.py`'s CORS header
-(`"headers": {"Access-Control-Allow-Origin": "*"}`) only gets attached on the function's
-own `return` statement. When `kvs-cam01.service` wasn't producing and
-`get_hls_streaming_session_url` raised `ResourceNotFoundException`, the exception
-propagated *past* that return — API Gateway caught it and generated its own generic 502,
-which has **no CORS headers at all**. The browser can't read a cross-origin response
-missing that header, so `fetch()` throws a raw network-level error instead of resolving
-with a normal (if unsuccessful) response — the actual error message never reaches the
-page's own error handling.
-
-*Fix:* wrap the whole handler body in `try`/`except`, and make every exit path — success
-and failure alike — return through the same code that attaches CORS headers:
-
-```python
-try:
-    ...
-    return {"statusCode": 200, "headers": CORS, "body": ...}
-except kv.exceptions.ResourceNotFoundException:
-    return {"statusCode": 503, "headers": CORS,
-            "body": json.dumps({"error": "stream is not currently live -- press Start"})}
-except Exception as e:
-    return {"statusCode": 500, "headers": CORS, "body": json.dumps({"error": str(e)})}
-```
-
-Applied to both Lambdas. **This class of bug is easy to miss precisely because backend
-testing with `curl` doesn't reproduce it** — `curl` reads whatever body comes back
-regardless of CORS headers; only a browser's same-origin policy enforces that check, so
-the failure is invisible until real browser traffic hits the unhappy path.
-
-**2. `mediaSourceRequiresReset` on every "Reload player" click.**
-
-*Root cause:* the client's `load()` created a fresh `new Hls()` on every call and attached
-it to the same `<video>` element without releasing the previous instance's `MediaSource`
-first. Two overlapping `MediaSource` objects on one element is exactly what that error
-means — not a KVS/HLS problem, a client bookkeeping bug.
-
-*Fix:* track the instance in a module-level variable and destroy it first:
-
-```js
-let hls = null;
-// ...
-if (hls) { hls.destroy(); hls = null; }
-hls = new Hls();
-```
-
-**3. The player spun forever after pressing Stop — no error, no recovery, no exit.**
-
-*Root cause:* `hls.js`'s own recommended fatal-error recovery (`hls.startLoad()` on
-`NETWORK_ERROR`) is correct *for a stream that's still live* — most fatal errors on a live
-HLS stream are transient network blips that clear up on retry. But after Stop,
-`kvs-cam01.service` had genuinely stopped producing, permanently — retrying a playlist
-load against a stream that will *never* produce new segments again doesn't fail
-cleanly, it just retries forever. The recovery logic had no way to distinguish "temporary
-network hiccup, keep trying" from "deliberately stopped, stop trying."
-
-*Fix:* an explicit `userStopped` flag, set the moment Stop is pressed, checked before any
-retry logic runs:
-
-```js
-let userStopped = true;
-// in the fatal-error handler:
-if (userStopped) return;   // this player was torn down on purpose; ignore its errors
-```
-
-Pressing Stop now also tears the player down immediately (`hls.destroy()`, clear the
-video's `src`) instead of leaving the old instance to stall out and retry on its own —
-the two problems (bug 3 and the UX gap in bug 4) share one root cause and one fix.
-
-**4. No visual difference between "loading" and "stopped."**
-
-Even once bug 3 stopped the infinite retry, the user-visible result after Stop was a
-frozen last video frame with a semi-transparent spinner sitting on top indefinitely —
-functionally correct (nothing was retrying anymore) but with no way for a viewer to tell
-"stopped" apart from "still loading." Fixed with an explicit overlay element (solid black,
-`position: absolute; inset: 0` over the video) driven by state, not by player events:
-`"Stream stopped. Press Start to watch again."` on Stop, `"Starting stream…"` immediately
-on Start, cleared automatically on `Hls.Events.FRAG_BUFFERED` (first real video data
-arrived) rather than guessing a fixed delay. Also needed: the `<video>` element has no
-intrinsic size before any source has ever loaded, so the wrapper needs an explicit
-`aspect-ratio: 16 / 9` — without it, the overlay itself collapses to the browser's tiny
-default video height on first page load, before Start has ever been pressed.
-
-**5. The player spun forever after exactly five minutes — because the session URL had a
-five-minute lifetime and nothing ever renewed it** (found 2026-09-06, long after the
-above four).
-
-*Symptom:* a few minutes into watching, the browser's own buffering ring appeared over
-the video and never went away, while the already-buffered seconds kept playing out. No
-error text, no failed request visible in the UI, and the backend was entirely healthy —
-`systemctl` green, fragments arriving in KVS on a perfectly regular cadence.
-
-*Root cause, three links in a chain:*
-
-1. `get_hls_url.py` requested `Expires=300` — the KVS **minimum**. `GetHLSStreamingSessionURL`
-   hands back a URL that is dead at that deadline, so every viewing session had a
-   five-minute fuse regardless of stream health.
-2. The client received `expires_in` in the response body and never used it. Nothing
-   renewed the session.
-3. The killer: the fatal-`NETWORK_ERROR` branch called `hls.startLoad()`, which
-   re-requests **the same URL**. Against an expired session that is a loop that cannot
-   terminate successfully — hls.js retried forever, the `<video>` element stayed in a
-   `waiting` state, and the browser painted its native spinner indefinitely. The
-   `NETWORK_ERROR` path also showed no overlay (only the `default:` branch did), so the
-   only feedback was a bare ring identical to normal buffering.
-
-*Proving it rather than inferring it.* The timing ("a few minutes") was suggestive but not
-proof, so: mint a session URL, poll the master playlist every 30s, print the status code.
-
-```
-session created at 22:05:58Z, Expires=300
-t=+270s  master_playlist_http=200
-t=+300s  master_playlist_http=403     <- dead, to the second
-```
-
-Then the same probe against a URL from the fixed Lambda: `200` at t=+385s. That before/after
-pair is what turns "probably the expiry" into a closed question, and it costs ten minutes.
-
-*Fix, all three links:* `Expires` raised to 3600; the client schedules a refresh at 80% of
-whatever `expires_in` comes back (so a fresh session is playing before the old one lapses);
-and the error handler now allows two `startLoad()` retries for genuinely transient blips
-before fetching a **new** session, behind a `"Reconnecting…"` overlay so it can never again
-be a silent spinner. The tradeoff accepted: rebuilding the player once an hour flashes the
-"Loading stream…" overlay briefly.
-
-*Why it surfaced on `cam-02` first, though it affected both cameras equally.* Measured over
-a 3-minute window, both streams ingest with no gaps — but `cam-02`'s fragments are **2.93 s**
-against `cam-01`'s **1.93 s**, because the ONVIF camera emits keyframes less often than our
-`h264_i_frame_period=30`. Longer fragments mean less headroom at the live edge, so `cam-02`
-is simply where a player-side problem becomes visible first (`ffprobe` also reports
-reference-picture errors joining it mid-GOP). A useful reminder that "it only happens on
-camera X" can mean "camera X is the most sensitive detector," not "the bug is in camera X."
+The general lesson: test the unhappy paths in a real browser. `curl` ignores CORS and
+never holds a session open long enough to see it expire.
 
 ---
 
@@ -1918,17 +1742,11 @@ The IDR-period row is the one that gives you a real graph.
 
 ### 10.2 Reconnect behaviour
 
-> **This section's test does not work as written, and fails silently.** It was executed
-> for the first time while building §16.3c, and three things were wrong:
-> **(1)** the `iptables` snippet is IPv4-only — on this dual-stack LAN every "blocked"
-> connection went over IPv6 and returned HTTP 200, with the rules apparently applied;
-> **(2)** 120 s is exactly kvssink's own `DEFAULT_BUFFER_DURATION_SECONDS`, so KVS loses
-> nothing and the test can demonstrate nothing; **(3)** the suggested grep matches none of
-> the lines that actually show a buffer filling (`droppedFrame`, `storage overflow`,
-> `Overall storage byte size` from `KinesisVideoStream.cpp:45-68`).
-> Use `adapter/bin/awsblock.sh`, run outages well past 120 s, and confirm the block landed
-> before believing any result. Results and the corrected method:
-> `measurements/reconnect_timeline.md`.
+> **This section's test does not work as written, and fails silently** — IPv4-only on a
+> dual-stack LAN, an outage no longer than kvssink's own buffer, and a grep that misses
+> the buffer-filling lines (FoundAndFixed.md #18). Use `adapter/bin/awsblock.sh`, run
+> outages well past 120 s, and confirm the block landed before believing any result.
+> Corrected method and results: `measurements/reconnect_timeline.md`.
 
 Simulate the WAN failure of §14 without unplugging anything:
 
@@ -2067,7 +1885,7 @@ extra hour: it demonstrates you think about reproducibility, and it makes teardo
 | 1 | Prerequisites, budget alarm | 20 min |
 | 2 | PW310 bring-up, exposure lock, encode, MediaMTX | 1.5–2 h |
 | 3 | KVS stream | 10 min |
-| 4 | **Producer SDK build on Pi** | 1–1.5 h (mostly waiting) |
+| 4 | **Producer SDK build on Pi** | 1.5–2.5 h (mostly waiting, §4.2) |
 | 5 | First light, static keys | 30 min |
 | 6 | X.509 + role alias | 1.5 h (the fiddly one) |
 | 7 | MQTT control agent + systemd | 1.5 h |
@@ -2082,9 +1900,9 @@ yours, and the part nobody else's tutorial-follower will have.
 
 ## 14. Talking points this demo earns you
 
-- *Why outbound?* Because NAT state (§15) makes return traffic free, and CGNAT on
-  cellular sites makes inbound impossible. You have the iptables experiment to prove the
-  reconnect path works.
+- *Why outbound?* Because NAT state (`OUTBOUND-CLOUD.md` §15) makes return traffic free,
+  and CGNAT on cellular sites makes inbound impossible. You have the firewall experiments
+  (§7.3, §10.2 with `awsblock.sh`) to prove the reconnect path works.
 - *Why not MQTT for video?* 128 KB payload cap and per-message pricing. You know the
   bitrate arithmetic.
 - *Why KVS and not S3 directly?* Time-indexed random access and server-side HLS
@@ -2128,7 +1946,7 @@ yours, and the part nobody else's tutorial-follower will have.
 | Latency doubled after an fps change | `h264_i_frame_period` is in frames — rescale it (§2.7) |
 | `videorate` duplicating frames | missing `drop-only=true` |
 | `No such element "kvssink"` | `GST_PLUGIN_PATH` not pointing at the SDK `build/` dir |
-| Build dies around OpenSSL/curl (`Terminated signal … cc1` burst) | nested `--parallel` in `kvscproducer-src/CMake/Utilities.cmake` — `-j`/`PARALLEL_BUILD` don't reach it; apply patch 1 (§4.2) |
+| Build dies around OpenSSL/curl (`Terminated signal … cc1` burst) | nested `--parallel` in `kvscproducer-src/CMake/Utilities.cmake` — `-j`/`PARALLEL_BUILD` don't reach it; apply patch 1 (§4.2; FoundAndFixed.md #2, #28) |
 | Fragments rejected, console empty | missing `h264parse config-interval=-1` |
 | TLS error on credentials endpoint | wrong root CA — needs SFSRootCAG2, not AmazonRootCA1 |
 | MQTT connects, publish silently fails | policy resource missing the topic wildcard |
@@ -2156,13 +1974,13 @@ software.
 
 | Capability | Cloud Adapter Mini | This prototype | Effort to close |
 |---|---|---|---|
-| Channels | 8 or 16 | 1 | **S** — parameterise the pipeline |
-| Video handling | pass-through H.264/H.265 | transcode MJPG → H.264 | **S** — use an RTSP camera |
+| Channels | 8 or 16 | 2 real (§16.3a); N via `kvs-cam@` | ~~S~~ **done** for 2; saturation test open (§16.6) |
+| Video handling | pass-through H.264/H.265 | `cam-02` pass-through, `cam-01` transcode | ~~S~~ **done** (§16.3b) |
 | Frame rate to cloud | capped at 10 fps | 15 fps, configurable (§2.7) | **done** |
-| Recording policy | motion-triggered by default | continuous | **M** — motion detect + event upload |
+| Recording policy | motion-triggered by default | manual default; motion / cell-motion / human per camera | ~~M~~ **done** (`Camera-Features.md` §9) |
 | Outage buffering | 32 GB USB, auto-backfill | **57 GB USB, auto-backfill — closed** (§16.3c) | ~~M~~ **done**, 27.4 % → 99.8 % gap-fill |
 | Fleet updates | weekly remote push | none | **M** — IoT Jobs + A/B partitions |
-| Camera discovery | hundreds of brands, auto-onboarded | ONVIF WS-Discovery + a local admin GUI (§16.2.1) do discover → register → control end-to-end | **done** (a camera's IP changing after onboarding still needs a manual re-scan — **S** if self-healing matters) |
+| Camera discovery | hundreds of brands, auto-onboarded | ONVIF WS-Discovery + a local admin GUI (§16.2.1) do discover → register → control end-to-end, and follow a camera to a new IP | **done** |
 | Local HDMI display | up to 4K live wall | none | **S** — a second GStreamer sink |
 | PTZ / talkdown | yes | command topic only | **M** — ONVIF PTZ, reverse audio |
 | Health monitoring | per-camera status | none | **S** — shadow reporting |
@@ -2246,19 +2064,43 @@ at `http://<pi-ip>:8080`. It does three things the cloud client structurally can
   from MediaMTX's own HLS output (no cloud round trip) so you can actually see what a
   camera is pointed at before deciding to register it.
 
+**Camera paths come from the registry at every MediaMTX start.** MediaMTX doesn't persist
+API changes, so `mediamtx.yml` has no camera paths, and `adapter/sync_mediamtx_paths.py`
+(`ExecStartPost=` of `kvs-mediamtx.service`) re-adds each passthrough camera's path from its
+registry `rtspUrl` after every start, crash restarts included, or from a 0600 cache while
+AWS is unreachable. It never deletes a path (FoundAndFixed.md #32, #31).
+
 **Re-scanning an already-registered camera** is handled explicitly rather than left to
 either silently duplicate the entry or hard-fail: the GUI cross-checks scan results
-against the registry by ONVIF host and, for a match, offers "Re-register" instead of
+against the registry — by the camera's WS-Discovery identity first, then by ONVIF host —
+and, for a match, offers "Re-register" instead of
 "Register" — which updates the MediaMTX path's source and the registry row (credentials,
 stream URI) but deliberately does **not** touch systemd, since `cam-01`/`cam-02` predate
 the `kvs-cam@.service` template and re-running the provisioning script against them would
 start a second, conflicting producer rather than updating the first.
 
-**What's still genuinely missing**, and the honest remainder of the gap-analysis row: none
-of this is triggered automatically. If a camera's IP changes (no DHCP reservation), its
-registry entry and MediaMTX path both go stale until someone notices the feed died,
-opens the admin GUI, rescans, and clicks Re-register — there's no background health
-check or scope-based re-matching that would catch and fix this on its own.
+**What was missing here, and is now closed (2026-09).** Nothing followed a camera to a new
+address. If its IP changed (no DHCP reservation), the registry entry and MediaMTX path
+went stale until someone noticed the dead feed, rescanned and clicked Re-register.
+`adapter/rematch_cameras.py` now does that every 5 minutes (`kvs-camera-rematch.timer`).
+It keys on the **WS-Discovery endpoint reference**, not on scopes. That is the
+`urn:uuid:…` each ONVIF device announces; on this project's camera it is
+`urn:uuid:1419d68a-1dd2-11b2-a105-F00006108447`, its tail evidently MAC-derived. It stays
+the same when the address changes, and scopes are too generic to tell two cameras of the
+same model apart. The admin GUI stores it as `onvifEndpointRef` at registration. Cameras
+registered earlier get it learned the first time they answer a scan at their registered
+address. When the identity turns up at another address, the timer updates `onvifHost` and
+the host part of `rtspUrl` in the registry, conditional on the row still showing the old
+address, so a GUI Re-register in between wins. Then it patches the MediaMTX path. If AWS
+is down, it still moves the path and the local cache, and retries the registry on the
+next run. It never guesses: an identity on two rows, or an address another camera
+already has, is logged and skipped, and a camera that doesn't answer is left alone (it
+may just be off). Verified against the real camera by giving the registry a stale
+address (`.50`): one run found it at `.67` by identity and moved both the registry row
+and the path, with credentials and stream path unchanged.
+
+A DHCP reservation is still the better fix where the router allows it. This handles the
+case where it doesn't, or was forgotten.
 
 Credential storage is deliberately phased, not fully solved: today the registry stores
 ONVIF/RTSP passwords as a plain DynamoDB attribute (Phase 1), with SSM Parameter Store
@@ -2273,27 +2115,20 @@ redesign when it happens.
 loopback sources: `cam-01` (PW310 USB, transcoded) and `cam-02` (a real ONVIF/RTSP IPC
 discovered via WS-Discovery, §16.3b). Each has its own KVS stream, systemd unit
 (`kvs-cam01.service`/`kvs-cam02.service` — note no hyphen before the digit, unlike the
-`cam-01`/`cam-02` identifier used everywhere else; a naming mismatch that once made
-`agent.py` silently no-op on `cam-02` commands, see below), an allow-list entry across all
+`cam-01`/`cam-02` identifier used everywhere else — FoundAndFixed.md #7), an allow-list entry across all
 four API routes (`/hls`, `/cmd`, `/clips`, `/clips/record`), and its own panel in the
 browser client with independent live view, recording, and clip history. This is not the
 N-channel saturation experiment in §16.6 — that's still open — but it proves the
 per-channel plumbing (naming convention, IAM scoping, MQTT routing) holds up with a second
 *real* source, not just a second config entry.
 
-One bug worth keeping as a cautionary note: `agent.py` built the systemd unit name as
-`f"kvs-{camera}.service"`, which for `camera="cam-02"` produced `kvs-cam-02.service` — a
-unit that doesn't exist. `systemctl start`/`stop` against an unknown unit exits non-zero,
-but the code called it with `check=False`, so the failure was swallowed and the API
-returned success while doing nothing. Caught by checking `journalctl` and seeing the wrong
-unit name in the logged `sudo` command, not by any error surfacing on its own — a reminder
-that `check=False` on a command whose success you're about to report to a caller is worth
-a second look.
+Unit names are built in exactly one place, `camera_control.unit_name()` — two naming
+bugs made Start/Stop silently do nothing (FoundAndFixed.md #7, #37).
 
 **(b) Pass-through instead of transcode — done, measured twice.** `cam-02`'s ONVIF camera
 streams genuine H.264 over RTSP, so its pipeline is pure passthrough (`rtspsrc !
 rtph264depay ! h264parse ! kvssink`, no encode stage at all) — measured **~3.5% CPU**.
-`cam-01` must transcode (USB webcam, MJPG only) and went through two measured states:
+`cam-01` must transcode (USB webcam delivering MJPG, §2.1) and went through two measured states:
 
 | `cam-01` pipeline | JPEG decode | colorspace convert | H.264 encode | CPU |
 |---|---|---|---|---|
@@ -2327,14 +2162,15 @@ ONVIF/IR hardware at all. Two findings worth keeping:
 
 - The WSDL's `Extension` block leaks OEM lineage even when the response body doesn't:
   this camera's firmware namespaces itself `xmlns:tnshik="http://www.hikvision.com/2011/
-  event/topics"`, i.e. it's a Hikvision-derived rebrand. That normally means a richer
-  proprietary ISAPI is available (`/ISAPI/Image/channels/1/supplementLight` — independent
-  IR-LED control with brightness/schedule, distinct from the IR-cut filter) — worth
-  checking for on any "generic ONVIF" camera before assuming standard ONVIF is the ceiling.
-- On this particular rebrand, ISAPI 404s — disabled or moved by the OEM. Standard ONVIF's
-  `IrCutFilter` was the only lever that actually worked. Worth stating plainly: vendor
-  extensions are opportunistic, not guaranteed, so the standards-based fallback is worth
-  building and shipping first, with the richer vendor path as a strict bonus if reachable.
+  event/topics"`. Later probing found the lineage **mixed** — Hikvision event namespace
+  and SDK port, a Dahua-style web bundle (`Camera-Features.md` §4.1). A Hikvision lineage
+  would normally suggest a richer ISAPI (`/ISAPI/Image/channels/1/supplementLight` —
+  independent IR-LED control), worth checking on any "generic ONVIF" camera.
+- On this camera, ISAPI requests return an 817-byte stub — but so does *every*
+  unauthenticated path, real or not, so that proves nothing either way; ISAPI's status is
+  **untested**, not "disabled" (`Camera-Features.md` §8). Standard ONVIF's `IrCutFilter` was
+  the lever that demonstrably worked. Vendor extensions are opportunistic, so the
+  standards-based fallback is worth shipping first.
 
 **(c) Durable outage buffering — done, and measured.** This was the feature the product
 markets hardest and the one this prototype most conspicuously lacked. **`OUTAGE.md` is the
@@ -2421,7 +2257,8 @@ If you only have a few evenings beyond the MVP, do these three and stop:
 1. Switch to motion-triggered recording — cheapest possible change, and with the frame
    rate policy already in place (§2.7) it completes the bandwidth-economics story that
    drives the product's defaults.
-2. Add `splitmuxsink` local recording with an S3 backfill uploader (16.3c).
+2. Local recording with S3 backfill for outages (16.3c) — **done**, via MediaMTX recording
+   rather than `splitmuxsink` (`OUTAGE.md`).
 3. Parameterise to four channels and publish the saturation measurement (§16.6).
 
 That covers the three things a reviewer from this industry will actually ask about:
@@ -2464,15 +2301,12 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-systemctl enable --now kvs-cam@cam-01 kvs-cam@cam-02 kvs-cam@cam-03
+systemctl enable --now kvs-cam@cam01 kvs-cam@cam02 kvs-cam@cam03   # instance = MediaMTX path name, not cameraId
 systemd-cgtop -1        # per-channel CPU and memory, via cgroups, for free
 ```
 
-The unit above is the methodology sketch. The installed version (`LAUNCH.md` A8) also
-carries `User=` and the `GST_PLUGIN_PATH`/`LD_LIBRARY_PATH` `Environment=` lines that
-`kvs-cam01.service` has (§7.1) — without them the producer runs as root and can't find
-`kvssink`. `EnvironmentFile=` only supplies `CAMERA_ID`/`MEDIAMTX_PATH`
-(`provision-camera.sh`).
+The unit above is the methodology sketch; the installed version (`LAUNCH.md` A8) adds
+`User=` and the `GST_PLUGIN_PATH`/`LD_LIBRARY_PATH` lines (FoundAndFixed.md #30).
 
 **One process per channel, not one process with N pipelines.** The cost is ~30–50 MB RSS
 each. The return: a hung RTSP source or wedged encoder on one camera cannot take down the
@@ -2480,7 +2314,8 @@ other fifteen, `Restart=on-failure` gives per-channel supervision you didn't wri
 `CPUAccounting` yields clean per-channel measurements without chasing PIDs. Any commercial
 adapter is built this way for the same reason.
 
-The agent then drives `systemctl start kvs-cam@<id>` per channel and reports a per-channel
+The agent then drives `systemctl start kvs-cam@<path>` per channel (via
+`camera_control.unit_name()`, FoundAndFixed.md #37) and reports a per-channel
 array in its shadow — the same shape as the health frame a single-channel design would
 carry in its heartbeat (§16.7).
 
@@ -2627,9 +2462,12 @@ preference for either.
 
 ## 17. Migration path: moving the archive from KVS to S3
 
-Cost model and justification in **`COSTS.md`**. Summary: KVS charges $0.0085 per GB
-ingested and S3 charges nothing for ingress, which at 24/7 recording is $4.13 versus
-$0.00 per camera per month. This section is the step-by-step migration.
+Cost model and justification in **`COSTS-1.4.md`**. Summary: KVS charges $0.0085 per GB
+ingested and S3 charges nothing for ingress — at 24/7 recording $2.754 per Mbps per
+camera-month versus $0.00 (COSTS-1.4 §2.1; ~$1.72 for `cam-01`, ~$3.34 for `cam-02`'s main
+stream). This section is the step-by-step migration. **Not built.** Its M1/M3 spool design
+was also the first outage-buffering sketch; that job was done differently (§16.3c,
+`OUTAGE.md`).
 
 **The migration is additive, not a replacement.** At every step both paths run
 simultaneously from one capture, so nothing is ever broken and the two can be compared
@@ -2688,12 +2526,15 @@ gst-launch-1.0 -v \
                  send-keyframe-requests=true async-finalize=true
 ```
 
+> **Superseded for outage buffering** (§16.3c). And if audio is ever enabled, MPEG-TS here
+> would record it silently mute — G.711/LPCM don't fit it (FoundAndFixed.md #19); use fMP4.
+
 `max-size-time` is nanoseconds — 60 s. `splitmuxsink` cuts only on keyframes, so with the
 2 s IDR period from §2.5 segments land within 2 s of target. `async-finalize=true` stops
 the pipeline stalling while a segment is closed.
 
 **Why 60 s and not 6 s:** at $0.005 per 1,000 PUTs, 6-second segments cost $2.16/month in
-requests against $0.75 of storage — requests exceed storage 3×. See `COSTS.md` §6.2. This
+requests against $0.75 of storage — requests exceed storage 3×. See `COSTS-1.4.md` §7.5. This
 is the single most important parameter in the whole migration.
 
 **Checkpoint M1:** `ls -l /var/spool/vms/cam-01/` shows a new ~60 s `.ts` file each
@@ -2958,7 +2799,7 @@ aws ce get-cost-and-usage --time-period Start=2026-08-01,End=2026-08-31 \
 ```
 
 Tag everything `project=vms-demo`. Put measured-versus-modelled in the README next to the
-`COSTS.md` table.
+`COSTS-1.4.md` table.
 
 | Effort | Phase | Time |
 |---|---|---|
@@ -3072,8 +2913,9 @@ independently. At this point KVS is optional in the design rather than load-bear
 Server-side packaging (~300 lines you now own), dual producer/server timestamps (store
 both yourself), fragment-level metadata, sub-10-second live from the archive path, and
 the guarantee that someone else maintains the packager. Roughly two to four weeks of
-production engineering, traded for a 4.7× reduction in per-camera COGS that breaks even
-near 700 cameras over a year (`COSTS.md` §7).
+production engineering, traded for a ~4× reduction in per-camera recording cost at
+archive bitrates, with a break-even of 617–1,923 camera-years depending on camera mix,
+lighting and codec (`COSTS-1.4.md` §7.3, §8).
 
 ---
 
@@ -3121,8 +2963,9 @@ arecord -l
 arecord -L | grep -i -B1 -A2 PW310
 ```
 
-The PW310 comes up as `hw:CARD=Webcam,DEV=0`. Check what it will actually give you
-before designing a pipeline around it:
+The PW310 comes up as `hw:CARD=Webcam,DEV=0`. (The pipeline no longer names it: since
+2026-09 `detect-hw.sh` finds the card on the webcam's own USB device — `LAUNCH.md` A9.)
+Check what it will actually give you before designing a pipeline around it:
 
 ```bash
 arecord -D hw:CARD=Webcam,DEV=0 --dump-hw-params -d 1 /dev/null
@@ -3176,16 +3019,8 @@ The rule that follows:
 > **Audio frame duration must exceed the video frame interval.**
 > At 15 fps that is 66.7 ms, so `1024/rate > 0.0667` → **rate below ~15.4 kHz**.
 
-Measured on `cam-02` (15 fps video), changing nothing but the sample rate:
-
-| Audio rate | Frame duration | Rejects | Audio delivered (of 32 kb/s sent) |
-|---|---|---|---|
-| 48 kHz | 21 ms | **1.65 /s** | 15 kb/s — over half lost |
-| 8 kHz (native) | 128 ms | **0** | 27.8 kb/s |
-
-The failure is nasty because it is partial and silent: fragments still persist, both
-tracks still appear in the HLS manifest, `ffprobe` is happy, and the only visible symptom
-is that the audio bitrate is about half what you asked for.
+Getting this wrong fails partially and silently: at 48 kHz, cam-02 lost more than half
+its audio while fragments, manifest and `ffprobe` all looked healthy (FoundAndFixed.md #15).
 
 `cam-01` runs 16 kHz (64 ms frames) and also measures zero rejects — marginally inside
 the limit rather than comfortably. **If you change a camera's video frame rate, recount
@@ -3217,18 +3052,8 @@ src. ! application/x-rtp,media=audio ! queue
 
 **`cam-01`** is split across two scripts, and *where* the AAC encode happens is not a
 matter of taste. The obvious design — encode AAC in `publish-cam01.sh`, pass it through
-in `stream-cam01.sh`, one encode instead of two — **does not work**. `rtspclientsink`
-payloads AAC as MPEG-4 **LATM**, and the LATM round-trip re-wraps the
-AudioSpecificConfig: it arrives as the 4-byte `14081fe0` (`channelConfiguration=0` plus
-trailing config bits) rather than the canonical 2-byte form. `kvssink` ingests it without
-complaint and KVS then refuses to serve it:
-
-```
-InvalidCodecPrivateDataException: AAC CPD must be of length 2 or 5, but was 4
-```
-
-`rtspclientsink`'s payloader is a **per-pad property**, so it cannot be forced to
-MPEG4-GENERIC from `gst-launch` syntax. The fix is to not send AAC over RTSP at all:
+in `stream-cam01.sh` — **does not work**: AAC over RTSP becomes LATM, which KVS ingests and
+then refuses to serve (FoundAndFixed.md #16). So AAC is never sent over RTSP:
 
 - `publish-cam01.sh` sends **LPCM** into MediaMTX
   (`audio/x-raw,rate=16000,channels=1,format=S16BE`) — 256 kbps over loopback, which
@@ -3388,7 +3213,7 @@ ffmpeg -i /tmp/s.mp4 -vn -af astats=metadata=1 -f null - 2>&1 | grep -E 'RMS|Fla
 #    delivered kb/s should match the configured bitrate; about half means §18.3
 
 # 5. finally, a browser -- MSE is stricter than ffmpeg, and has caught
-#    two regressions in this project that ffmpeg passed
+#    two regressions in this project that ffmpeg passed (FoundAndFixed.md #13, #16)
 ```
 
 ---
@@ -3400,7 +3225,8 @@ Evidence gathered from the public Videoloft demo (`app.videoloft.com`) using Fir
 DevTools → Network, August 2026. **One demo camera, one session.** Treat as indicative,
 not as documentation; vendors change implementations without notice.
 
-Value of this appendix: several parameters in `COSTS.md` were derived from cost
+Value of this appendix: several parameters in the cost model (then `COSTS-1.3.md`, now
+`COSTS-1.4.md`) were derived from cost
 arithmetic before this capture existed. Some were confirmed, one was corrected, and one
 turned out to be unobservable. Recording all three is more honest — and more useful — than
 recording only the hits.
@@ -3544,10 +3370,10 @@ against 94 MB of media.
 |---|---|
 | Time index in the key/URL (§17 M2) | **Confirmed** — epoch seconds in the path |
 | Compact index rather than per-segment listing (§17 M4) | **Confirmed** — `sessions` endpoint |
-| Not KVS (`COSTS.md` §5) | **Confirmed** — custom packager, no KVS headers or URL shape |
+| Not KVS (`COSTS-1.4.md` §6.1) | **Confirmed** — custom packager, no KVS headers or URL shape |
 | Pass-through, not transcode (§16.3b) | **Confirmed** — `x-vl-transcoded: false` |
-| 1.5 Mbps for 2 MP @ 10 fps | **Corrected** — measured 0.9 Mbps (`COSTS.md` §3.1) |
-| 60 s segments (`COSTS.md` §6.2) | **Unobservable** — read path decoupled from storage |
+| 1.5 Mbps for 2 MP @ 10 fps | **Corrected** — measured 0.9 Mbps (`COSTS-1.4.md` §4.3) |
+| 60 s segments (`COSTS-1.4.md` §7.5) | **Unobservable** — read path decoupled from storage |
 | Static objects + generated HLS playlists (§17 M4) | **Differs** — dynamic range API for archive |
 | fMP4/CMAF (§17 M6) | **Split** — MPEG-TS for archive, **fMP4 for live** |
 | Separate live and archive paths (§17 M0) | **Confirmed** — and more cleanly separated than proposed |
@@ -3698,7 +3524,7 @@ What survives, and is sufficient:
 - Grid tiles are visibly ~200 px and toggle between stills and video, so preview streams
   are materially smaller than the 0.9 Mbps archive stream.
 - Viewing cost is dominated by egress at ~$0.09/GB regardless of architecture
-  (`COSTS.md` §4.2), so **any** reduction in preview bitrate translates directly and
+  (`COSTS-1.4.md` §5.2), so **any** reduction in preview bitrate translates directly and
   linearly into reduced viewing cost.
 - The one measurement that is sound: a 53-minute *playback* session of one camera moved
   373 MB ≈ $0.034 of egress (§19.5), against ~$0.74/month to record that camera on S3.
@@ -3716,11 +3542,11 @@ tiles actually streaming (count distinct part URLs, not the camera list). Filter
 
 §9 opens with "the hot-tier/cold-tier split from the KVS discussion, implemented" — this
 appendix is that discussion, spelled out, since it's assumed knowledge at that point
-rather than explained there. Numbers below are from `COSTS.md` §2 and §9.
+rather than explained there. Numbers below are from `COSTS-1.4.md` §2 and §10.
 
 ### 20.1 KVS Hot Tier — what this project actually stores video in
 
-The only KVS storage tier this pipeline uses (`cam-01`, 24h retention). Three separate
+The only KVS storage tier this pipeline uses (every camera's stream, 24h retention). Three separate
 cost dimensions:
 
 | Dimension | Rate | When it's charged |
@@ -3738,7 +3564,7 @@ reason §9 and §17 exist.
 
 ### 20.2 KVS Warm Tier — a real feature this project deliberately doesn't use
 
-Excluded from the cost model on purpose (`COSTS.md` §9), not an oversight:
+Excluded from the cost model on purpose (`COSTS-1.4.md` §10), not an oversight:
 
 - Priced **per 1,000 fragments persisted**, not per GB
 - **30-day minimum retention**, billed regardless of when you actually delete
@@ -3772,8 +3598,8 @@ Not a hypothetical — this is the real flow §9 implements:
 
 1. Camera → `kvssink` → **KVS hot tier** (§5–§6) — live viewing happens here (§8)
 2. An event fires → `clip-to-s3` Lambda (§9.2) calls `GetClip`
-   (`FragmentSelectorType: PRODUCER_TIMESTAMP`) to pull a ~12–33 second window **out of**
-   KVS
+   (`FragmentSelectorType: PRODUCER_TIMESTAMP`) to pull a 45-second window
+   (ts−12 s to ts+33 s) **out of** KVS
 3. The clip lands in **S3 Standard** (§9.1) — durable, cheap to keep, no further KVS
    charges accrue on it from this point on
 4. The bucket's lifecycle rule tiers it down again, *inside* S3:
@@ -3790,8 +3616,8 @@ does that job for less.
 
 §9 applies this pattern to **short event clips** (seconds, triggered, low volume). §17
 applies the identical idea to the **entire continuous archive** (24/7, unbounded volume) —
-because at that scale, the KVS ingest charge alone (§1.2's arithmetic: $4.13/month per
-camera at continuous 24/7 vs $0.00 ingress to S3) dominates the bill regardless of what
+because at that scale, the KVS ingest charge alone (§1.2's 1.0 Mbps: ~325 GB, ~$2.76 per
+camera-month at continuous 24/7, vs $0.00 ingress to S3) dominates the bill regardless of what
 happens to storage or reads. §9 is the small, safe version of the argument; §17 is the
 full one. Neither replaces KVS entirely — both keep it for what it's actually good at
 (live, low-latency, random-seek access), and route only what benefits from S3's

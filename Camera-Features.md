@@ -413,8 +413,8 @@ Fault: The [action] cannot be processed at the receiver.
 ```
 
 So there is no SD-card recording to pull from. This matters because it rules the camera
-out as a solution to the durable-outage-buffering gap (guide §16.3c) — that still needs
-the local `splitmuxsink` ring buffer on the Pi.
+out as a solution to the durable-outage-buffering gap (guide §16.3c) — which the Pi now
+closes itself, with MediaMTX recording to a USB stick (`OUTAGE.md`).
 
 **Hikvision ISAPI — status genuinely unknown, not "unavailable".** `/ISAPI/...` endpoints
 return the OEM's 817-byte soft-404 page, and an earlier revision concluded from that they
@@ -689,13 +689,13 @@ does or does not deliver the cost win it promises.
 
 `clip_to_s3` reaches **12 seconds before** the trigger. KVS can only return footage it
 already ingested, so pre-roll requires the producer to have been running before the event.
-That collides with §1.2's rule ("never leave `kvs-cam0N.service` running unattended").
+That collides with guide §1.2's rule ("never leave `kvs-cam0N.service` running unattended").
 
 | Option | Pre-roll | Ingest cost | Note |
 |---|---|---|---|
 | Producer runs while a detection mode is active | yes | unchanged — 24/7 | evidence trail, no saving |
 | Event starts the producer, stops after N s idle | **lost** | only during events | KVS also needs seconds to spin up |
-| Local ring buffer (`splitmuxsink`, guide §16.3c) feeds the clip | yes | only during events | most work; converges with the outage-buffering gap |
+| Local ring buffer feeds the clip | yes | only during events | the ring buffer now exists — MediaMTX's rolling pre-roll for outage buffering (`OUTAGE.md`, guide §16.3c) — but only while the producer runs, so reusing it for events needs a separate arming rule |
 
 `COSTS-1.4.md` §7.2 puts numbers on why this decision matters more than anything else in
 this plan: duty cycle is worth **up to ~20×**, the largest lever in that document. At a 5 %

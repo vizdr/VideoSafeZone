@@ -15,23 +15,34 @@ Gateway — with **zero inbound ports opened** on the home router. The architect
 written for someone arriving cold. It summarises; it is never the source of truth.
 
 **`Demo-AWS-Video-revCosts4.md` is the canonical, actively-maintained build guide and the
-single source of truth for *why* things are built the way they are** — it's a narrative
-log of the real build, including bugs hit and how they were diagnosed, updated
-continuously as the system evolves. `LAUNCH.md` is the short operational runbook (what to
+single source of truth for *why* things are built the way they are** — a narrative log
+of the real build and its design decisions, updated continuously as the system evolves.
+**`FoundAndFixed.md` holds every defect found in this project** — symptom, cause,
+diagnosis, fix — as permanently numbered entries; the other docs keep only the rule a bug
+left behind plus a `FoundAndFixed.md #N` reference. `LAUNCH.md` is the short operational runbook (what to
 actually run, in order, assuming the guide has already been followed once) — check it
 first for "how do I start/stop/verify this." Its Part A is also the fresh-Pi setup
 checklist (SDK build with its patches, venv, MediaMTX binary, AWS CLI, device
-certificate, systemd unit files), each step with a command that proves it worked. `AUDIO.md` records how optional per-camera audio was designed and built (guide §18 is the
-canonical reference; `AUDIO.md` keeps the reasoning, the two silent bugs that shaped it,
-and the claims that were withdrawn). `OUTAGE.md` is the working record for durable outage
+certificate, systemd unit files, optional USB outage-buffer stick), each step with a command
+that proves it worked. `AUDIO.md` records how optional per-camera audio was designed and built (guide §18 is the
+canonical reference; `AUDIO.md` keeps the reasoning, the rules its two silent bugs left
+(FoundAndFixed.md #15, #16), and the claims that were withdrawn). `OUTAGE.md` is the working record for durable outage
 buffering (guide §16.3c) — design, measurements and open questions — and folds into
-§16.3c when that work completes; it is authoritative for that feature in the meantime. `Demo-AWS-Video-MCh-15.md`, `COSTS-1.3.md`,
+§16.3c when that work completes; it is authoritative for that feature in the meantime.
+`COSTS-1.4.md` is the cost model and authoritative for any bitrate or dollar figure;
+`Camera-Features.md` is the verified-vs-advertised inventory of the ONVIF camera (`cam-02`).
+`Demo-AWS-Video-MCh-15.md`, `COSTS-1.3.md`,
 and `NETWORK.md` are earlier/companion material and may be stale relative to the current
 guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
 demo is modeled on. **When in doubt about current architecture or "why is it done this
 way," read `Demo-AWS-Video-revCosts4.md` (or grep it for the relevant §-number) before
-guessing from code alone** — most non-obvious decisions are explained there with the
-real failure that motivated them.
+guessing from code alone** — most non-obvious decisions are explained there, and the
+real failure that motivated one is the `FoundAndFixed.md` entry it cites.
+
+**When you find or fix a bug, record it in `FoundAndFixed.md`:** append a new entry
+(never renumber or reuse a number), add it to the overview table, and cite it as
+`FoundAndFixed.md #N` wherever the resulting rule is documented — don't retell the story
+in the guide, LAUNCH, README or the feature docs.
 
 There is no build system, package manifest, or automated test suite. Verification is
 done live, against the running Pi and AWS account — see "Verifying changes" below.
@@ -77,8 +88,8 @@ aws s3 cp client/index.html s3://vms-demo-client-596633517506/index.html \
   --content-type text/html --cache-control "no-cache, must-revalidate"
 ```
 Served at **https://dugyd3kkt36pw.cloudfront.net** (CloudFront + OAC, guide §8.5.1). The
-`--cache-control` flag is required and now does double duty: it prevented S3
-static-website stale-client incidents, and it makes CloudFront revalidate rather than
+`--cache-control` flag is required and now does double duty: it prevents stale clients
+after a deploy (FoundAndFixed.md #11), and it makes CloudFront revalidate rather than
 serve a cached copy, so an upload is live immediately (`x-cache: RefreshHit`). Drop the
 header and you also need `aws cloudfront create-invalidation --distribution-id
 E1B12167KKII6B --paths '/*'`.
@@ -95,23 +106,24 @@ actual KVS producers that cost money while running.
 **User units** (`~/.config/systemd/user/`, `systemctl --user`, no sudo): `kvs-mediamtx`,
 `kvs-camera-init`, `kvs-camera-publish`, `kvs-agent`, `onvif-admin`,
 `kvs-event-watcher` (ONVIF detection → clips), `kvs-outage-buffer` +
-`kvs-outage-uploader` (durable outage buffering, `OUTAGE.md`).
+`kvs-outage-uploader` (durable outage buffering, `OUTAGE.md`), and the
+`kvs-camera-rematch.timer` oneshot (follows ONVIF cameras to a new IP).
 
 A unit in one manager **cannot** `Requires=`/`After=` a unit in the other — they're
-independent systemd instances. (A templated system unit once declared
-`Requires=kvs-mediamtx.service`, a user unit, and failed with "Unit not found" — see
-guide §16 for the fix, which was simply to drop the cross-manager dependency.)
+independent systemd instances; a cross-manager `Requires=` fails with "Unit not found"
+(FoundAndFixed.md #12).
 
 Unit files are **not in git**. `LAUNCH.md` A8 generates all of them, writing this clone's
 literal absolute paths into `ExecStart=`/`WorkingDirectory=`/`Environment=`. systemd
 never reads `.bashrc` and doesn't expand `$VMS_HOME` or `~`. When the clone moves, re-run A8.
 
-Full launch sequence, order, and startup gotchas: `LAUNCH.md` Part B.
+One-time launch (enables everything to start at boot), order and startup gotchas: `LAUNCH.md` Part B; after a reboot just verify, Part C.
 
 ### Paths: never hardcode the clone location
 
 The repo has lived at more than one path (`~/MyProjects/VMS`, now
-`~/Projects/VideoSafeZone`), and hardcoded `/home/...` paths broke on the move. Code in
+`~/Projects/VideoSafeZone`), and hardcoded `/home/...` paths broke on the move
+(FoundAndFixed.md #25). Code in
 `adapter/` resolves the root as `$VMS_HOME` if set, else from its own location. Python
 modules in `adapter/` use
 `os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`.
@@ -120,6 +132,29 @@ Scripts in `adapter/bin/` use
 Derive the venv's `pythonX.Y` directory from `sys.version_info` rather than spelling it
 out. Follow the same pattern in new code; don't rely on `VMS_HOME` being exported, since
 systemd units don't have it.
+
+The same goes for **deployment identity** (AWS region, IoT Thing name, role alias, IoT
+credential/data endpoints, evidence bucket, and MQTT topics derived from the Thing name).
+It lives only in `/etc/adapter/adapter.env` (template `config/adapter.env.example`,
+installed by `LAUNCH.md` A7). Python code reads it via `import config`
+(`config.AWS_REGION`, `config.TOPIC_PREFIX`, …); bash code does
+`source "${VMS_HOME}/adapter/bin/adapter-config.sh"`. Environment variables override the
+file, and a missing key is a hard error, never a silent default — except where a script
+is designed to degrade (e.g. `camera-audio.py` falls back to `AUDIO=off`), in which case
+the config load belongs inside its `try`. Never write an endpoint, region or Thing name
+into code again. Cloud-side code (`cloud/lambda/`, `client/index.html`) is configured
+separately, through Lambda environment variables and the client's own constants.
+
+**Local hardware is detected, not named.** No `/dev/video*`, `/dev/v4l/by-id/<model>`,
+`hw:CARD=<name>` or mountpoint literals in scripts. `adapter/bin/detect-hw.sh` provides
+`camera_setup <mediamtx-path>` (sets `CAM`), `alsa_card_for_video` (the mic on the same
+USB device, via sysfs), `buffer_mount` (by `LABEL=vms-buffer`) and `isolated_cpus`.
+Detection must never guess: zero or several matches is an error. Per-camera tuning and
+selectors (`CAM_MATCH`, `CAM_DEVICE`, `CAPS`, `V4L2_*_CTRLS`) go in
+`/etc/adapter/cameras/<path>.env` (template `config/cameras/cam01.env.example`), with
+the current tuning as defaults in the script. Hardware choice must stay local, never in
+the DynamoDB registry: cam-01 has to start while AWS is unreachable.
+`detect-hw.sh --print` shows what would be used.
 
 ### Verifying changes
 
@@ -133,29 +168,35 @@ ffprobe "http://127.0.0.1:8888/cam01/index.m3u8"             # MediaMTX's own lo
 ```
 When changing anything in a GStreamer pipeline (`adapter/bin/*.sh`), don't stop at "no
 pipeline errors and CPU/logs look right" — decode an actual frame and look at it
-(`ffmpeg -i <url> -frames:v 1 out.png`, then view it). Two real regressions this project
-shipped (a corrupted-looking probe that was actually a probing artifact, and a genuinely
-wrong H.264 profile that rendered black only in a browser) were only caught this way —
-CLI tools like `ffmpeg`/`ffprobe` are far more tolerant of malformed streams than a
+(`ffmpeg -i <url> -frames:v 1 out.png`, then view it). A wrong H.264 profile that rendered
+black only in a browser was caught this way (FoundAndFixed.md #13), and so was the
+reverse: a probe that looked corrupted but was only a probing artifact. CLI tools like `ffmpeg`/`ffprobe` are far more tolerant of malformed streams than a
 browser's MSE decoder, so "ffmpeg played it" is necessary but not sufficient evidence.
 
 ## Architecture
 
 ### Two independent camera pipelines converge on MediaMTX
 
-`cam-01` is a USB webcam (MJPG-only) that must be transcoded; `cam-02` (and any camera
+`cam-01` is a USB webcam that must be transcoded (it delivers MJPG; YUYV is too slow at
+720p over USB 2.0); `cam-02` (and any camera
 added later) is a real ONVIF/RTSP IP camera that passes through untouched. Both publish
 into **MediaMTX**, which is the local hub for everything downstream: it re-serves RTSP,
 exposes its own local HLS output (port 8888, LAN-reachable — used only by the ONVIF admin
 GUI's browser-side preview, never the cloud path), and exposes a control API (port 9997,
 localhost-only) used to add camera paths live without a config-file rewrite + restart
-(which would otherwise drop every other camera's connection). `cam-01`'s pipeline (`adapter/bin/publish-cam01.sh`)
+(which would otherwise drop every other camera's connection). MediaMTX doesn't persist
+API changes, so `mediamtx.yml` deliberately has **no camera paths**:
+`adapter/sync_mediamtx_paths.py` runs as `ExecStartPost=` of `kvs-mediamtx.service` and
+re-adds every passthrough camera's path from its registry `rtspUrl` after each start. When
+AWS is unreachable it uses a 0600 local cache. It never deletes a path, and it leaves a
+path alone when the source is unchanged, because patching `source` reconnects readers.
+Never put a camera address or credential back into `mediamtx.yml` (FoundAndFixed.md #31, #32). `cam-01`'s pipeline (`adapter/bin/publish-cam01.sh`)
 uses the Pi 4's hardware JPEG-decode/ISP-convert/H.264-encode blocks (`v4l2jpegdec`,
 `v4l2convert`, `v4l2h264enc` — all separate V4L2 M2M devices under `bcm2835-codec`) rather
 than software elements, for a ~2x CPU reduction; the encoder must be told `profile=high`
 explicitly, since GStreamer's `v4l2h264enc` wrapper otherwise negotiates Baseline even
 though the hardware control's own default is High, and Baseline broke browser (but not
-`ffmpeg`) playback.
+`ffmpeg`) playback (FoundAndFixed.md #13).
 
 **Audio is optional, per-camera, and off by default** (guide §18). Two registry flags gate
 it — `audioCapable` (hardware fact, set at registration) and `audioEnabled` (user choice,
@@ -169,12 +210,13 @@ The constraint that shapes all of it: **KVS's ingest and playback paths accept d
 codecs, and ingest is the permissive one.** `kvssink` takes G.711 and malformed AAC
 codec-private-data without complaint; `GetHLSStreamingSessionURL`/`GetClip` then refuse to
 serve them. So audio is always transcoded to AAC at the producer (never encoded earlier
-and passed through RTSP — `rtspclientsink` payloads AAC as LATM, which mangles the CPD),
+and passed through RTSP — `rtspclientsink` payloads AAC as LATM, which mangles the CPD;
+FoundAndFixed.md #16),
 and the sample rate is chosen against the *video frame rate* rather than for fidelity,
 because `kvssink` synthesises the DTS that GStreamer audio buffers lack from a counter
 shared with the video track. Guide §18.3 has the arithmetic; the short version is that
 audio frame duration must exceed the video frame interval, and getting it wrong silently
-loses half the audio.
+loses half the audio (FoundAndFixed.md #15).
 
 **Durable outage buffering** (`OUTAGE.md`, guide §16.3c) is also MediaMTX's job, not a
 pipeline change: it records a rolling 2-minute window to a USB stick
@@ -188,7 +230,8 @@ patching any record field rebuilds the recorder and puts a keyframe seam exactly
 Measured effect on a 5-minute outage: gap-fill 27.4% → 99.8%.
 
 A separate KVS producer process per camera (`kvs-cam01.service` / `kvs-cam02.service` /
-future `kvs-cam@<id>.service` instances) pulls from MediaMTX's RTSP and pushes to its own
+GUI-registered `kvs-cam@<path>.service` instances, named by MediaMTX path, e.g.
+`kvs-cam@cam03` — not by camera ID) pulls from MediaMTX's RTSP and pushes to its own
 Kinesis Video Stream. **This is the layer Start/Stop buttons (in either GUI) actually
 control** — toggling it does not affect MediaMTX or the camera's own feed, which keep
 running regardless. This is a common point of confusion: the "local preview" (MediaMTX
@@ -243,13 +286,24 @@ MediaMTX's path + the registry row, but deliberately never touches systemd for `
 second, conflicting producer), and local control (Start/Stop, IR mode, a live
 `systemctl is-active`-backed status column, and the local-HLS preview mentioned above).
 
+A camera's identity is its WS-Discovery endpoint reference (`onvifEndpointRef`,
+`urn:uuid:…`), not its IP address. The GUI stores it at registration and matches scan
+results by it first. `adapter/rematch_cameras.py` (`kvs-camera-rematch.timer`, every
+5 min) learns it for older rows and follows a camera to a new address: it rewrites
+`onvifHost` and the host in `rtspUrl` with a conditional registry write, then updates the
+MediaMTX path. It must never guess: duplicate identities and address clashes are skipped.
+MediaMTX's API deletes paths with HTTP `DELETE`; `POST` to the delete route is a 404
+(FoundAndFixed.md #36).
+
 Naming quirk both share: the camera identifier is hyphenated (`cam-01`, used for the KVS
 stream name, DynamoDB key, S3 key prefix, and every API field) but the MediaMTX path name
 and systemd unit suffix are not (`cam01`, `kvs-cam01.service`). `camera_control.py`'s
-`mediamtx_path_name()`/`unit_name()` are the one place this conversion happens — a naive
-per-caller `f"kvs-{camera_id}.service"` once produced a nonexistent unit name that
-`systemctl` silently no-op'd against, so route every new unit-name computation through
-these helpers rather than reimplementing the strip.
+`mediamtx_path_name()`/`unit_name()` are the one place this conversion happens, and
+`unit_name()` also knows the two unit families: `kvs-cam01.service` for cam-01/cam-02,
+`kvs-cam@cam03.service` for GUI-registered cameras (it checks
+`/etc/adapter/channels/<path>.env`). Both families were once missed, and `systemctl`
+silently no-op'd each time (FoundAndFixed.md #7, #37). Route every unit-name computation
+through these helpers.
 
 ### Cost is a first-order design constraint, not an afterthought
 

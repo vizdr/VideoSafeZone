@@ -67,7 +67,7 @@ Every bitrate figure this document relies on, with the conditions under which it
 taken. Method throughout: 60-second `ffmpeg -c copy` capture, video payload only, bytes
 × 8 ÷ actual duration — no re-encode, and no reliance on RTSP's unreliable live bitrate
 metadata. Audio (G711, present on both `cam-02` profiles) is excluded, matching the
-pipeline, which discards it.
+pipeline's default (audio off); when enabled per camera it is modelled separately in §7.3a.
 
 | Stream | Config | Date | Scene / light | **Mbps** |
 |---|---|---|---|---|

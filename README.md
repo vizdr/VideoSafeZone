@@ -106,14 +106,12 @@ The numbers this project exists to produce. Method and caveats in the linked doc
 | **Detection false positives** | Zero across 9.01 h of heartbeat-backed silence |
 
 Three bugs worth knowing about, because they were all silent and none was caught by
-"it ran without errors":
+"it ran without errors" — all 40 found so far are in [`FoundAndFixed.md`](FoundAndFixed.md):
 
-- `v4l2h264enc` negotiates **Baseline** H.264 even though the hardware default is High.
-  `ffmpeg` played it; browsers rendered black.
-- `kvssink` synthesises the DTS that GStreamer audio buffers lack from a counter **shared
-  with the video track**, so the wrong audio sample rate silently loses half the audio.
-- AAC sent over RTSP becomes LATM, which mangles the codec private data — KVS ingests it
-  happily and then refuses to play it back.
+- H.264 negotiated as **Baseline**: `ffmpeg` played it, browsers rendered black (#13).
+- The wrong audio sample rate silently loses half the audio, because `kvssink` shares one
+  DTS counter between tracks (#15).
+- AAC over RTSP becomes LATM: KVS ingests it, then refuses to play it back (#16).
 
 The pattern behind all three: **KVS's ingest path is more permissive than its playback
 path**, and `ffmpeg` is more permissive than a browser's MSE decoder. Decode a frame and
@@ -127,8 +125,8 @@ open a browser; "no errors" proves nothing.
 |---|---|
 | Raspberry Pi 4B | **4 GB** (what this was built on; 8 GB makes the SDK build easier) |
 | Storage | SD card for the OS, plus a **USB stick** if you want outage buffering (57 GB here) |
-| `cam-01` | AVerMedia PW310 USB webcam — MJPG only, so it must be transcoded |
-| `cam-02` | Any ONVIF/RTSP camera that emits H.264 (tested: a Hikvision-derived rebrand) |
+| `cam-01` | AVerMedia PW310 USB webcam — MJPG at 720p (YUYV only at 8 fps), so it must be transcoded |
+| `cam-02` | Any ONVIF/RTSP camera that emits H.264 (tested: an OEM rebrand of mixed Hikvision/Dahua lineage, [`Camera-Features.md`](Camera-Features.md)) |
 | Network | Wired or Wi-Fi; **no router configuration at all** |
 | OS | Raspberry Pi OS (Debian trixie), 64-bit |
 
@@ -180,7 +178,8 @@ sudo apt install -y cmake m4 git build-essential pkg-config \
   libssl-dev libcurl4-openssl-dev liblog4cplus-dev \
   gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly \
-  gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+  gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-rtsp v4l-utils       # rtspclientsink (cam-01 → MediaMTX), v4l2-ctl
 ```
 
 > `gstreamer1.0-omx-generic`, which the upstream instructions ask for, **does not exist on
@@ -193,7 +192,7 @@ so the build runs in two stages. The exact commands, with a proof for each stage
 1. **Before anything is built — patches 1 and 2.** They stop the nested OpenSSL build from
    running one compiler per core, which `-j1` and `-DPARALLEL_BUILD=OFF` don't reach, and
    from cloning OpenSSL's huge test submodules. Skip them and earlyoom kills the build
-   mid-OpenSSL: `build.log` shows a burst of `Terminated signal terminated program cc1`.
+   mid-OpenSSL (`FoundAndFixed.md` #2, #3).
 2. **Stage 1: `cmake` configure.** With `-DBUILD_DEPENDENCIES=ON` this compiles the
    dependencies and downloads the kvspic source.
 3. **Patch 3** (GCC 14 compatibility). Its file only exists after stage 1.
@@ -211,7 +210,7 @@ python3 -m venv "$VMS_HOME/venv-adapter"
 "$VMS_HOME/venv-adapter/bin/pip" install boto3 awsiotsdk onvif-zeep-async WSDiscovery flask requests lxml
 ```
 
-Proof that the venv works, and what each package is for: `LAUNCH.md` A4.
+Proof that the venv works, and what each package is for: `LAUNCH.md` A4 (the list was once incomplete, `FoundAndFixed.md` #27).
 
 **MediaMTX** — download the pinned release binary into `$VMS_HOME/mediamtx/`, extracting
 *only* the binary: the tarball's default `mediamtx.yml` would overwrite this repo's own
@@ -233,22 +232,16 @@ certificate for the existing Thing, then prove it against both AWS endpoints —
 `LAUNCH.md` A7. The AWS CLI (the operator's tool, used for that and for deploys) isn't
 in Raspberry Pi OS; install and credential it per `LAUNCH.md` A6.
 
+Which account, Thing and endpoints the adapter talks to is set in one file,
+`/etc/adapter/adapter.env`, installed from `config/adapter.env.example` (`LAUNCH.md` A7).
+
 ### 6. Optional — USB buffer for outage recording
 
-```bash
-sudo mkfs.ext4 -m 0 -L vms-buffer /dev/sdX1
-sudo mkdir -p /mnt/vms-buffer
-# fstab by UUID, with nofail so a missing stick never blocks boot:
-echo "UUID=<uuid>  /mnt/vms-buffer  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" \
-  | sudo tee -a /etc/fstab
-sudo mount /mnt/vms-buffer && sudo chown "$USER:$USER" /mnt/vms-buffer
-mkdir -p /mnt/vms-buffer/live /mnt/vms-buffer/outage
-touch /mnt/vms-buffer/.vms-buffer-ok        # sentinel: nothing arms without it
-```
-
-The sentinel is not belt-and-braces. If the stick is unplugged but the mountpoint still
-exists, recording would land on the SD card — and with tens of GB free it *fits*, which is
-worse than failing.
+An ext4 USB stick labelled `vms-buffer`, mounted at `/mnt/vms-buffer` by UUID with
+`nofail`, plus a sentinel file (`.vms-buffer-ok`) without which nothing arms — so an
+unplugged stick can never redirect recording onto the SD card. **A stick moved from
+another Pi is already formatted: don't `mkfs` it.** Step-by-step with proof: `LAUNCH.md`
+A10. Without the stick the outage units simply idle.
 
 ### 7. Start it
 
@@ -258,7 +251,8 @@ literal paths of *this* clone into each unit, since systemd doesn't expand `$VMS
 ```bash
 systemctl --user enable --now kvs-camera-init kvs-mediamtx kvs-camera-publish \
                               kvs-agent onvif-admin kvs-event-watcher \
-                              kvs-outage-buffer kvs-outage-uploader
+                              kvs-outage-buffer kvs-outage-uploader \
+                              kvs-camera-rematch.timer
 ```
 
 **A partial launch fails silently, not obviously.** Verify with `LAUNCH.md` Part C — every
@@ -280,8 +274,8 @@ ffprobe "$(aws kinesis-video-archived-media get-hls-streaming-session-url ... )"
   clips, set audio and outage buffering per camera.
 - **Local admin** — `http://<pi-ip>:8080`. Discover and register ONVIF cameras, IR
   control, local preview, live `systemctl`-backed status.
-- **Stop when finished.** `sudo systemctl stop kvs-cam01.service kvs-cam02.service` —
-  these are what cost money.
+- **Stop when finished.** `sudo systemctl stop 'kvs-cam*'` — every producer, including
+  GUI-registered `kvs-cam@camNN` instances; these are what cost money.
 
 Two systemd managers are in play and they cannot see each other: **system** units
 (`kvs-cam0N.service`, the paid producers, need `sudo`) and **user** units (everything
@@ -310,13 +304,19 @@ for a week, not a design error** — which is exactly why Start/Stop is an expli
 ```
 adapter/            on-device Python and pipelines
   agent.py            MQTT control agent (start/stop/IR)
-  camera_control.py   shared camera logic; the hyphen-stripping helpers live here
+  camera_control.py   shared camera logic; unit-name and path-name helpers live here
+  config.py           deployment identity from /etc/adapter/adapter.env
+  aws_device_creds.py short-lived AWS credentials from the device certificate
   event_watcher.py    ONVIF detection → clip triggers
   outage_buffer.py    outage supervisor (arming, capture, retention)
   outage_uploader.py  merge + backfill to S3
   mediamtx_api.py     MediaMTX control-API helper
+  sync_mediamtx_paths.py  re-adds camera paths after every MediaMTX start
+  rematch_cameras.py  follows ONVIF cameras to a new IP (timer)
+  onvif_discovery.py  WS-Discovery scan + ONVIF enrichment
   onvif-admin/        local Flask GUI
-  bin/                GStreamer pipelines + operator tools
+  bin/                GStreamer pipelines, detect-hw.sh, operator tools
+config/             templates for /etc/adapter/ (adapter.env, cameras/*.env)
 client/index.html   the cloud browser client (single file)
 cloud/lambda/       one file per Lambda
 cloud/iam/          one policy document per role
@@ -327,9 +327,10 @@ measurements/       recorded results, not prose
 
 **A naming quirk worth knowing before reading the code:** the camera identifier is
 hyphenated (`cam-01`) everywhere except MediaMTX path names and systemd unit suffixes
-(`cam01`, `kvs-cam01.service`). `camera_control.py`'s `mediamtx_path_name()` /
-`unit_name()` are the single conversion point — a naive `f"kvs-{camera_id}.service"` once
-produced a nonexistent unit that `systemctl` silently no-op'd against.
+(`cam01`, `kvs-cam01.service`, or `kvs-cam@cam03.service` for GUI-registered cameras).
+`camera_control.py`'s `mediamtx_path_name()` / `unit_name()` are the single conversion
+point — getting it wrong twice made Start/Stop silently do nothing (`FoundAndFixed.md`
+#7, #37).
 
 ---
 
@@ -337,18 +338,19 @@ produced a nonexistent unit that `systemctl` silently no-op'd against.
 
 | File | What it is |
 |---|---|
-| [`Demo-AWS-Video-revCosts4.md`](Demo-AWS-Video-revCosts4.md) | **The canonical build guide.** A narrative log of the real build, including bugs and how they were diagnosed. When in doubt about *why* something is built a certain way, read this |
+| [`Demo-AWS-Video-revCosts4.md`](Demo-AWS-Video-revCosts4.md) | **The canonical build guide.** A narrative log of the real build and the design decisions. When in doubt about *why* something is built a certain way, read this |
+| [`FoundAndFixed.md`](FoundAndFixed.md) | Every defect found so far — symptom, cause, fix — numbered; other docs cite them as `#N` |
 | [`LAUNCH.md`](LAUNCH.md) | Operational runbook — what to run, in order, and how to verify |
 | [`COSTS-1.4.md`](COSTS-1.4.md) | The cost model. Authoritative for any bitrate or dollar figure |
 | [`Camera-Features.md`](Camera-Features.md) | What the ONVIF camera actually does, marked **verified** vs *advertised* |
-| [`AUDIO.md`](AUDIO.md) | Optional audio: design, the two silent bugs, withdrawn claims |
+| [`AUDIO.md`](AUDIO.md) | Optional audio: design, the rules its two silent bugs left, withdrawn claims |
 | [`OUTAGE.md`](OUTAGE.md) | Durable outage buffering: design, measurements, open questions |
 | [`OUTBOUND-CLOUD.md`](OUTBOUND-CLOUD.md) | The outbound-only architectural thesis |
-| [`NETWORK.md`](NETWORK.md) | Network topology and the Wi-Fi/uplink trade-off |
 | [`measurements/`](measurements/) | Raw recorded results |
 
-`COSTS-1.3.md` and `Demo-AWS-Video-MCh-15.md` are superseded earlier revisions, kept for
-the history of what changed and why.
+`COSTS-1.3.md`, `Demo-AWS-Video-MCh-15.md` and its companion `NETWORK.md` (MediaMTX,
+discovery and VLAN notes from MVP planning) are earlier material, kept for the history of
+what changed and why; they may be stale against the current guide.
 
 ---
 
@@ -374,7 +376,9 @@ built in. The commands as written will fail with "already exists" against that a
 will not work against another.
 
 To rebuild: follow the guide's §3 (KVS + IAM + IoT), §6 (Lambda + API Gateway + Cognito)
-and §8 (client + CloudFront), then replace the constants at the top of
-`client/index.html`, `adapter/agent.py` and `adapter/bin/*.sh`. The policy documents in
+and §8 (client + CloudFront), then put the new account's region, Thing, endpoints and
+bucket into `/etc/adapter/adapter.env` (template `config/adapter.env.example`, its header
+has the lookup commands — `LAUNCH.md` A7) and replace the constants at the top of
+`client/index.html`. The adapter code itself holds none. The policy documents in
 [`cloud/iam/`](cloud/iam/) and [`cloud/iot/`](cloud/iot/) are reusable as-is apart from
 the account number.

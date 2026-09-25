@@ -6,8 +6,8 @@ all complete and live.
 
 Compiled 2026-09-19. **`Demo-AWS-Video-revCosts4.md` §18 is the canonical reference** —
 it was rewritten from this work and carries the operational detail. This document is the
-record of *how the design was arrived at*, including the two bugs that shaped it and the
-claims that had to be withdrawn. `COSTS-1.4.md` §7.3a is authoritative for cost.
+record of *how the design was arrived at*: the rules its two silent bugs left behind
+(their stories are `FoundAndFixed.md` #15 and #16) and the claims that had to be withdrawn. `COSTS-1.4.md` §7.3a is authoritative for cost.
 
 **Every row is marked measured or predicted.** Two predictions in this work turned out
 wrong in opposite directions (§7), which is why the distinction is kept.
@@ -34,7 +34,7 @@ Live state: `set-camera-audio` Lambda **Active**, `POST /cameras/audio` deployed
 
 | | `cam-01` | `cam-02` |
 |---|---|---|
-| Source | PW310 mic, ALSA `hw:CARD=Webcam,DEV=0` | camera's own G.711 A-law in RTSP |
+| Source | PW310 mic (detected on the same USB device; here `hw:CARD=Webcam,DEV=0`) | camera's own G.711 A-law in RTSP |
 | Over RTSP to MediaMTX | **LPCM** 16 kHz mono | G.711 A-law (untouched) |
 | AAC encode happens | at the producer | at the producer |
 | Delivered | 16 kHz AAC-LC, 32 kb/s | 8 kHz AAC-LC, ~28 kb/s |
@@ -62,8 +62,8 @@ no passthrough option even for `cam-02`**, whose audio is already compressed.
 This trap fired **three times** in this work, each time in a different disguise:
 
 1. G.711 would ingest and not play (caught by reading the docs first — §3.4)
-2. 48 kHz AAC ingested and lost half its frames silently (§4.1)
-3. LATM-wrapped AAC ingested perfectly and then refused to serve (§4.2)
+2. 48 kHz AAC ingested and lost half its frames silently (§4.1, FoundAndFixed.md #15)
+3. LATM-wrapped AAC ingested perfectly and then refused to serve (§4.2, FoundAndFixed.md #16)
 
 It is also why `ffprobe` accepting a stream proves nothing about the cloud path, and why
 the cloud path ingesting proves nothing about playback.
@@ -167,82 +167,30 @@ treat this firmware's ONVIF fields as unreliable generally.
 
 ## 4. The two bugs that shaped the design
 
-Both were silent. Both passed every check short of the specific one that caught them.
+Both were silent, and both passed every check short of the specific one that caught them.
+Their full write-ups — symptom, cause from source, measurements — are in
+`FoundAndFixed.md`; what they left behind is two design rules.
 
-### 4.1 The shared-DTS trap — sample rate is not a quality decision
+### 4.1 Sample rate is set by the video frame rate, not by quality (FoundAndFixed.md #15)
 
-**Symptom:** `cam-02` audio enabled at 48 kHz. Fragments persisted, both tracks appeared
-in the HLS manifest, `ffprobe` was happy — and **over half the audio was missing**:
-15 kb/s delivered of 32 kb/s sent, with `kvssink` logging `0x30000005` at 1.65/s.
-
-**Cause**, from `gstkvssink.cpp`, `gst_kvs_sink_handle_buffer`:
-
-```c
-} else if (!GST_BUFFER_DTS_IS_VALID(buf)) {
-    buf->dts = data->last_dts + DEFAULT_FRAME_DURATION_MS * ...;   // 40ms
-}
-data->last_dts = buf->dts;      // <-- SHARED across video AND audio
-```
-
-GStreamer audio buffers carry no DTS (audio has no reordering, so the convention is PTS
-only). `kvssink` synthesises one — from a counter **shared between tracks**. Every audio
-frame's DTS is therefore derived from the most recent *video* frame, plus 40 ms. If more
-than one audio frame falls between two video frames, the synthesised timestamps overrun
-the next real video DTS, the sequence goes backwards, and frames are rejected with
-`STATUS_CONTENT_VIEW_INVALID_TIMESTAMP`.
-
-`voaacenc` always emits **1024-sample** frames, so frame duration is `1024 / rate`:
-
-> **Audio frame duration must exceed the video frame interval.**
-> At 15 fps that is 66.7 ms, so `1024/rate > 0.0667` → **rate below ~15.4 kHz**.
-
-**measured** on `cam-02`, changing nothing but the sample rate:
-
-| Rate | Frame duration | Rejects | Delivered (of 32 kb/s sent) |
-|---|---|---|---|
-| 48 kHz | 21 ms | **1.65 /s** | 15 kb/s — over half lost |
-| 8 kHz (native) | 128 ms | **0** | 27.8 kb/s |
-
-Diagnosed by A/B-ing reject rates against a prediction, **not** by reading DTS values:
-`identity silent=false` is a no-op in this GStreamer build and `python3-gi` is not
-installed. The mechanism comes from source; the confirmation is that a prediction derived
-from it held.
-
-`cam-01` runs 16 kHz (64 ms frames) — marginally inside the limit rather than comfortably.
-**If a camera's video frame rate changes, recount the rejects:**
+`kvssink` synthesises audio DTS from a counter shared with the video track, so
+**audio frame duration must exceed the video frame interval**. `voaacenc` emits
+1024-sample frames, so at 15 fps the rate must stay below ~15.4 kHz. `cam-02` runs 8 kHz,
+`cam-01` 16 kHz (64 ms frames, marginally inside the limit, measured zero rejects). **If a
+camera's video frame rate changes, recount the rejects:**
 
 ```bash
 journalctl -u kvs-cam01.service --since "-60 s" | grep -c 0x30000005   # want 0
 ```
 
-### 4.2 The LATM codec-private-data trap — where the AAC encode must happen
+### 4.2 AAC is encoded at the producer, never sent over RTSP (FoundAndFixed.md #16)
 
-**Symptom:** `cam-01` with AAC encoded in the publisher and passed through at the
-producer — the obvious design, one encode instead of two. `kvssink` ingested it without
-complaint (0 rejects, 30 fragments/min persisted). Then:
-
-```
-InvalidCodecPrivateDataException: AAC CPD must be of length 2 or 5, but was 4
-```
-
-**Cause:** `rtspclientsink` payloads AAC as MPEG-4 **LATM**, and the LATM round-trip
-re-wraps the AudioSpecificConfig. Pulled from the live stream, `codec_data` is the 4-byte
-`14081fe0` — AAC-LC and 16 kHz correct, but `channelConfiguration=0` plus trailing config
-bits, instead of the canonical 2-byte form KVS requires.
-
-`rtspclientsink`'s payloader is a **per-pad property**, so it cannot be forced to
-MPEG4-GENERIC from `gst-launch` syntax. A caps filter after `aacparse` does not change the
-choice either (tried; MediaMTX still reported `MPEG-4 Audio LATM`).
-
-**Fix:** do not send AAC over RTSP at all. `publish-cam01.sh` sends **LPCM**
-(`audio/x-raw,rate=16000,channels=1,format=S16BE`) — 256 kbps over loopback, which never
-leaves the Pi — and `stream-cam01.sh` does `rtpL16depay ! audioconvert ! voaacenc !
-aacparse`, so `voaacenc`'s own `codec_data` reaches `kvssink` untouched. The same path
-`cam-02` already proved.
-
-**Second reason the encode belongs at the producer:** A/V sync. Capturing ALSA directly in
-the producer would be simpler and would make audio lead video by `rtspsrc`'s ~200 ms
-latency. Routing both tracks through one RTSP session gives them a single timeline.
+`rtspclientsink` turns AAC into LATM, which KVS ingests and then refuses to serve. So
+`publish-cam01.sh` sends **LPCM** into MediaMTX (loopback only) and `stream-cam01.sh`
+encodes (`rtpL16depay ! audioconvert ! voaacenc ! aacparse`), so `voaacenc`'s own
+`codec_data` reaches `kvssink`. Encoding at the producer also keeps both tracks on one RTSP
+timeline — capturing ALSA directly in the producer would make audio lead video by
+`rtspsrc`'s ~200 ms latency.
 
 ---
 
@@ -269,7 +217,7 @@ src. ! application/x-rtp,media=audio ! queue
 
 **With audio off, both pipelines are byte-for-byte the pre-audio ones.** Turning the
 setting off is a true revert, not a second code path that resembles one — which matters,
-because `cam-01`'s video chain took the `profile=high` bug to get right.
+because `cam-01`'s video chain took the `profile=high` bug to get right (FoundAndFixed.md #13).
 
 Guide §18.2 previously advised bypassing the RTSP hop entirely and going straight to
 `kvssink`. That predates MediaMTX becoming the hub; following it now would cost the local
@@ -286,7 +234,7 @@ single source of truth, both GUIs write the same row.
 |---|---|
 | `audioCapable` | hardware fact, written at registration |
 | `audioEnabled` | the user's choice, **default false** |
-| `audioDevice` | `cam-01`: `hw:CARD=Webcam,DEV=0` |
+| `audioDevice` | optional override. Unset, `publish-cam01.sh` uses the microphone `detect-hw.sh` finds on the webcam's own USB device (LAUNCH A9); `cam-01`'s row still carries `hw:CARD=Webcam,DEV=0` from before detection existed, which overrides it |
 | `audioCodec` | `PCM` / `PCMA` — picks the depayloader |
 
 `adapter/bin/camera-audio.py` prints shell-sourceable env; the pipeline scripts `eval` it
@@ -330,24 +278,10 @@ permitted, because the click is the user gesture.
 
 ### 6.4 A CSS bug worth recording
 
-The audio checkboxes rendered detached from their labels and overflowing the panel. Cause
-was not the new markup but `client/index.html`'s **pre-existing global rule**:
-
-```css
-input { display: block; margin: 0.5rem 0; padding: 0.5rem; width: 100%; box-sizing: border-box; }
-```
-
-Written for the login form's text fields, it matches every `<input>` on the page; on a
-checkbox, `width:100%` makes the box span the panel and shove the label outside. A
-`flex: none` fix did nothing, because it touches neither `width` nor `display`.
-
-The first fix attempt treated the symptom. The second only worked because the layout was
-then **rendered headlessly through Chromium** — extracting the real CSS and template,
-substituting the three states, and looking at the result — rather than reasoned about.
-
-> That rule still applies to any checkbox or radio added anywhere else in this client.
-> The real fix is scoping it to `#login input`; not done, because it changes the login
-> form's styling as a side effect of an audio feature.
+The checkboxes first rendered detached from their labels: `client/index.html`'s global
+`input { display: block; width: 100%; … }` rule, written for the login form, matches every
+input (FoundAndFixed.md #17). **It still applies to any checkbox or radio added anywhere
+else in this client**; scoping it to `#login input` is the open follow-up.
 
 ---
 
@@ -460,7 +394,7 @@ ffmpeg -i /tmp/s.mp4 -vn -af astats=metadata=1 -f null - 2>&1 | grep -E 'RMS|Fla
 #    delivered kb/s should match the configured bitrate; about half means the DTS trap
 
 # 5. finally, a BROWSER -- MSE is stricter than ffmpeg and has caught two
-#    regressions here that ffmpeg passed
+#    regressions here that ffmpeg passed (FoundAndFixed.md #13, #16)
 ```
 
 Results at delivery: `cam-01` 16 kHz AAC at exactly 32 kb/s with a 45.88 s `GetClip`;

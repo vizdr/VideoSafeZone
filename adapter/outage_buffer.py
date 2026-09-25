@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import aws_state
 import camera_control
+import config
 import mediamtx_api
 
 # --- tunables -------------------------------------------------------------------------
@@ -44,7 +45,7 @@ PREROLL_SEC = 120                # must exceed worst-case detection latency; see
 SEGMENT_DURATION = "30s"
 MIN_OUTAGE_SEC = 120             # below this KVS loses nothing; a clip would duplicate it
 PRODUCER_DISARM_GRACE_SEC = 60   # hysteresis, so a crash-looping producer doesn't disarm us
-PROBE_HOST = "a3dp4umq4qv6ul-ats.iot.eu-central-1.amazonaws.com"
+PROBE_HOST = config.IOT_DATA_ENDPOINT
 PROBE_PORT = 443
 PROBE_TIMEOUT = 2          # per address
 PROBE_BUDGET_SEC = 4       # for the whole probe, however many addresses DNS returns
@@ -87,7 +88,7 @@ def buffer_ready() -> tuple[bool, str]:
 
     `ismount` AND a sentinel file. The sentinel is not belt-and-braces: if the stick is
     unplugged but /mnt/vms-buffer still exists as a plain directory, MediaMTX writes onto
-    the SD card -- and with 25 GB free a long outage *fits*, which is worse than failing,
+    the SD card -- and with tens of GB free a long outage *fits*, which is worse than failing,
     because it puts exactly the write load the stick exists to absorb onto the card.
     """
     if not os.path.ismount(BUFFER_ROOT):
@@ -130,7 +131,7 @@ def _fetch_registry() -> dict:
     from botocore.config import Config
     from aws_device_creds import get_session
     cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
-    ddb = get_session("eu-central-1").resource("dynamodb", config=cfg)
+    ddb = get_session().resource("dynamodb", config=cfg)
     items = ddb.Table("cameras").scan()["Items"]
     return {i["cameraId"]: int(i.get("outageBufferSec", 0) or 0) for i in items}
 
@@ -453,20 +454,32 @@ def main():
     if shared["cameras"]:
         log(f"registry (from cache): {shared['cameras']}")
 
-    OUTAGE_DIR.mkdir(parents=True, exist_ok=True)
-    for orphan in sorted(OUTAGE_DIR.glob("*/state.json")):
-        try:
-            j = json.loads(orphan.read_text())
-            if j.get("status") not in ("uploaded", "done"):
-                log(f"orphan capture from a previous run: {j['outageId']} ({j.get('status')})")
-        except Exception:
-            pass
+    # Nothing may touch BUFFER_ROOT before buffer_ready() says the stick is there: without
+    # it /mnt/vms-buffer may not exist, and creating it needs root -- the supervisor used to
+    # crash-loop on a Pi with no stick instead of idling (FoundAndFixed.md #39).
+    orphans_checked = False
+    last_ready = None
 
     while True:
         try:
             registry = shared.get("cameras", {})
 
             ok, why = buffer_ready()
+            if ok != last_ready:
+                log("buffer ready" if ok else
+                    f"buffer unavailable ({why}) -- idle, recording stays disarmed until it is "
+                    f"mounted with its sentinel (LAUNCH.md A10)")
+                last_ready = ok
+            if ok and not orphans_checked:
+                OUTAGE_DIR.mkdir(parents=True, exist_ok=True)
+                for orphan in sorted(OUTAGE_DIR.glob("*/state.json")):
+                    try:
+                        j = json.loads(orphan.read_text())
+                        if j.get("status") not in ("uploaded", "done"):
+                            log(f"orphan capture from a previous run: {j['outageId']} ({j.get('status')})")
+                    except Exception:
+                        pass
+                orphans_checked = True
             space_ok, space_why = (disk_ok() if ok else (False, "buffer unavailable"))
 
             online, reason = conn.poll()

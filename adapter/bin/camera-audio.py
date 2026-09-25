@@ -23,8 +23,6 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-REGION = "eu-central-1"
-
 
 def main() -> int:
     if len(sys.argv) != 2:
@@ -34,8 +32,8 @@ def main() -> int:
 
     camera_id = sys.argv[1]
     try:
-        from aws_device_creds import get_session
-        table = get_session(REGION).resource("dynamodb").Table("cameras")
+        from aws_device_creds import get_session  # also loads config; inside the try on purpose
+        table = get_session().resource("dynamodb").Table("cameras")
         item = table.get_item(Key={"cameraId": camera_id}).get("Item") or {}
     except Exception as e:  # noqa: BLE001 -- see module docstring on soft failure
         print("AUDIO=off")

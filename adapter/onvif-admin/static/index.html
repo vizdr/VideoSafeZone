@@ -101,6 +101,7 @@ async function api(path, opts) {
 // cameraId, so a rescan of the same LAN can label a match as already-registered instead
 // of presenting it as a brand new camera to add.
 let registeredByHost = {};
+let registeredByRef = {};   // WS-Discovery endpoint ref -> cameraId: still matches after an IP change
 
 async function scan() {
   const user = document.getElementById("scanUser").value;
@@ -126,7 +127,7 @@ function renderDevice(d, i) {
   const details = d.details;
   const host = d.xaddr ? d.xaddr.split("://")[1].split("/")[0].split(":")[0] : "?";
   const port = d.xaddr && d.xaddr.includes(":") ? (d.xaddr.split("://")[1].split("/")[0].split(":")[1] || 80) : 80;
-  const existingId = registeredByHost[host];
+  const existingId = (d.epr && registeredByRef[d.epr]) || registeredByHost[host];
 
   div.innerHTML = `
     <div><strong>${details ? `${details.manufacturer} ${details.model}` : d.xaddr || "unknown"}</strong>
@@ -144,6 +145,7 @@ function renderDevice(d, i) {
       <label>ONVIF username <input id="user-${i}" value="${document.getElementById('scanUser').value}"></label>
       <label>ONVIF password <input id="pass-${i}" type="password" value="${document.getElementById('scanPass').value}"></label>
       <label>RTSP stream URI <input id="uri-${i}" value="${details ? details.stream_uri : ''}"></label>
+      <input type="hidden" id="epr-${i}" value="${d.epr || ''}">
       <p><label><input type="checkbox" id="ir-${i}" ${details && details.has_ir_control ? "checked" : ""} style="width:auto"> Has IR control</label></p>
       <button onclick="register(${i})">${existingId ? "Re-register" : "Register"}</button>
       <span id="regStatus-${i}" class="status"></span>
@@ -171,6 +173,7 @@ async function register(i) {
         password: document.getElementById(`pass-${i}`).value,
         streamUri: document.getElementById(`uri-${i}`).value.trim(),
         hasIrControl: document.getElementById(`ir-${i}`).checked,
+        endpointRef: document.getElementById(`epr-${i}`).value,
       }),
     });
     statusEl.textContent = result.updated ? "re-registered -- details updated." : "registered.";
@@ -244,9 +247,11 @@ async function loadCameras() {
   try {
     const data = await api("/api/cameras");
     registeredByHost = {};
+    registeredByRef = {};
     currentCameraIds = data.cameras.map(c => c.cameraId);
     for (const c of data.cameras) {
       if (c.onvifHost) registeredByHost[c.onvifHost] = c.cameraId;
+      if (c.onvifEndpointRef) registeredByRef[c.onvifEndpointRef] = c.cameraId;
     }
     body.innerHTML = "";
     for (const c of data.cameras) {

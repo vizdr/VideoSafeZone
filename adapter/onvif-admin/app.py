@@ -26,6 +26,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import camera_control
+import config
 import onvif_discovery
 from aws_device_creds import get_session
 
@@ -33,7 +34,7 @@ app = Flask(__name__, static_folder="static")
 
 CAMERA_ID_RE = re.compile(r"^cam-\d{2}$")
 MEDIAMTX_API = "http://127.0.0.1:9997"
-REGION = "eu-central-1"
+REGION = config.AWS_REGION
 
 
 def cameras_table():
@@ -55,7 +56,9 @@ def scan():
     for svc in services:
         xaddrs = svc.getXAddrs()
         scopes = [s.getValue() if hasattr(s, "getValue") else str(s) for s in svc.getScopes()]
-        entry = {"xaddr": xaddrs[0] if xaddrs else None, "scopes": scopes}
+        # epr: the device's stable WS-Discovery identity, stored at registration so
+        # rematch_cameras.py can follow the camera to a new IP address.
+        entry = {"xaddr": xaddrs[0] if xaddrs else None, "scopes": scopes, "epr": svc.getEPR()}
         if user and xaddrs:
             try:
                 entry["details"] = onvif_discovery.enrich_sync(xaddrs[0], user, password)
@@ -86,6 +89,7 @@ def register_camera():
     user, password = body.get("user"), body.get("password")
     stream_uri = body.get("streamUri")
     has_ir_control = bool(body.get("hasIrControl"))
+    endpoint_ref = body.get("endpointRef") or None   # absent for hand-typed hosts; rematch backfills it
 
     if not CAMERA_ID_RE.match(camera_id):
         return jsonify({"error": "cameraId must look like 'cam-03'"}), 400
@@ -134,17 +138,17 @@ def register_camera():
             if not r.ok:
                 return jsonify({"error": f"MediaMTX path update failed: {r.status_code} {r.text}"}), 502
 
-        table.update_item(
-            Key={"cameraId": camera_id},
-            UpdateExpression=(
-                "SET hasIrControl = :ir, onvifHost = :h, onvifPort = :p, "
-                "onvifUser = :u, onvifPassword = :pw, rtspUrl = :uri, updatedAt = :t"
-            ),
-            ExpressionAttributeValues={
-                ":ir": has_ir_control, ":h": host, ":p": port, ":u": user, ":pw": password,
-                ":uri": stream_uri, ":t": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
-        )
+        values = {
+            ":ir": has_ir_control, ":h": host, ":p": port, ":u": user, ":pw": password,
+            ":uri": stream_uri, ":t": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        update = ("SET hasIrControl = :ir, onvifHost = :h, onvifPort = :p, "
+                  "onvifUser = :u, onvifPassword = :pw, rtspUrl = :uri, updatedAt = :t")
+        if endpoint_ref:
+            update += ", onvifEndpointRef = :ref"
+            values[":ref"] = endpoint_ref
+        table.update_item(Key={"cameraId": camera_id}, UpdateExpression=update,
+                          ExpressionAttributeValues=values)
         return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"], "updated": True}), 200
 
     # 1. MediaMTX path, live via its local API -- no YAML edit, no restart, so the
@@ -167,7 +171,9 @@ def register_camera():
         capture_output=True, text=True,
     )
     if provision.returncode != 0:
-        requests.post(f"{MEDIAMTX_API}/v3/config/paths/delete/{mediamtx_path}", timeout=5)
+        # DELETE, not POST: MediaMTX answers POST on this route with a 404, so the rollback
+        # silently did nothing and left an orphan path behind a failed registration.
+        requests.delete(f"{MEDIAMTX_API}/v3/config/paths/delete/{mediamtx_path}", timeout=5)
         return jsonify({"error": f"provisioning failed: {provision.stderr.strip()}"}), 500
 
     # 3. The KVS stream itself.
@@ -184,6 +190,7 @@ def register_camera():
     #    onvifPassword) is a deliberately deferred follow-up, not done in this pass.
     table.put_item(Item={
         "cameraId": camera_id,
+        **({"onvifEndpointRef": endpoint_ref} if endpoint_ref else {}),
         "mode": "passthrough",
         "hasIrControl": has_ir_control,
         "kvsStreamArn": stream_arn,

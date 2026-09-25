@@ -2,7 +2,9 @@
 # $VMS_HOME if exported (interactive shells, via ~/.bashrc); otherwise the repo root
 # this script lives in (systemd units do not read ~/.bashrc).
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
-CAM=/dev/v4l/by-id/usb-Generic_AVerMedia_PW310_Webcam_200901010001-video-index0
+source "${VMS_HOME}/adapter/bin/detect-hw.sh"
+camera_setup cam01 || exit 1            # sets CAM (detected, or pinned in /etc/adapter/cameras/cam01.env)
+: "${CAPS:=image/jpeg,width=1280,height=720,framerate=30/1}"
 
 # Audio goes into MediaMTX as LPCM, deliberately uncompressed. Encoding it to AAC here
 # instead is the obvious move and it is a trap: rtspclientsink payloads AAC as MPEG-4
@@ -14,7 +16,10 @@ CAM=/dev/v4l/by-id/usb-Generic_AVerMedia_PW310_Webcam_200901010001-video-index0
 # becoming the hub, and following it now would cost the local preview, the Start/Stop
 # layer, and the single-producer-per-camera model. MediaMTX carries two tracks fine.
 #
-# Device by persistent name, never hw:N -- card numbers move on reboot (guide 18.1).
+# The microphone is the sound card on the same USB device as $CAM, found through sysfs
+# (detect-hw.sh), and addressed by name, never hw:N -- card numbers move on reboot
+# (guide 18.1). Matching by USB parent rather than by card name matters: ALSA calls many
+# webcams' mics plain "Webcam", so a second camera would make the name ambiguous.
 # The PW310 capture device is STEREO-ONLY (ALSA reports CHANNELS: 2, a fixed value not a
 # range), so `-c 1` is rejected outright; audioconvert does the downmix instead.
 #
@@ -25,7 +30,7 @@ CAM=/dev/v4l/by-id/usb-Generic_AVerMedia_PW310_Webcam_200901010001-video-index0
 # frames. voaacenc emits 1024-sample frames, so frame duration is 1024/rate: at 48 kHz
 # that is 21ms against a 66.7ms video frame, which fails; 16 kHz gives 64ms. Verified by
 # measurement below, not by theory -- if you change the rate, recount the rejects.
-AUDIO_DEV=hw:CARD=Webcam,DEV=0
+AUDIO_DEV="$(alsa_card_for_video "$CAM" || true)"
 
 # Read once at startup; see adapter/bin/camera-audio.py for why this is never re-read.
 # `|| true` so an unreachable registry degrades to video-only instead of leaving cam-01
@@ -34,9 +39,15 @@ AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/camera-audio.py cam-01 || true)"
 eval "${AUDIO_ENV}"
 [ -n "${AUDIO_DEVICE:-}" ] && AUDIO_DEV="${AUDIO_DEVICE}"
+if [ "${AUDIO:-off}" = "on" ] && [ -z "${AUDIO_DEV}" ]; then
+  # A stale audioEnabled on a camera with no microphone must not become a pipeline that
+  # waits forever for audio (the same reason camera-audio.py gates on audioCapable).
+  echo "publish-cam01: audio requested but $CAM has no microphone -- video only" >&2
+  AUDIO=off
+fi
 
 VIDEO_CHAIN="v4l2src device=$CAM ! \
-  image/jpeg,width=1280,height=720,framerate=30/1 ! \
+  ${CAPS} ! \
   v4l2jpegdec ! videorate drop-only=true ! video/x-raw,framerate=15/1 ! \
   v4l2convert ! video/x-raw,format=I420 ! \
   v4l2h264enc extra-controls=controls,video_bitrate=1000000,h264_i_frame_period=30,repeat_sequence_header=1 ! \
@@ -57,7 +68,7 @@ fi
 echo "publish-cam01: audio disabled (video only)"
 exec gst-launch-1.0 -v \
   v4l2src device="$CAM" ! \
-  image/jpeg,width=1280,height=720,framerate=30/1 ! \
+  "$CAPS" ! \
   v4l2jpegdec ! videorate drop-only=true ! video/x-raw,framerate=15/1 ! \
   v4l2convert ! video/x-raw,format=I420 ! \
   v4l2h264enc extra-controls="controls,video_bitrate=1000000,h264_i_frame_period=30,repeat_sequence_header=1" ! \

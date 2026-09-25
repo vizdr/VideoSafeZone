@@ -25,11 +25,12 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import camera_control
+import config
 from outage_buffer import (BUFFER_ROOT, OUTAGE_DIR, buffer_ready, log, segment_start,
                            utc_now)
 
-REGION = "eu-central-1"
-BUCKET = "vms-demo-evidence-596633517506"
+REGION = config.AWS_REGION
+BUCKET = config.EVIDENCE_BUCKET
 SCAN_SEC = 30
 
 # At recovery kvssink is flushing its own backlog up the same uplink. Piling ~1 GB of
