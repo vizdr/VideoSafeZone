@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# $VMS_HOME if exported (interactive shells, via ~/.bashrc); otherwise the repo root
+# this script lives in (systemd units do not read ~/.bashrc).
+VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 CAM=/dev/v4l/by-id/usb-Generic_AVerMedia_PW310_Webcam_200901010001-video-index0
 
 # Audio goes into MediaMTX as LPCM, deliberately uncompressed. Encoding it to AAC here
@@ -27,8 +30,8 @@ AUDIO_DEV=hw:CARD=Webcam,DEV=0
 # Read once at startup; see adapter/bin/camera-audio.py for why this is never re-read.
 # `|| true` so an unreachable registry degrades to video-only instead of leaving cam-01
 # with no feed at all.
-AUDIO_ENV="$(/home/vladimir/MyProjects/VMS/venv-adapter/bin/python3 \
-             /home/vladimir/MyProjects/VMS/adapter/bin/camera-audio.py cam-01 || true)"
+AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
+             ${VMS_HOME}/adapter/bin/camera-audio.py cam-01 || true)"
 eval "${AUDIO_ENV}"
 [ -n "${AUDIO_DEVICE:-}" ] && AUDIO_DEV="${AUDIO_DEVICE}"
 
