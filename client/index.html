@@ -464,6 +464,20 @@ async function load(camera) {
   try {
     const r = await fetch(`${API}/hls?stream=${camera}`, { headers: { Authorization: idToken } });
     const data = await r.json();
+    const s0 = state[camera];
+    // Right after Start, "not live" (503) is expected, not an error: the producer needs a
+    // few seconds to connect, and KVS has nothing until the camera's first keyframe
+    // *closes* a fragment. cam-02 sends one every 3 s, so its first fragment lands ~10 s
+    // after Start -- a single look at 8 s missed it every time (FoundAndFixed.md #43).
+    // Keep asking until the Start window runs out; Stop clears the window.
+    if (r.status === 503 && Date.now() < (s0.liveWaitUntil || 0)) {
+      setStatus(camera, "waiting for first video...");
+      showOverlay(camera, "Starting stream…\nWaiting for the first video from the camera.");
+      clearTimeout(s0.refreshTimer);
+      s0.refreshTimer = setTimeout(() => load(camera), 3000);
+      return;
+    }
+    s0.liveWaitUntil = 0;
     if (!r.ok) {
       setStatus(camera, "error: " + (data.error || r.status));
       showOverlay(camera, (data.error || "Could not load stream") + "\n\nPress Start to begin.");
@@ -550,6 +564,7 @@ async function cmd(camera, action) {
   const s = state[camera];
   if (action === "stop") {
     s.userStopped = true;
+    s.liveWaitUntil = 0;
     teardownPlayer(camera);
     showOverlay(camera, "Stream stopped.\n\nPress Start to watch again.");
   } else {
@@ -564,7 +579,13 @@ async function cmd(camera, action) {
     const data = await r.json();
     setStatus(camera, r.ok ? `${action} sent` : "error: " + (data.error || r.status));
     if (!r.ok) { showOverlay(camera, "Could not send " + action + ": " + (data.error || r.status)); return; }
-    if (action === "start") setTimeout(() => load(camera), 8000);
+    if (action === "start") {
+      // 45 s covers a producer that dies on its first try and is restarted by systemd
+      // (RestartSec=5) plus a 3 s GOP, with room to spare.
+      s.liveWaitUntil = Date.now() + 45000;
+      clearTimeout(s.refreshTimer);
+      s.refreshTimer = setTimeout(() => load(camera), 5000);
+    }
   } catch (e) {
     setStatus(camera, "error: " + e.message);
     showOverlay(camera, "Network error sending " + action + ".\n\nPress Start to try again.");

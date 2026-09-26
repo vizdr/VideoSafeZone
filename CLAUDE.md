@@ -31,9 +31,10 @@ buffering (guide §16.3c) — design, measurements and open questions — and fo
 §16.3c when that work completes; it is authoritative for that feature in the meantime.
 `COSTS-1.4.md` is the cost model and authoritative for any bitrate or dollar figure;
 `Camera-Features.md` is the verified-vs-advertised inventory of the ONVIF camera (`cam-02`).
-`Demo-AWS-Video-MCh-15.md`, `COSTS-1.3.md`,
-and `NETWORK.md` are earlier/companion material and may be stale relative to the current
-guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
+`NETWORK.md` holds the networking notes (MediaMTX's role and ports, how discovery was
+built, the still-open camera-segment isolation and H.265 options), reviewed against the
+system 2026-09-26. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
+may be stale relative to the current guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
 demo is modeled on. **When in doubt about current architecture or "why is it done this
 way," read `Demo-AWS-Video-revCosts4.md` (or grep it for the relevant §-number) before
 guessing from code alone** — most non-obvious decisions are explained there, and the
@@ -204,7 +205,9 @@ set from either GUI) — and the producer scripts read them once at startup via
 `adapter/bin/camera-audio.py`. The setting therefore applies on the camera's **next
 Start**, which is deliberate: KVS rejects a stream whose fragments change from video-only
 to audio+video partway through, so applying it live would break `GetClip` across the
-boundary. With audio off, every pipeline is byte-for-byte the pre-audio one.
+boundary. With audio off, every pipeline sends exactly the pre-audio video — but an audio
+track the source still carries must be consumed by a `fakesink`, never left unlinked:
+an unlinked `rtspsrc` pad intermittently kills the producer at startup (FoundAndFixed.md #43).
 
 The constraint that shapes all of it: **KVS's ingest and playback paths accept different
 codecs, and ingest is the permissive one.** `kvssink` takes G.711 and malformed AAC
@@ -264,7 +267,10 @@ credentials-endpoint call for arbitrary boto3 use — `agent.py` and
 3600s TTL, so caching a session at process start would silently break a long-running
 daemon after an hour). This is why the role's IAM policy, not a second credential, is
 what's widened whenever the adapter needs a new AWS permission (e.g. `CreateStream`,
-DynamoDB access on `cameras`) — see `cloud/iam/kvs-producer-policy.json`.
+DynamoDB access on `cameras`) — see `cloud/iam/kvs-producer-policy.json`. The files in
+`cloud/iam/` must match what is deployed: when you change a policy in AWS, export it back
+(`aws iam get-role-policy … --query PolicyDocument`) in the same change
+(FoundAndFixed.md #41).
 
 ### Two GUIs, deliberately not one
 

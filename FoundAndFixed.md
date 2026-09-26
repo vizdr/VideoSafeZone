@@ -16,7 +16,7 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-40 defects, from the first build (2026-08-20) to the move onto a second Pi (2026-09-24/25).
+43 defects, from the first build (2026-08-20) to the move onto a second Pi (2026-09-24/25).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -60,10 +60,13 @@ advice (guide §15 "Known traps").
 | 38 | Instructions that failed when followed literally (docs consistency review) | docs | 2026-09-25 | fixed |
 | 39 | Outage supervisor crash-looped on a Pi without the USB stick | outage buffer | 2026-09-25 | fixed |
 | 40 | cam-01 never published: `gstreamer1.0-rtsp` missing from the setup lists | docs / setup | 2026-09-25 | fixed |
+| 41 | `cloud/iam/` policy files had drifted from the deployed policies | IaC / docs | 2026-09-26 | fixed |
+| 42 | cam-01 dead after a reboot: camera not yet enumerated, and nothing retried | systemd / detection | 2026-09-26 | fixed |
+| 43 | cam-02 played only after several Start/Stop/Reload rounds | pipeline / client | 2026-09-26 | fixed |
 
 ### What they have in common
 
-- **Most were silent.** #5, #7, #13, #15, #16, #18, #20, #21, #32, #36, #37 and #39 all
+- **Most were silent.** #5, #7, #13, #15, #16, #18, #20, #21, #32, #36, #37, #39 and #42 all
   passed "it ran without errors". The recurring cause is a tool that reports success on
   the wrong question. `systemctl is-active` says `inactive` for a unit that doesn't exist
   (#7, #37). `check=False` swallows a failure (#7). `ffmpeg` plays what a browser won't
@@ -72,7 +75,7 @@ advice (guide §15 "Known traps").
 - **Ingest is more permissive than playback** (#13, #15, #16, #19): verify at the
   consuming end — a decoded frame, a browser, `GetHLSStreamingSessionURL` — not at
   ingest.
-- **Two copies of one fact drift** (#7, #25, #30, #31, #37): unit names, paths, endpoints
+- **Two copies of one fact drift** (#7, #25, #30, #31, #37, #41): unit names, paths, endpoints
   and camera addresses now each have one source (CLAUDE.md "Paths", the registry,
   `/etc/adapter/`).
 - **Instructions are code too.** #24–#30, #33–#34, #38 and #40 were wrong or missing
@@ -736,4 +739,105 @@ nothing about that component.
 **Fix:** `gstreamer1.0-rtsp` (and `v4l-utils`) in LAUNCH A3 and README §3, and
 `gst-inspect-1.0 rtspclientsink` in A3's proof. Verified: publisher `active` with a stable
 restart count, MediaMTX `cam01` ready, H.264 High 1280×720, decoded frame correct.
+
+### #41 — `cloud/iam/` policy files had drifted from the deployed policies
+
+**Found:** 2026-09-26, checking NETWORK.md's claim that recreating a KVS stream needs IAM
+edits against `CLAUDE.md`'s claim that it doesn't. **Referenced from:** guide §8.1,
+NETWORK.md §4, `cloud/iam/`.
+
+The two claims disagreed because the repo and AWS did. Every policy document in
+`cloud/iam/`, the IoT policy and the IoT rule were compared with what is deployed:
+
+| File | Repo | Deployed |
+|---|---|---|
+| `kvs-producer-policy.json` (`KVSAdapterRole`) | `stream/cam-01/*`, `stream/cam-02/*` only | `stream/cam-*/*`, **plus** `CreateStream`, DynamoDB `cameras` read/write, `iot:Publish` on `adapter/adapter-01/event` |
+| `get-hls-url-policy.json` | cam-01's and cam-02's exact stream ARNs | `stream/cam-*/*` |
+| `clip-to-s3-policy.json` | the same two exact ARNs | `stream/cam-*/*` |
+| — | missing | `CamerasRegistryRead` (`GetItem` on `cameras`) on four Lambda roles |
+| — | missing | `ListCamerasAccess` (`Scan` on `cameras`) |
+
+The account itself was right — policies had been widened in place as cameras, the
+registry, GUI registration and event publishing were added — but the files were not
+updated. A rebuild from `cloud/iam/` (README "Rebuilding on a different AWS account")
+would have produced an adapter that could not register a camera, read the registry or
+publish a detection event, and Lambdas that served no camera after `cam-02`. Guide §8.1's
+setup block still wrote the first single-stream version over the file.
+
+The other ten IAM files, the IoT thing policy and the IoT rule matched.
+`client-bucket-oac-policy.json` differs from the live bucket policy by design: it is the
+target of §8.5.1's pending CloudFront cutover.
+
+**Fix:** the three drifted files rewritten from the deployed documents, the two missing
+ones added (`cameras-registry-read-policy.json`, `list-cameras-policy.json`), each
+re-verified identical to AWS; a warning in guide §8.1 not to re-run its `cat >` lines. When
+a policy is changed in AWS, export it back into `cloud/iam/` in the same change.
+
+### #42 — cam-01 dead after a reboot: camera not yet enumerated, and nothing retried
+
+**Found:** 2026-09-26, "I cannot watch cam01 in the web GUI" after the Pi had rebooted.
+**Referenced from:** `detect-hw.sh`, LAUNCH.md A8 (`kvs-camera-init`, `kvs-camera-publish`).
+
+Start in the GUI worked — the producer launched and sat at "Connecting to
+rtsp://127.0.0.1:8554/cam01" — but MediaMTX had no `cam01`: `kvs-camera-publish` was
+`inactive (dead)`. The persistent journal (#33) showed why:
+
+- **10:01:17** the kernel enumerated the PW310 on USB;
+- **10:01:26** the user manager started `kvs-camera-init`, whose detection found **no**
+  `/dev/v4l/by-id/` link yet — the driver and udev were still working through boot;
+- `kvs-camera-init` is a oneshot with no retry, so it stayed `failed`;
+- `kvs-camera-publish` had `Requires=kvs-camera-init`, so its start job failed with
+  `result 'dependency'` — and a dependency failure is **never** retried, whatever the
+  unit's own `Restart=on-failure` says.
+
+One missed look at boot therefore killed cam-01 until someone restarted it by hand. The
+hardcoded device path before Phase 2 would have failed the same way; this boot was simply
+the first where the link lost the race.
+
+**Fix, three layers:** `camera_setup` waits up to `CAMERA_WAIT_SEC` (default 30 s) for a
+camera to *appear* — "several cameras" still fails at once, since waiting can't fix
+ambiguity, and `--print` never waits; `kvs-camera-init` has `Restart=on-failure`;
+`kvs-camera-publish` only `Wants=` the init unit (it still `Requires=` MediaMTX), so a
+failed exposure lock can't block the video for good. Verified: the late-appearing camera
+found after 3 s in a simulated race; both units active after restart; and end to end
+through the cloud — producer started, KVS HLS decoded (H.264 High 1280×720, the frame
+showing the wall clock at the capture time), producer stopped again.
+
+### #43 — cam-02 played only after several Start/Stop/Reload rounds
+
+**Found:** 2026-09-26, "cam-02 starts to stream only after several presses of Start,
+followed by Stop and Reload Player", right after cam-01 was fixed (#42).
+**Referenced from:** `stream-cam02.sh`, `stream-cam01.sh`, `stream-channel.sh`,
+`client/index.html` (`cmd()`/`load()`), AUDIO.md, Camera-Features.md, CLAUDE.md.
+
+Two independent faults, either one enough to leave the player on "stream is not live":
+
+1. **The client looked once, too early.** `cmd('start')` called `load()` a single time,
+   8 s after the API returned. KVS serves LIVE HLS only once a fragment is complete, and
+   a fragment closes on the *next* keyframe. cam-02 sends one every 3 s (camera-side GOP,
+   not ours), so after connect (~2 s), waiting for the first keyframe and closing the
+   fragment, the first `PERSISTED` ack came **9.3–10.1 s** after Start (journal:
+   10:46:56.7 → 10:47:06.8, 10:57:09.1 → 10:57:18.4; re-measured after the fix: 10.9 s
+   until `GetHLSStreamingSessionURL` succeeded). The 8 s look got a 503 and never
+   retried; "Press Start to begin" invited exactly the Stop/Start/Reload dance. cam-01
+   escaped because its encoder's GOP is short and under our control.
+2. **The video-only pipeline sometimes died on its own.** The camera always sends a G.711
+   track, and MediaMTX re-serves it whether or not audio is enabled. `rtspsrc ! rtph264depay`
+   links only the video pad; the audio pad stays unlinked. In 2 of the 5 Starts that
+   morning the audio pad appeared first (10:57:03.766 vs video at .826) and rtspsrc
+   stopped the pipeline 15 ms after the video linked: `Internal data stream error …
+   streaming stopped, reason not-linked (-1)`. systemd restarted it 5 s later, which
+   pushed the first fragment out to ~20 s — far past the client's single look. It is a
+   timing race: 16 runs (8 with `fakesink`, 8 with `kvssink`) did not reproduce it, which
+   is also why it looked random.
+
+**Fix:** the video-only branches of `stream-cam02.sh`, `stream-cam01.sh` and the template's
+`stream-channel.sh` link `application/x-rtp,media=audio` to `fakesink sync=false
+async=false` (inert when there is no audio track — checked against cam01, which has
+none), so the audio stream can never report `not-linked`. The client now treats 503 after
+Start as "not yet": it first looks at 5 s and re-polls every 3 s for up to 45 s, with a
+"waiting for the first video" overlay; Stop clears the window. Verified: four real
+`kvs-cam02` Start/Stop cycles with zero `not-linked` and zero restarts, cam-02 frame
+decoded from cloud HLS (H.264 High 640×360, on-screen clock matching capture time), client
+deployed and served by CloudFront.
 

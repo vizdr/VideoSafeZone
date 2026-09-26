@@ -106,7 +106,7 @@ The numbers this project exists to produce. Method and caveats in the linked doc
 | **Detection false positives** | Zero across 9.01 h of heartbeat-backed silence |
 
 Three bugs worth knowing about, because they were all silent and none was caught by
-"it ran without errors" — all 40 found so far are in [`FoundAndFixed.md`](FoundAndFixed.md):
+"it ran without errors" — all 43 found so far are in [`FoundAndFixed.md`](FoundAndFixed.md):
 
 - H.264 negotiated as **Baseline**: `ffmpeg` played it, browsers rendered black (#13).
 - The wrong audio sample rate silently loses half the audio, because `kvssink` shares one
@@ -346,11 +346,11 @@ point — getting it wrong twice made Start/Stop silently do nothing (`FoundAndF
 | [`AUDIO.md`](AUDIO.md) | Optional audio: design, the rules its two silent bugs left, withdrawn claims |
 | [`OUTAGE.md`](OUTAGE.md) | Durable outage buffering: design, measurements, open questions |
 | [`OUTBOUND-CLOUD.md`](OUTBOUND-CLOUD.md) | The outbound-only architectural thesis |
+| [`NETWORK.md`](NETWORK.md) | MediaMTX's role and ports, how discovery was built, and two open options: an isolated camera segment on `eth0`, H.265 on `cam-02` |
 | [`measurements/`](measurements/) | Raw recorded results |
 
-`COSTS-1.3.md`, `Demo-AWS-Video-MCh-15.md` and its companion `NETWORK.md` (MediaMTX,
-discovery and VLAN notes from MVP planning) are earlier material, kept for the history of
-what changed and why; they may be stale against the current guide.
+`COSTS-1.3.md` and `Demo-AWS-Video-MCh-15.md` are earlier material, kept for the history
+of what changed and why; they may be stale against the current guide.
 
 ---
 

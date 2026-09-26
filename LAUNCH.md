@@ -529,6 +529,9 @@ Before=kvs-mediamtx.service
 Type=oneshot
 ExecStart=${VMS_HOME}/adapter/bin/camera-init.sh
 RemainAfterExit=yes
+# retry if the camera wasn't there yet (detection itself also waits 30 s, #42)
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target
@@ -557,7 +560,10 @@ cat > ~/.config/systemd/user/kvs-camera-publish.service <<EOF
 [Unit]
 Description=PW310 capture/encode -> publish to MediaMTX (rtsp://127.0.0.1:8554/cam01)
 After=kvs-camera-init.service kvs-mediamtx.service
-Requires=kvs-camera-init.service kvs-mediamtx.service
+# Wants, not Requires, on init: a failed exposure lock must not block the video for good
+# -- a dependency failure is never retried (#42). The publisher detects the camera itself.
+Wants=kvs-camera-init.service
+Requires=kvs-mediamtx.service
 
 [Service]
 Type=simple

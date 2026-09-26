@@ -1,9 +1,16 @@
 # Networking notes: MediaMTX, ONVIF discovery, VLANs
 
-Companion notes to `Demo-AWS-Video-MCh-15.md`, covering the local media-relay layer,
-camera discovery, and network isolation for the camera segment. Written up from
-discussion while planning the MVP build — kept separate from the main runbook because
-it's reference material, not a build sequence.
+Companion notes to the build guide, covering the local media-relay layer, camera
+discovery, network isolation for the camera segment, and the H.265 option. First written
+while planning the MVP (as a companion to `Demo-AWS-Video-MCh-15.md`) — kept separate from
+the runbook because it's reference material, not a build sequence.
+
+> **Status, reviewed 2026-09-26 against the built system.** §1 (MediaMTX) and §2
+> (discovery) now describe what was built, with the planning-era differences noted.
+> §3 (camera-segment isolation) and §4 (H.265 on `cam-02`) are still open design options.
+> A bare `§` refers to the build guide, `Demo-AWS-Video-revCosts4.md` (numbering unchanged
+> from `MCh-15`) — except "§3 below"/"see §4", which are this file's, and cited sections
+> of other files, which name the file. `#N` are entries in `FoundAndFixed.md`.
 
 ---
 
@@ -19,7 +26,7 @@ re-serves that same stream to anyone who connects and asks for it.
 
 ### Why it's in this architecture
 
-From `Demo-AWS-Video-MCh-15.md` §2.5: keeping MediaMTX in the design (even though the
+From the build guide's §2.5: keeping MediaMTX in the design (even though the
 PW310 USB webcam replaced the original synthetic source) is deliberate. It preserves the
 **RTSP boundary** that a real IP camera (Hikvision, etc.) would present natively, so
 Phases 3–9 of the build stay untouched regardless of what's actually behind the camera
@@ -27,26 +34,33 @@ path. A real ONVIF/RTSP camera speaks RTSP directly; the PW310 doesn't, so Media
 absorbs that difference. Everything downstream only ever talks to
 `rtsp://127.0.0.1:8554/camXX`.
 
-This is what makes the later pass-through-vs-transcode comparison (doc §16.3b) a one-line
-change: point MediaMTX's source at a real camera's RTSP URL instead of a local GStreamer
-publisher, and nothing downstream needs to know.
+This is what made the pass-through-vs-transcode comparison (§16.3b) a one-line change:
+point MediaMTX's source at a real camera's RTSP URL instead of a local GStreamer
+publisher, and nothing downstream needs to know. It has since become the hub for more
+than that: MediaMTX's own HLS (port 8888) feeds the admin GUI's local preview, and its
+recorder does durable outage buffering (`OUTAGE.md`, §16.3c).
 
 ### How it's wired into the pipeline
 
 Two independent GStreamer processes talk to MediaMTX over loopback:
 
 ```
-v4l2src (PW310) → jpegdec → v4l2h264enc → rtspclientsink ──push──▶ MediaMTX :8554/cam01
+v4l2src (PW310) → v4l2jpegdec → v4l2convert → v4l2h264enc → rtspclientsink ──push──▶ MediaMTX :8554/cam01
                                                                           │
                                                                      (relays)
                                                                           │
 kvssink pipeline: rtspsrc rtsp://127.0.0.1:8554/cam01 ◀──pull────────────┘
 ```
 
-- **Publisher** (`rtspclientsink location=rtsp://127.0.0.1:8554/cam01`) — an RTSP client
-  that pushes (ANNOUNCEs) the encoded stream into MediaMTX under path `cam01`.
+- **Publisher** (`rtspclientsink location=rtsp://127.0.0.1:8554/cam01`, from the
+  `gstreamer1.0-rtsp` package — without it cam-01 never appears, #40) — an RTSP client
+  that pushes (ANNOUNCEs) the encoded stream into MediaMTX under path `cam01`. Decode,
+  convert and encode all run on the Pi's hardware blocks (§16.3b), and the encoder is told
+  `profile=high`, since the Baseline it otherwise negotiates renders black in browsers
+  (#13). `adapter/bin/publish-cam01.sh` is the current version.
 - **Consumer** (`rtspsrc location="rtsp://127.0.0.1:8554/cam01"`) — a separate process,
-  the KVS producer pipeline, that pulls the same stream into `kvssink`.
+  the KVS producer pipeline (`kvs-cam01.service`), that pulls the same stream into
+  `kvssink`. `cam-02` has no publisher at all: MediaMTX pulls the camera's own RTSP.
 
 Because these are decoupled processes, the cloud-facing pipeline can be restarted (e.g.
 while iterating on `kvssink` params) without interrupting capture, and `ffprobe`/`ffplay`
@@ -55,30 +69,30 @@ simultaneous readers of the same path for free.
 
 ### Running it
 
-```bash
-cd ~ && mkdir -p mediamtx && cd mediamtx
-curl -L -o mediamtx.tar.gz \
-  https://github.com/bluenviron/mediamtx/releases/latest/download/mediamtx_linux_arm64v8.tar.gz
-tar xzf mediamtx.tar.gz && ./mediamtx &
-```
+**As built:** the binary is pinned to v1.20.1 and installed per `LAUNCH.md` A5 (extract
+the binary only — the tarball's default `mediamtx.yml` would overwrite the project's,
+#26), and it runs as the user unit `kvs-mediamtx` (`LAUNCH.md` A8), not with a trailing
+`&`. The planning-era command here pointed at `releases/latest/download/…arm64v8.tar.gz`,
+an asset name that no longer exists (§2.5's "Known trap").
 
-Notes not in the main runbook:
+Notes that still apply:
 
-- The archive ships a single static binary plus a default `mediamtx.yml`. Defaults are
-  fine for this MVP: RTSP on `0.0.0.0:8554`, plus unused RTMP/HLS/API ports. Consider
-  binding RTSP to `127.0.0.1` only in `mediamtx.yml`, since nothing outside the Pi needs
-  it.
-- Running it with a trailing `&` doesn't survive a reboot or crash, and isn't managed by
-  the `kvs-cam01.service` systemd unit (§7.1), which only supervises the KVS producer.
-  Before Phase 6, add a `mediamtx.service` unit so `teardown.sh`'s `pkill -f mediamtx` has
-  something well-defined to stop, and the chain survives a reboot.
-- Startup ordering matters once this is under systemd: MediaMTX must be listening before
-  the publisher (`rtspclientsink`) tries to connect, and before the KVS producer's
-  `rtspsrc` tries to pull. Use `After=`/`Requires=` or `Restart=on-failure` with retry
-  rather than assuming instant availability.
-- `"Device or resource busy"` on `v4l2src` (known trap in the main doc) is never
-  MediaMTX's fault — it never touches V4L2 devices, only RTSP bytes. It means something
-  else (ffplay, guvcview) still holds the camera node open.
+- **Ports, as configured in the tracked `mediamtx/mediamtx.yml`:** RTSP `:8554` (all
+  interfaces), HLS `:8888` (LAN — the admin GUI's preview), control API `127.0.0.1:9997`
+  (the path sync, outage buffer and admin GUI use it). RTMP, WebRTC and SRT are enabled but
+  unused. Binding RTSP to `127.0.0.1` would still be a sensible hardening: nothing outside
+  the Pi reads it.
+- **Camera paths are not in `mediamtx.yml`.** MediaMTX doesn't persist API changes, so
+  `adapter/sync_mediamtx_paths.py` (`ExecStartPost=` of `kvs-mediamtx`) re-adds every
+  network camera's path from the registry after each start (#31, #32).
+- **Startup ordering:** `kvs-camera-publish` is `After=`/`Requires=kvs-mediamtx`. The
+  producers are *system* units and cannot depend on a user unit (#12), so they rely on
+  `Restart=on-failure` until the RTSP path exists.
+- **Stopping it:** `systemctl --user stop kvs-mediamtx` — a `pkill -f mediamtx` (as in the
+  guide's §11 `teardown.sh`) just gets it restarted by the unit.
+- `"Device or resource busy"` on `v4l2src` is never MediaMTX's fault — it never touches
+  V4L2 devices, only RTSP bytes. It means something else (ffplay, guvcview) still holds the
+  camera node open.
 
 ### Alternatives considered
 
@@ -102,18 +116,17 @@ it's a legitimate "evaluated and chose X because Y" talking point.
 
 ## 2. ONVIF WS-Discovery
 
-**Status: not implemented.** This appears only once in the main doc, as a roadmap item in
-the gap-analysis table (§16.2):
+**Status: built** (§16.2.1). When this was written, discovery was a roadmap row in the
+§16.2 gap table ("hardcoded URL", effort **M**) and every RTSP source was a literal
+string. Now:
 
-| Capability | Cloud Adapter Mini | This prototype | Effort to close |
-|---|---|---|---|
-| Camera discovery | hundreds of brands | hardcoded URL | **M** — ONVIF WS-Discovery |
-
-Today every RTSP source is a literal string in the channel config (§16.6):
-
-```json
-{"id":"cam-01","url":"rtsp://192.168.178.90:554/Streaming/Channels/102","mode":"passthrough"}
-```
+- `adapter/onvif_discovery.py` does the scan and the ONVIF enrichment, shared by the CLI
+  (`adapter/bin/discover-onvif.py`) and the local admin GUI (`adapter/onvif-admin/`,
+  `LAUNCH.md` Part E), which turns a scan result into a registered camera in one click.
+- Cameras live in the DynamoDB `cameras` registry, not a `channels.json`; each network
+  camera's RTSP URL is its `rtspUrl`, re-added to MediaMTX at every start (#32).
+- `adapter/rematch_cameras.py` (`kvs-camera-rematch.timer`, every 5 min) follows a camera
+  to a new IP by its WS-Discovery endpoint reference (`urn:uuid:…`).
 
 ### How WS-Discovery works
 
@@ -127,11 +140,14 @@ LAN and what's their control endpoint?" — it does not hand back an RTSP URL di
    <Probe><Types>dn:NetworkVideoTransmitter</Types></Probe>
    ```
 2. **ProbeMatch.** Every matching ONVIF device on the same L2 broadcast domain replies
-   with its **device service address** (an HTTP/SOAP endpoint, e.g.
-   `http://192.168.178.90/onvif/device_service`) plus scope URIs (name, hardware,
-   location).
+   with its **endpoint reference** (a stable `urn:uuid:…` identity — what the rematch
+   timer keys on), its **device service address** (an HTTP/SOAP endpoint, e.g.
+   `http://192.168.178.67/onvif/device_service` for `cam-02`) plus scope URIs (name,
+   hardware, location).
 3. **Hello/Bye.** Devices also announce on boot (`Hello`) and clean shutdown (`Bye`), so a
-   long-running listener can track appearance/disappearance without polling.
+   long-running listener can track appearance/disappearance without polling. (Not used
+   here: the rematch timer re-probes every 5 minutes instead, which also catches devices
+   whose Hello was missed.)
 
 ### From ProbeMatch to an actual RTSP URL
 
@@ -146,26 +162,17 @@ timestamp) on the Media/Device calls, even though Probe/ProbeMatch itself is
 unauthenticated — credentials still need to come from somewhere (site config, or a
 manual pairing step).
 
-### Where it would sit in this architecture
+### Where it sits (as built)
 
-- Natural owner: the **agent** (`agent.py`) or a companion daemon it starts — a discovery
-  pass on boot and on-demand (e.g. an MQTT command `{"action":"discover"}` on the existing
-  command topic).
-- Discovered cameras populate the same `channels.json` shape already defined in §16.6, so
-  nothing downstream (the `kvs-cam@.service` template, per-channel producer) changes —
-  discovery only fills in the `url` field.
-- Fits the shadow-reporting idea from §16.6: a "discovered but unconfigured" camera could
-  appear as a candidate before an operator assigns it a channel slot.
+Not in the agent, as first planned: in the **local admin GUI** (`adapter/onvif-admin/`),
+a LAN-only Flask app on the Pi — because WS-Discovery is multicast and only works from a
+process on the cameras' own segment, and because registration also has to write local
+state (MediaMTX path, a `kvs-cam@<path>` systemd instance). Registration writes the
+`cameras` registry row, which the agent, both GUIs and every Lambda read, so nothing
+downstream changes per camera. The periodic re-probe runs as its own timer unit.
 
-### Implementation options
-
-- **Python** (matches `agent.py`'s existing stack, using `awsiotsdk`): `WSDiscovery` (or
-  the `ws-discovery` PyPI fork) for the Probe/ProbeMatch exchange, plus `onvif-zeep` (or
-  the maintained `onvif-zeep-async` fork) for the ONVIF SOAP calls via the official WSDLs.
-  Lowest-friction path — no new language in the stack.
-- **C/C++**: `libonvif`, or gSOAP-generated ONVIF client stubs (what most camera
-  *firmwares* are built on server-side). More integration work; only worth it if the
-  control plane were being rewritten in C for other reasons.
+Implementation, as predicted here: Python, `WSDiscovery` for Probe/ProbeMatch and
+`onvif-zeep-async` for the ONVIF SOAP calls (`LAUNCH.md` A4).
 
 ### Caveats
 
@@ -176,9 +183,10 @@ manual pairing step).
 - Conformance varies a lot below "Profile S certified" — some budget/OEM cameras
   implement WS-Discovery inconsistently or not at all. A manual-URL fallback stays
   necessary regardless; discovery is additive.
-- This inconsistency is why the gap table rates it **M**, not **S**: the discovery
+- This inconsistency is why the gap table rated it **M**, not **S**: the discovery
   handshake itself is roughly a day's work; robust profile/auth handling across
-  heterogeneous firmware is where the effort actually goes.
+  heterogeneous firmware is where the effort actually goes. `cam-02` bore that out — its
+  ONVIF fields are partly unreliable (`Camera-Features.md` §3, §4).
 
 ---
 
@@ -270,7 +278,10 @@ FritzBox 7583 ──(WLAN, trusted)── Pi wlan0   (AWS: MQTT, KVS — outboun
 - **Uplink trade-off, not a blocker:** the AWS-facing link (wlan0 → FritzBox) is Wi-Fi,
   inheriting its jitter/dropout characteristics. The outbound-MQTT design (doc §7)
   already tolerates reconnects, and this incidentally gives more realistic data for the
-  §10.2 reconnect-behavior measurements than the synthetic `iptables DROP` test alone.
+  §10.2 reconnect-behavior measurements than a synthetic block alone (for which use
+  `adapter/bin/awsblock.sh`, not §10.2's IPv4-only snippet, #18).
+- **Still the state on the second Pi (checked 2026-09-26):** the uplink is `wlan0` and
+  `eth0` has no carrier — the isolated segment is not built yet.
 - **WS-Discovery interaction:** once this segment exists, bind the discovery probe to
   `eth0` explicitly (not the default route interface) — that's the interface actually
   attached to the camera's broadcast domain.
@@ -284,13 +295,16 @@ FritzBox 7583 ──(WLAN, trusted)── Pi wlan0   (AWS: MQTT, KVS — outboun
 Both channels are pinned to H.264 today, confirmed in the actual code, not just the
 runbook:
 
-- `cloud/onvif-admin/app.py:158` creates every KVS stream with `MediaType="video/h264"`.
+- `adapter/onvif-admin/app.py` (`register_camera`) creates every KVS stream with
+  `MediaType="video/h264"`.
 - `adapter/bin/stream-cam01.sh` (PW310, transcoded) and `adapter/bin/stream-cam02.sh`
-  (real ONVIF camera, genuine passthrough) both use the identical H.264-specific
-  GStreamer chain: `rtph264depay ! h264parse ! video/x-h264,... ! kvssink`.
+  (real ONVIF camera, genuine passthrough) both use the identical H.264-specific video
+  chain: `rtph264depay ! h264parse ! video/x-h264,... ! kvssink` (plus an optional AAC
+  audio branch, §18).
 
-`cam-02`'s camera supports H.265 as an alternate profile, but the RTSP URL wired into
-MediaMTX deliberately points at its H.264 profile — most ONVIF cameras expose both so an
+`cam-02`'s camera supports H.265 as an alternate profile, but its registered RTSP URL
+(`rtspUrl` in the registry, which MediaMTX is given at every start) deliberately points at
+its H.264 sub-stream — most ONVIF cameras expose both so an
 integrator can pick whichever the downstream system supports. That's a choice, not a
 camera limitation.
 
@@ -309,10 +323,9 @@ Initially considered and rejected on a "keep both channels symmetric for clean
 measurements" argument — on reconsideration, that argument doesn't hold once the change
 is scoped to `cam-02` only:
 
-- The two channels were never actually coupled. `kvs-cam@.service` is a per-channel
-  template and `channels.json` (§16.6 of the main doc) already treats each camera
-  independently — codec is just another per-channel field, not something that needs to
-  match across cameras.
+- The two channels were never actually coupled. Each camera has its own producer unit,
+  its own KVS stream and its own registry row — codec is just another per-camera
+  property, not something that needs to match across cameras.
 - **Passthrough makes the codec free on the adapter.** `stream-cam02.sh` never decodes
   anything — `rtspsrc ! rtph264depay ! h264parse ! kvssink` is a byte-level RTP relay.
   Swapping to `rtph265depay ! h265parse` with `video/x-h265` caps costs the same
@@ -341,16 +354,17 @@ rather than assuming — in keeping with the main doc's "measure, don't assert" 
 
 ### Migration steps, if pursued
 
-1. Point `cam-02`'s MediaMTX source at the camera's H.265 profile — via ONVIF
-   `GetProfiles`/`GetStreamUri` on the HEVC profile token (most cameras that offer both
-   expose them as separate profiles/paths).
+1. Point `cam-02` at the camera's H.265 profile — find the URI via ONVIF
+   `GetProfiles`/`GetStreamUri` on the HEVC profile token, then Re-register `cam-02` with
+   it in the admin GUI (`LAUNCH.md` E3), which updates the registry and the MediaMTX path.
 2. `stream-cam02.sh`: swap `rtph264depay ! h264parse` → `rtph265depay ! h265parse`, caps
    to `video/x-h265`.
 3. `MediaType` is set at KVS stream creation and can't be changed on an existing stream —
-   `cam-02`'s current stream (`stream/cam-02/1788026766462`, referenced in
-   `cloud/iam/clip-to-s3-policy.json`, `cloud/iam/get-hls-url-policy.json`,
-   `cloud/iam/kvs-producer-policy.json`) would need to be deleted and recreated with
-   `MediaType="video/h265"`, and those IAM policy ARNs updated to the new stream ARN.
+   `cam-02`'s current stream (`stream/cam-02/1788026766462`) would need to be deleted and
+   recreated with `MediaType="video/h265"`, which gives it a new ARN suffix. No IAM edit
+   follows from that: every KVS-scoped policy uses `stream/cam-*/*` (checked against the
+   deployed policies 2026-09-26; the `cloud/iam/` files now match them, FoundAndFixed.md
+   #41).
 4. Verify the producer SDK build actually has HEVC support compiled in before touching
    AWS — `gst-inspect-1.0 kvssink` and check its accepted caps — same discipline as the
    main doc's §2.6 ("verify before touching AWS").
@@ -359,7 +373,7 @@ rather than assuming — in keeping with the main doc's "measure, don't assert" 
 
 ### Cost implication
 
-`COSTS-1.3.md` §6.4 works the dollar side of this: switching `cam-02` to H.265 cuts KVS
+`COSTS-1.4.md` §7.4 works the dollar side of this (re-based onto the measured 24/7 bitrate): switching `cam-02` to H.265 cuts KVS
 ingest and viewing egress by roughly the same 40–50 % as the bitrate reduction, since KVS
 recording cost is linear in bitrate. It also shows the saving is larger on KVS than on S3
 (S3's PUT/index costs don't scale with bitrate at all), and prices out — qualitatively,
@@ -371,10 +385,14 @@ hardware HEVC decode block feeding the already-proven `v4l2h264enc` encode path.
 
 ## Open items
 
-- [ ] Write `mediamtx.service` systemd unit (referenced above, not yet created).
+- [x] ~~Write `mediamtx.service` systemd unit~~ — done as the user unit `kvs-mediamtx`
+      (`LAUNCH.md` A8), with the registry path sync as `ExecStartPost=`.
 - [ ] Decide: keep MediaMTX, or prototype `gst-rtsp-server` as a one-process replacement.
-- [ ] Implement WS-Discovery in `agent.py` once multi-camera config (§16.6) exists.
+      (MediaMTX now also serves local HLS and records the outage buffer, which raises the
+      bar for replacing it.)
+- [x] ~~Implement WS-Discovery in `agent.py`~~ — built in the local admin GUI instead,
+      plus the rematch timer (§2).
 - [ ] Wire up the Pi's built-in `eth0` for the isolated camera segment; retire the
-      camera's current path through the FritzBox's flat LAN.
+      camera's current path through the FritzBox's flat LAN. (Still open, 2026-09-26.)
 - [ ] Decide whether to run `cam-02` on H.265 (see §4) — test the ONVIF HEVC profile URI
       and browser-compatibility matrix before recreating the KVS stream.

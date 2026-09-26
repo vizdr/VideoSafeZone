@@ -34,7 +34,7 @@ find_uvc_camera() {
        return 1 ;;
     *) echo "detect-hw: ${#found[@]} MJPG-capable cameras -- set CAM_MATCH to choose one:" >&2
        printf '  %s\n' "${found[@]}" >&2
-       return 1 ;;
+       return 2 ;;                           # ambiguous: waiting would not help
   esac
 }
 
@@ -66,13 +66,28 @@ isolated_cpus() {
 
 # <mediamtx-path>: load that camera's overrides and set CAM to its video device --
 # CAM_DEVICE if the file pins one, otherwise the one camera matching CAM_MATCH.
+#
+# Waits up to CAMERA_WAIT_SEC (default 30) for the camera to *appear*: at boot the user
+# services start seconds before a USB camera's /dev/v4l/by-id link exists, and a oneshot
+# that gives up on the first look never runs again (FoundAndFixed.md #42). "Several
+# cameras" is not a timing problem and fails at once.
 camera_setup() {
   load_env_file "$ADAPTER_CAMERAS_DIR/$1.env"
-  if [ -n "${CAM_DEVICE:-}" ]; then
-    CAM="$CAM_DEVICE"
-    [ -e "$CAM" ] || { echo "detect-hw: $1: CAM_DEVICE=$CAM does not exist" >&2; return 1; }
-  else
-    CAM="$(find_uvc_camera "${CAM_MATCH:-}")" || return 1
+  local deadline=$(( SECONDS + ${CAMERA_WAIT_SEC:-30} )) rc waited=0
+  while :; do
+    if [ -n "${CAM_DEVICE:-}" ]; then
+      CAM="$CAM_DEVICE"; [ -e "$CAM" ] && rc=0 || rc=1
+    else
+      CAM="$(find_uvc_camera "${CAM_MATCH:-}" 2>/dev/null)" && rc=0 || rc=$?
+    fi
+    [ "$rc" -ne 1 ] || [ "$SECONDS" -ge "$deadline" ] && break
+    [ "$waited" -eq 1 ] || echo "detect-hw: $1: no camera yet -- waiting up to ${CAMERA_WAIT_SEC:-30} s for it to appear" >&2
+    waited=1; sleep 1
+  done
+  if [ "$rc" -ne 0 ]; then                  # repeat the failing lookup, this time with its message
+    if [ -n "${CAM_DEVICE:-}" ]; then echo "detect-hw: $1: CAM_DEVICE=$CAM does not exist" >&2
+    else find_uvc_camera "${CAM_MATCH:-}" >/dev/null; fi
+    return 1
   fi
   echo "detect-hw: $1 video device: $CAM" >&2
 }
@@ -80,6 +95,7 @@ camera_setup() {
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   [ "${1:-}" = "--print" ] || { echo "usage: $0 --print [mediamtx-path, default cam01]" >&2; exit 2; }
   path="${2:-cam01}"
+  CAMERA_WAIT_SEC=0                        # a report, not a service start: don't wait
   echo "config file   : $ADAPTER_CAMERAS_DIR/$path.env $([ -r "$ADAPTER_CAMERAS_DIR/$path.env" ] && echo '(present)' || echo '(absent -- defaults)')"
   if camera_setup "$path" 2>/dev/null; then
     echo "video device  : $CAM -> $(readlink -f "$CAM")"

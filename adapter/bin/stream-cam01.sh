@@ -50,10 +50,20 @@ if [ "${AUDIO:-off}" = "on" ]; then
     ${KVSSINK}
 fi
 
-# Video-only: byte-for-byte the pipeline that ran before audio existed.
+# Video-only: the pipeline that ran before audio existed, plus a sink for an audio track
+# MediaMTX may still carry (the publisher reads the audio flag at its own start, which can
+# be earlier than this producer's).
+# Video-only still has to *consume* an audio track if the source carries one (cam-02's
+# G.711 always is): a bare `rtspsrc ! rtph264depay` leaves
+# that pad unlinked, and when its first packets beat the video's, rtspsrc stops the whole
+# pipeline with "Internal data stream error ... not-linked" -- intermittently, so Start
+# worked only every other press (FoundAndFixed.md #43). The fakesink branch is inert when
+# there is no audio track.
 echo "stream-cam01: audio disabled (video only)"
 exec gst-launch-1.0 -v \
-  rtspsrc location="rtsp://127.0.0.1:8554/cam01" protocols=tcp latency=200 \
+  rtspsrc location="rtsp://127.0.0.1:8554/cam01" protocols=tcp latency=200 name=src \
+  src. ! application/x-rtp,media=video \
   ! rtph264depay ! h264parse config-interval=-1 \
   ! video/x-h264,stream-format=avc,alignment=au \
-  ! ${KVSSINK}
+  ! ${KVSSINK} \
+  src. ! application/x-rtp,media=audio ! fakesink sync=false async=false

@@ -1358,6 +1358,12 @@ aws lambda create-function --function-name publish-cmd \
   --environment "Variables={THING_NAME=adapter-01}" --timeout 10 --region eu-central-1
 ```
 
+> **Don't re-run the `cat > …/cloud/iam/…` lines above against an existing checkout.** They
+> write this phase's first, single-stream policy (`cam-01`'s exact ARN) over the file in
+> the repo, which is the deployed version: `stream/cam-*/*`, so every camera — including
+> ones registered later through the admin GUI — works without an IAM edit. Use the files
+> in `cloud/iam/` as they are (FoundAndFixed.md #41).
+
 ### 8.2 Cognito user pool
 
 ```bash
@@ -1510,7 +1516,7 @@ async function cmd(action) {
   await fetch(`${API}/cmd`, {method: "POST",
     headers: {Authorization: idToken, "Content-Type": "application/json"},
     body: JSON.stringify({action})});
-  if (action === "start") setTimeout(load, 8000);   // give KVS a moment to receive fragments
+  if (action === "start") setTimeout(load, 5000);   // full client re-polls while 503 (FoundAndFixed.md #43)
 }
 </script>
 ```

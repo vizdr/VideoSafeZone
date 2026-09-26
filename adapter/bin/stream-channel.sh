@@ -15,8 +15,16 @@ VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
 CERTS="${VMS_HOME}/certs"
 
+# Video-only still has to *consume* an audio track if the source carries one (most ONVIF
+# cameras send G.711 whether or not anyone wants it): a bare `rtspsrc ! rtph264depay` leaves
+# that pad unlinked, and when its first packets beat the video's, rtspsrc stops the whole
+# pipeline with "Internal data stream error ... not-linked" -- intermittently, so Start
+# on cam-02 worked only every other press (FoundAndFixed.md #43). The fakesink branch is inert when
+# there is no audio track.
 exec gst-launch-1.0 -v \
-  rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 \
+  rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 name=src \
+  src. ! application/x-rtp,media=audio ! fakesink sync=false async=false \
+  src. ! application/x-rtp,media=video \
   ! rtph264depay ! h264parse config-interval=-1 \
   ! video/x-h264,stream-format=avc,alignment=au \
   ! kvssink stream-name="${CAMERA_ID}" aws-region="${AWS_REGION}" \

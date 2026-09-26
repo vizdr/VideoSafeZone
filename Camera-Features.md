@@ -53,8 +53,9 @@ Both profiles carry a `VideoAnalyticsConfiguration` (`VideoAnalyticsName`).
 
 **Audio is now optional and off by default** (guide §18). When enabled for a camera,
 `stream-cam02.sh` depayloads the G.711 track and transcodes it to AAC; when disabled, the
-pipeline is byte-for-byte the video-only one and the audio track stays discarded on the
-wire as before.
+video path is unchanged and the G.711 track is explicitly swallowed by a `fakesink`. It
+cannot simply be left unlinked: that intermittently stopped the producer at startup
+(FoundAndFixed.md #43).
 
 Four facts about this camera's audio that cost real debugging time:
 

@@ -215,8 +215,10 @@ src. ! application/x-rtp,media=audio ! queue
 - `stream-cam01.sh`: `rtpL16depay ! audioconvert ! voaacenc bitrate=32000 ! aacparse !
   audio/mpeg,mpegversion=4,stream-format=raw` → `kvs.audio_0`
 
-**With audio off, both pipelines are byte-for-byte the pre-audio ones.** Turning the
-setting off is a true revert, not a second code path that resembles one — which matters,
+**With audio off, both pipelines send exactly the pre-audio video.** The one addition is
+a `fakesink` branch that swallows an audio track the source may still carry — without it
+the unlinked pad intermittently killed the producer at startup (FoundAndFixed.md #43).
+Turning the setting off is a true revert of the video path, not a second one — which matters,
 because `cam-01`'s video chain took the `profile=high` bug to get right (FoundAndFixed.md #13).
 
 Guide §18.2 previously advised bypassing the RTSP hop entirely and going straight to
