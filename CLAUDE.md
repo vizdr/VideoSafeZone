@@ -32,8 +32,10 @@ buffering (guide §16.3c) — design, measurements and open questions — and fo
 `COSTS-1.4.md` is the cost model and authoritative for any bitrate or dollar figure;
 `Camera-Features.md` is the verified-vs-advertised inventory of the ONVIF camera (`cam-02`).
 `NETWORK.md` holds the networking notes (MediaMTX's role and ports, how discovery was
-built, the still-open camera-segment isolation and H.265 options), reviewed against the
-system 2026-09-26. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
+built, the still-open camera-segment isolation option, and a summary of the codec choice),
+reviewed against the system 2026-09-26. `measurements/codec-phase0.md` is the evidence
+behind per-camera H.264/H.265 selection (guide §21): hardware, camera, KVS and browser
+measurements, and the decisions they led to. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
 may be stale relative to the current guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
 demo is modeled on. **When in doubt about current architecture or "why is it done this
 way," read `Demo-AWS-Video-revCosts4.md` (or grep it for the relevant §-number) before
@@ -209,6 +211,21 @@ boundary. With audio off, every pipeline sends exactly the pre-audio video — b
 track the source still carries must be consumed by a `fakesink`, never left unlinked:
 an unlinked `rtspsrc` pad intermittently kills the producer at startup (FoundAndFixed.md #43).
 
+**Video codec is per camera — H.264 or H.265 — and is set on the camera itself** (guide
+§21). Only a codec the hardware encodes is offered: the Pi 4 has no HEVC encoder and
+software x265 can't hold 720p15, so `cam-01` is H.264-only; an ONVIF camera offers what
+its encoder does. The admin GUI switches the camera's encoder over ONVIF Media2
+(`adapter/onvif_media2.py`, every write read back), so the preview, outage buffer and
+cloud stream all follow; there is deliberately no cloud route to change it. Capabilities
+and the hardware-first default live in the registry (`adapter/codec_caps.py`), for the
+GUIs only. **Producers never ask the registry which codec to expect**:
+`adapter/bin/stream-codec.py` asks MediaMTX what is arriving, and `producer-lib.sh`
+builds the chain. H.265 caps must pin `stream-format=hvc1`, or KVS ingests fine and can't
+play it back (kvssink sends CPD only from `codec_data`). KVS also refuses a clip or
+ON_DEMAND session spanning a codec switch, so the clip Lambdas split windows at
+`videoCodecActiveSince`. H.264 stays the default because browser H.265 support depends
+on browser *and* machine; both GUIs probe the viewer's browser at runtime.
+
 The constraint that shapes all of it: **KVS's ingest and playback paths accept different
 codecs, and ingest is the permissive one.** `kvssink` takes G.711 and malformed AAC
 codec-private-data without complaint; `GetHLSStreamingSessionURL`/`GetClip` then refuse to
@@ -235,7 +252,11 @@ Measured effect on a 5-minute outage: gap-fill 27.4% → 99.8%.
 A separate KVS producer process per camera (`kvs-cam01.service` / `kvs-cam02.service` /
 GUI-registered `kvs-cam@<path>.service` instances, named by MediaMTX path, e.g.
 `kvs-cam@cam03` — not by camera ID) pulls from MediaMTX's RTSP and pushes to its own
-Kinesis Video Stream. **This is the layer Start/Stop buttons (in either GUI) actually
+Kinesis Video Stream. Each runs its pipeline through `producer_run`
+(`adapter/bin/producer-lib.sh`), which exits non-zero whenever the pipeline ends: a
+session MediaMTX closes (camera dropped, codec switched) is otherwise a clean exit that
+`Restart=on-failure` ignores, leaving the stream down while the unit looks stopped
+(FoundAndFixed.md #44). **This is the layer Start/Stop buttons (in either GUI) actually
 control** — toggling it does not affect MediaMTX or the camera's own feed, which keep
 running regardless. This is a common point of confusion: the "local preview" (MediaMTX
 HLS) and the "KVS push" (cloud) are independent signals.
@@ -243,8 +264,9 @@ HLS) and the "KVS push" (cloud) are independent signals.
 ### The camera registry is the single source of truth — not a hardcoded list
 
 A DynamoDB table `cameras` (PK `cameraId`, e.g. `"cam-01"`) holds each camera's mode
-(`transcode`/`passthrough`), ONVIF credentials, RTSP URL, IR-control capability, and KVS
-stream ARN. Every Lambda that needs to validate a camera ID, and `agent.py`'s MQTT
+(`transcode`/`passthrough`), ONVIF credentials, RTSP URL, IR-control capability, KVS
+stream ARN, and its video-codec capabilities and choice (`videoCodecCaps`, `videoCodec`,
+`videoCodecActive`; guide §21.2). Every Lambda that needs to validate a camera ID, and `agent.py`'s MQTT
 handler, read this table directly — there is no hardcoded allow-list anywhere. Adding a
 camera through the ONVIF admin GUI (below) makes it work everywhere (cloud client,
 MQTT control, all API routes) immediately, with no code change. IAM for
@@ -277,8 +299,8 @@ DynamoDB access on `cameras`) — see `cloud/iam/kvs-producer-policy.json`. The 
 `client/index.html` — the **cloud** client. Static, S3-hosted, Cognito-authenticated,
 reachable from anywhere. Talks only to API Gateway/Lambda/MQTT; has no LAN access.
 Renders one panel per camera fetched from `GET /cameras` (not hardcoded), with live view
-(cloud HLS via KVS), manual recording, evidence-clip browsing/tiering, and per-camera IR
-control where applicable.
+(cloud HLS via KVS), manual recording, evidence-clip browsing/tiering, per-camera IR
+control where applicable, and each camera's codec shown read-only.
 
 `adapter/onvif-admin/` — a small local Flask app, LAN-only, no login, run directly on the
 Pi. It exists because **WS-Discovery is UDP multicast and only works from a process on
@@ -289,7 +311,7 @@ instance via the input-validated `adapter/bin/provision-camera.sh`, creates the 
 stream, writes the `cameras` row), re-registration for an already-known camera (updates
 MediaMTX's path + the registry row, but deliberately never touches systemd for `cam-01`/
 `cam-02` — they predate the `kvs-cam@` template, and re-provisioning them would start a
-second, conflicting producer), and local control (Start/Stop, IR mode, a live
+second, conflicting producer), and local control (Start/Stop, IR mode, the camera's video codec, a live
 `systemctl is-active`-backed status column, and the local-HLS preview mentioned above).
 
 A camera's identity is its WS-Discovery endpoint reference (`onvifEndpointRef`,

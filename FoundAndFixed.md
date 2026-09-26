@@ -16,7 +16,8 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-43 defects, from the first build (2026-08-20) to the move onto a second Pi (2026-09-24/25).
+45 defects, from the first build (2026-08-20) through the move onto a second Pi
+(2026-09-24/25) to the codec-selection work (2026-09-26).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -63,11 +64,13 @@ advice (guide §15 "Known traps").
 | 41 | `cloud/iam/` policy files had drifted from the deployed policies | IaC / docs | 2026-09-26 | fixed |
 | 42 | cam-01 dead after a reboot: camera not yet enumerated, and nothing retried | systemd / detection | 2026-09-26 | fixed |
 | 43 | cam-02 played only after several Start/Stop/Reload rounds | pipeline / client | 2026-09-26 | fixed |
+| 44 | A producer stopped for good whenever MediaMTX closed its session | pipeline / systemd | 2026-09-26 | fixed |
+| 45 | Manual recording without footage returned a raw AWS 500, not the intended 503 | Lambda | 2026-09-26 | fixed |
 
 ### What they have in common
 
-- **Most were silent.** #5, #7, #13, #15, #16, #18, #20, #21, #32, #36, #37, #39 and #42 all
-  passed "it ran without errors". The recurring cause is a tool that reports success on
+- **Most were silent.** #5, #7, #13, #15, #16, #18, #20, #21, #32, #36, #37, #39, #42 and #44
+  all passed "it ran without errors". The recurring cause is a tool that reports success on
   the wrong question. `systemctl is-active` says `inactive` for a unit that doesn't exist
   (#7, #37). `check=False` swallows a failure (#7). `ffmpeg` plays what a browser won't
   (#13). KVS ingest accepts what KVS playback refuses (#16). `sudo -n` passes on a cached
@@ -840,4 +843,62 @@ Start as "not yet": it first looks at 5 s and re-polls every 3 s for up to 45 s,
 `kvs-cam02` Start/Stop cycles with zero `not-linked` and zero restarts, cam-02 frame
 decoded from cloud HLS (H.264 High 640×360, on-screen clock matching capture time), client
 deployed and served by CloudFront.
+
+---
+
+## Codec selection (2026-09-26)
+
+### #44 — A producer stopped for good whenever MediaMTX closed its session
+
+**Found:** 2026-09-26, live test for H.264/H.265 selection (`measurements/codec-phase0.md`):
+switching `cam-02`'s encoder to H.265 while `kvs-cam02` was streaming left the unit
+`inactive`, not `failed`, and nothing restarted it.
+**Referenced from:** `adapter/bin/producer-lib.sh` (`producer_run`), `stream-cam01.sh`,
+`stream-cam02.sh`, `stream-channel.sh`.
+
+Every producer ended in `exec gst-launch-1.0 …`, so gst-launch's exit status was the
+unit's. A camera-side codec switch makes MediaMTX restart the path, and a restarting path
+closes its readers. rtspsrc reports that as a clean end of stream: journal `The server
+closed the connection.` → `Got EOS from element "pipeline0"` → exit 0 → systemd
+`Deactivated successfully`. `Restart=on-failure` does not restart a clean exit, so the
+cloud stream stayed down while the unit looked exactly like a user Stop (`Result=success`,
+`NRestarts=0`, GUI status "inactive").
+
+Not specific to codec switching: MediaMTX closes a path's readers whenever its source goes
+away or changes. That covers a camera dropping off the network (`cam-02` did, for 5 min,
+the same day), a re-registration that moves the source URI, and a restart of `cam-01`'s
+publisher. It was silent because the failure looked like success at every layer.
+
+**Fix:** `producer_run` in `adapter/bin/producer-lib.sh` replaces `exec`. It runs the
+pipeline and treats any return as a failure: it logs `pipeline ended (source closed the
+session)` and exits 1, and the existing `Restart=on-failure` restarts it 5 s later. A real
+Stop never reaches that exit, because systemd signals the whole unit. The gst-launch
+argument lists are unchanged token for token (checked by running old and new scripts
+against a stub `gst-launch-1.0`). Verified live on `cam-02`: H.264 → H.265 → H.264 camera
+switches while streaming, each followed by a restart within ~10 s on the new codec; cloud
+HLS `avc1` → `hvc1` → `avc1` with decoded frames; Stop still leaves the unit `inactive`.
+
+### #45 — Manual recording without footage returned a raw AWS 500, not the intended 503
+
+**Found:** 2026-09-26, while making clips survive a codec switch (codec selection Phase 5).
+**Referenced from:** `cloud/lambda/record_clip.py`, `cloud/lambda/clip_to_s3.py`
+(`no_fragments`); `get_hls_url.py` carries the same lesson in a comment.
+
+`record_clip.py` meant to answer "no footage found for that time range -- was the stream
+live throughout?" with a 503 when KVS had nothing for the window. It caught
+`kv.exceptions.ResourceNotFoundException`, but `GetClip` is called on the
+`kinesis-video-archived-media` client, and boto3 generates a separate exception class per
+client, so the handler never matched. Every such request fell through to the generic
+handler: HTTP 500 carrying the raw AWS text. Reproduced by calling the unfixed handler for
+a window with no footage: `500 {'error': 'An error occurred (ResourceNotFoundException)
+when calling the GetClip operation: No fragments found in the stream for the clip
+request.'}`. `get_hls_url.py` once had the identical fault; it was fixed there with an
+explanatory comment but never recorded, so the pattern survived next door.
+
+**Fix:** both clip Lambdas match on the error *code* (`no_fragments()`:
+`ClientError` with `Code == "ResourceNotFoundException"`), as `get_hls_url.py` does.
+The codec-switch split needs exactly that test anyway: one side of a split may
+legitimately have no footage. Verified on the deployed `record-clip`: the same empty window
+now returns `503 {'error': 'no footage found for that time range -- was the stream live
+throughout?'}`.
 

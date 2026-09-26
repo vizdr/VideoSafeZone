@@ -762,6 +762,7 @@ Detection never guesses: no camera, or more than one, is an error naming the can
 # audio device  : hw:CARD=…,DEV=0
 # buffer mount  : …                (A10's stick, found by LABEL=vms-buffer)
 # isolated CPUs : …                (empty = no isolcpus; A3's taskset pinning protects nothing)
+# HW encoders   : h264             (a Pi 4 has no H.265 encoder — why cam-01 is H.264-only, guide §21.1)
 ```
 
 **Only if needed** — a second USB camera, a different model, or other lighting — create
@@ -962,6 +963,24 @@ stricter than `ffmpeg` and has caught two regressions here that `ffmpeg` passed 
 To toggle audio: tick "Record audio with video" in the cloud client, or "with audio" in
 the local admin table. It applies on the camera's **next Start**, by design (§18.7).
 
+### If a camera runs H.265 (guide §21)
+
+H.264 is every camera's default; H.265 is switched on per camera in the admin GUI (E6).
+The producer picks the codec MediaMTX actually receives, so check that chain end to end:
+
+```bash
+curl -s http://127.0.0.1:8080/api/cameras/cam-02/on-wire          # {"onWire": "h265"}
+journalctl -u kvs-cam02.service -n 80 | grep -E 'video h26|stream-codec'   # "video h265"
+aws kinesisvideo describe-stream --stream-name cam-02 --query StreamInfo.MediaType   # video/h265
+# step 2 above, then: the master playlist must say CODECS="hvc1..." -- and a decoded frame:
+curl -s "$URL" | grep -o 'CODECS="[^"]*"'
+ffmpeg -skip_frame nokey -i "$URL" -frames:v 1 -vsync 0 -y /tmp/h265.png
+```
+
+Then a **browser**, and on the machines that will actually watch: whether H.265 plays
+depends on browser *and* machine (on Windows, Firefox and Edge need Microsoft's HEVC Video
+Extensions). Both GUIs say so when the viewer's browser can't decode it.
+
 ### If outage buffering is enabled (OUTAGE.md)
 
 Off by default. When on, footage is buffered to the USB stick while AWS is unreachable and
@@ -1117,6 +1136,7 @@ journalctl --user -u kvs-camera-rematch | grep rematch    # what each run did
 | **Recording** | `manual` / `motion` / `cellMotion` / `human` — consumed by `kvs-event-watcher` |
 | **Start/Stop Remote** | starts/stops the KVS producer, i.e. what costs money |
 | **IR Auto/Off/On** | day-night switch, where the camera supports it |
+| **Mode / video** | the camera's codec, H.264 or H.265, where its hardware encodes it — see E6 |
 
 Motion analytics (sensitivity, cell mask, alarm delays) are shown **read-only** in section
 3 of the page. That is not a UI shortcut: `SetVideoAnalyticsConfiguration` is a silent
@@ -1133,6 +1153,25 @@ systemctl is-active kvs-cam@camNN.service                   # is the producer up
 ```
 
 Then Part C's KVS check to confirm media is reaching the cloud.
+
+### E6. Switch a camera's codec (H.264 / H.265)
+
+Only here — the cloud client shows the codec but cannot change it. Pick it in the
+**Mode / video** column; the page asks for confirmation, then follows the codec actually
+arriving until it reads "on the wire: H.265". What to expect (guide §21):
+
+- **The camera itself switches**, so the local preview, the outage buffer and the cloud
+  stream all follow — there is no per-consumer codec.
+- **Only codecs the hardware encodes are offered.** `cam-01` shows H.265 as *not
+  available* with the reason (it would need software encoding, which this Pi can't sustain).
+- **A running cloud stream restarts itself**: ~3 s for the camera to apply the change,
+  7–14 s until MediaMTX has it, ~10 s without cloud video. No Stop/Start needed.
+- **Clips can't span the switch**: a recording or detection across it is saved as two
+  clips, one per codec, labelled `codec-switch`.
+- **Viewers need a browser that decodes H.265** — see Part C's H.265 check.
+
+Codec capabilities are read when the admin GUI starts and at (re-)registration. To see what
+would be recorded, without writing: `venv-adapter/bin/python3 adapter/codec_caps.py --dry-run`.
 
 ### Gotchas found the hard way
 

@@ -15,17 +15,26 @@ VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
 CERTS="${VMS_HOME}/certs"
 
+# H.264 or H.265 -- whatever MediaMTX is actually receiving from the camera, whose codec is
+# set on the camera itself (admin GUI). No video within the wait: fail, systemd retries.
+VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
+             ${VMS_HOME}/adapter/bin/stream-codec.py "${CAMERA_ID}")" \
+  || { echo "stream-channel ${CAMERA_ID}: no H.264/H.265 video from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
+eval "${VIDEO_ENV}"
+source "${VMS_HOME}/adapter/bin/producer-lib.sh"
+VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
+echo "stream-channel ${CAMERA_ID}: video ${VIDEO_CODEC}"
+
 # Video-only still has to *consume* an audio track if the source carries one (most ONVIF
 # cameras send G.711 whether or not anyone wants it): a bare `rtspsrc ! rtph264depay` leaves
 # that pad unlinked, and when its first packets beat the video's, rtspsrc stops the whole
 # pipeline with "Internal data stream error ... not-linked" -- intermittently, so Start
 # on cam-02 worked only every other press (FoundAndFixed.md #43). The fakesink branch is inert when
 # there is no audio track.
-exec gst-launch-1.0 -v \
+producer_run "stream-channel ${CAMERA_ID}" -v \
   rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 name=src \
   src. ! application/x-rtp,media=audio ! fakesink sync=false async=false \
   src. ! application/x-rtp,media=video \
-  ! rtph264depay ! h264parse config-interval=-1 \
-  ! video/x-h264,stream-format=avc,alignment=au \
+  ! ${VIDEO_CHAIN} \
   ! kvssink stream-name="${CAMERA_ID}" aws-region="${AWS_REGION}" \
       iot-certificate="iot-certificate,endpoint=${IOT_CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=${IOT_ROLE_ALIAS},iot-thing-name=${THING_NAME}"

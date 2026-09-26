@@ -44,6 +44,13 @@
   }
   .preview-box video { width: 100%; height: 100%; object-fit: cover; }
   .preview-box .preview-msg { color: #999; font-size: 0.7rem; text-align: center; padding: 0 4px; }
+  /* Can this browser decode H.265? Always shown here, unlike the cloud client: this is
+     where a camera gets switched to H.265, so the answer matters before the switch. */
+  .hevc-note { font-size: 0.85rem; line-height: 1.45; margin: 0.4rem 0 0.6rem; color: #555; }
+  .hevc-note.missing {
+    padding: 0.5rem 0.8rem; border: 1px solid #d4a017; border-left: 5px solid #d4a017;
+    border-radius: 4px; background: #fff8e1; color: #5c4400;
+  }
 </style>
 </head>
 <body>
@@ -61,9 +68,10 @@
 <div id="devices"></div>
 
 <h2>2. Registered cameras</h2>
+<p id="hevcNote" class="hevc-note"></p>
 <button onclick="loadCameras()">Refresh</button>
 <table id="camerasTable">
-  <thead><tr><th>ID</th><th>Mode</th><th>IR</th><th>Host</th><th>Local preview</th><th>KVS push</th><th>Recording</th><th>Control</th></tr></thead>
+  <thead><tr><th>ID</th><th>Mode / video</th><th>IR</th><th>Host</th><th>Local preview</th><th>KVS push</th><th>Recording</th><th>Control</th></tr></thead>
   <tbody id="camerasBody"></tbody>
 </table>
 
@@ -191,6 +199,41 @@ async function register(i) {
 // with its <video> element already gone) instead of tearing it down first.
 let previewPlayers = {};
 
+// Whether this browser can decode H.265 is asked of the browser at runtime, never guessed
+// from the user agent: it depends on the browser AND the machine. On one Windows PC only
+// Chrome played H.265 while Firefox and Edge could not until Microsoft's "HEVC Video
+// Extensions" were installed; on another PC that had them, all three did
+// (measurements/codec-phase0.md §7). Same probe as the cloud client (client/index.html).
+const HEVC_TYPE = 'video/mp4; codecs="hvc1.1.6.L90.0"';
+const HEVC_STORE_URL = "https://apps.microsoft.com/detail/9nmzlz57r3t7";
+
+function hevcPlayable() {
+  const MS = window.ManagedMediaSource || window.MediaSource;
+  if (window.Hls && Hls.isSupported()) return !!(MS && MS.isTypeSupported(HEVC_TYPE));
+  return document.createElement("video").canPlayType(HEVC_TYPE) !== "";
+}
+
+function renderHevcNote() {
+  const n = document.getElementById("hevcNote");
+  if (hevcPlayable()) {
+    n.className = "hevc-note";
+    n.textContent = "✓ This browser can play H.265 — the local preview (and the cloud " +
+      "client) will show cameras set to H.265.";
+    return;
+  }
+  const fix = /Windows/.test(navigator.userAgent)
+    ? `On Windows, install Microsoft's <a href="${HEVC_STORE_URL}" target="_blank" ` +
+      `rel="noopener">HEVC Video Extensions</a> (German Windows: „HEVC-Videoerweiterungen“) ` +
+      `from the Microsoft Store, then restart the browser — Firefox and Edge need it to ` +
+      `decode H.265.`
+    : `Use a browser or device that can decode H.265 (HEVC) to watch those cameras.`;
+  n.className = "hevc-note missing";
+  n.innerHTML = `<strong>This browser can't play H.265.</strong> Cameras set to H.265 ` +
+    `will not show in the local preview or in the cloud client here; H.264 cameras are ` +
+    `not affected. ${fix} Before switching a camera to H.265, check that the browsers ` +
+    `used to watch it can play it.`;
+}
+
 function stopPreview(id) {
   if (previewPlayers[id]) {
     previewPlayers[id].destroy();
@@ -224,7 +267,12 @@ function togglePreview(id, mediamtxPath) {
     hls.attachMedia(video);
     hls.on(Hls.Events.ERROR, (evt, data) => {
       if (data.fatal) {
-        box.innerHTML = `<span class="preview-msg">no signal</span>`;
+        // A codec the browser can't decode is not "no signal" -- the camera is fine.
+        // Firefox and Edge without the HEVC extension report exactly this for H.265.
+        const msg = data.details === Hls.ErrorDetails.MANIFEST_INCOMPATIBLE_CODECS_ERROR
+          ? "H.265 — this browser can't play it (see note above)"
+          : "no signal";
+        box.innerHTML = `<span class="preview-msg">${msg}</span>`;
         btn.textContent = "▶ Local preview";
         stopPreview(id);
       }
@@ -239,6 +287,101 @@ function togglePreview(id, mediamtxPath) {
 }
 
 let currentCameraIds = [];
+let mediamtxPathById = {};
+
+// ---- Video codec (H.264 / H.265) --------------------------------------------------------
+// Chosen here and only here, and applied to the camera itself: its own encoder switches,
+// so MediaMTX, the local preview, the outage buffer and the cloud stream all follow. Only
+// codecs the camera's (or the Pi's) hardware produces are selectable; for any other the
+// reason is shown instead of the option silently missing (codec_caps.py).
+const CODEC_NAMES = { h264: "H.264", h265: "H.265" };
+const ENCODER_NAMES = { camera: "camera encoder", "pi-hw": "Pi hardware encoder" };
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+}
+
+function selectedCodec(c) { return c.videoCodec || c.videoCodecDefault || "h264"; }
+
+function codecOptions(c) {
+  const caps = c.videoCodecCaps || {};
+  return Object.keys(CODEC_NAMES).map(k => {
+    const off = (c.videoCodecUnavailable || {})[k];
+    const label = off ? `${CODEC_NAMES[k]} — not available`
+                      : `${CODEC_NAMES[k]} · ${ENCODER_NAMES[caps[k]] || "hardware"}`;
+    return `<option value="${k}" ${off ? "disabled" : ""}>${label}</option>`;
+  }).join("");
+}
+
+function codecStatus(c) {
+  const lines = [c.onWireCodec ? `on the wire: ${CODEC_NAMES[c.onWireCodec]}`
+                               : "no video from this camera right now"];
+  for (const [k, reason] of Object.entries(c.videoCodecUnavailable || {})) {
+    lines.push(`${CODEC_NAMES[k]} unavailable: ${esc(reason)}`);
+  }
+  if (selectedCodec(c) === "h265" && !hevcPlayable()) {
+    lines.push("this browser can't show H.265 — see the note above");
+  }
+  return lines.join("<br>");
+}
+
+async function waitOnWire(id, codec, seconds) {
+  for (let i = 0; i < seconds; i++) {
+    try {
+      if ((await api(`/api/cameras/${id}/on-wire`)).onWire === codec) return true;
+    } catch (e) { /* MediaMTX mid-reconnect; keep asking */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return false;
+}
+
+async function setCodec(id, codec) {
+  const sel = document.getElementById(`codec-${id}`);
+  const el = document.getElementById(`codecStatus-${id}`);
+  const prev = sel.dataset.current;
+  if (codec === prev) return;
+  const name = CODEC_NAMES[codec];
+  const msg = [
+    `Switch ${id} to ${name}?`, "",
+    "This changes the camera's own encoder, so the local preview, the outage buffer and " +
+    "the cloud stream all switch with it.",
+    "• If the cloud stream is running, it restarts by itself — about 10 s without video.",
+    "• A recorded clip cannot span the moment of the switch.",
+  ];
+  if (codec === "h265") {
+    msg.push("• Viewers whose browser can't decode H.265 will not see this camera " +
+             "(both GUIs tell them how to fix that).");
+    if (!hevcPlayable()) msg.push("", "This browser can't play H.265: the local preview here will stay blank.");
+  }
+  if (!confirm(msg.join("\n"))) { sel.value = prev; return; }
+
+  const wasPreviewing = !!previewPlayers[id];
+  sel.disabled = true;
+  el.textContent = `switching the camera to ${name}…`;
+  try {
+    const r = await api(`/api/cameras/${id}/codec`, { method: "POST",
+      body: JSON.stringify({ videoCodec: codec }) });
+    sel.dataset.current = codec;
+    if (r.switched) {
+      el.textContent = `camera switched to ${name} — waiting for its video (~10 s)…`;
+      const arrived = await waitOnWire(id, codec, 30);
+      el.textContent = arrived
+        ? `on the wire: ${name}` + (r.producer === "active" ? " — cloud stream restarting by itself (~10 s)" : "")
+        : `camera accepted ${name}, but no ${name} video has arrived yet — check the preview`;
+    } else {
+      el.textContent = `${name} — no change needed`;
+    }
+    if (wasPreviewing) {            // the old preview died with the old stream; start a new one
+      stopPreview(id);
+      togglePreview(id, mediamtxPathById[id]);
+    }
+  } catch (e) {
+    sel.value = prev;               // never show a codec the camera refused
+    el.textContent = e.message;
+  } finally {
+    sel.disabled = false;
+  }
+}
 
 async function loadCameras() {
   for (const id in previewPlayers) stopPreview(id);
@@ -258,7 +401,16 @@ async function loadCameras() {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${c.cameraId}</td>
-        <td>${c.mode}</td>
+        <td>${c.mode}
+          <div style="margin-top:4px">
+            <select id="codec-${c.cameraId}" onchange="setCodec('${c.cameraId}', this.value)"
+                    style="font-size:0.8rem"
+                    title="Video codec, set on the camera itself: preview, outage buffer and cloud stream all follow">
+              ${codecOptions(c)}
+            </select>
+            <div id="codecStatus-${c.cameraId}" class="status">${codecStatus(c)}</div>
+          </div>
+        </td>
         <td>${c.hasIrControl ? "yes" : "no"}</td>
         <td>${c.onvifHost || ""}</td>
         <td class="preview-cell">
@@ -329,6 +481,9 @@ async function loadCameras() {
       if (aud) aud.checked = !!c.audioEnabled;
       const ob = tr.querySelector(`#outage-${c.cameraId}`);
       if (ob) ob.value = String(c.outageBufferSec || 0);
+      const cs = tr.querySelector(`#codec-${c.cameraId}`);
+      if (cs) { cs.value = selectedCodec(c); cs.dataset.current = cs.value; }
+      mediamtxPathById[c.cameraId] = c.mediamtxPath;
     }
     const anSel = document.getElementById("anCam");
     if (anSel) {
@@ -461,6 +616,7 @@ async function setIr(id, mode) {
   }
 }
 
+renderHevcNote();
 loadCameras();
 </script>
 </body>

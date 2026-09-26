@@ -82,6 +82,13 @@ def track_signature(probe: dict) -> tuple:
     return tuple(sorted(sig))
 
 
+def video_codec(probe: dict) -> str | None:
+    for s in probe["streams"]:
+        if s["codec_type"] == "video":
+            return s.get("codec_name")
+    return None
+
+
 def audio_rate(probe: dict) -> int | None:
     for s in probe["streams"]:
         if s["codec_type"] == "audio":
@@ -151,6 +158,12 @@ def merge(chunk: list[tuple[Path, dict]], out: Path) -> bool:
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-f", "concat", "-safe", "0",
            "-i", str(listing), "-fflags", "+genpts", "-max_interleave_delta", "0",
            "-c:v", "copy"]
+    # H.265 must leave as `hvc1`: Safari (and QuickTime) refuse the `hev1` sample entry,
+    # and `-c:v copy` keeps whatever tag the segments carry -- measured: an hev1 input
+    # merges to an hev1 clip. Forcing it makes the clip independent of the recorder's
+    # choice (codec-phase0.md §3: KVS GetClip clips are hvc1 already).
+    if video_codec(chunk[0][1]) == "hevc":
+        cmd += ["-tag:v", "hvc1"]
     cmd += (["-c:a", "aac", "-b:a", abr] if rate else ["-an"])
     cmd += ["-movflags", "+faststart", "-y", str(out)]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -162,7 +175,8 @@ def merge(chunk: list[tuple[Path, dict]], out: Path) -> bool:
 
 
 def upload_and_register(session, camera_id: str, merged: Path,
-                        start: datetime, duration: float, labels: list[str]) -> bool:
+                        start: datetime, duration: float, labels: list[str],
+                        codec: str | None = None) -> bool:
     """Upload, confirm, then register. Returns True only if all three succeeded."""
     from boto3.s3.transfer import TransferConfig
     from botocore.config import Config
@@ -200,6 +214,8 @@ def upload_and_register(session, camera_id: str, merged: Path,
                 "s3Key": key,
                 "labels": labels,
                 "durationSec": int(round(duration)),
+                # shown after the duration in the cloud client's clip list
+                **({"videoCodec": codec} if codec else {}),
             },
             # clip_to_s3.py and record_clip.py both put_item unconditionally; do not copy
             # that here. A key collision with a real evidence clip must fail loudly rather
@@ -256,7 +272,10 @@ def process_group(session, capture_dir: Path, cam_dir: Path, camera_id: str,
                 labels.append("gap-before" if run_idx else "")
             labels = [l for l in labels if l]
 
-            if upload_and_register(session, camera_id, merged, start, dur, labels):
+            # A run shares one track layout (codec included), so its first segment's
+            # probe speaks for the whole chunk. ffprobe says "hevc"; the registry says "h265".
+            codec = {"h264": "h264", "hevc": "h265"}.get(video_codec(chunk[0][1]))
+            if upload_and_register(session, camera_id, merged, start, dur, labels, codec):
                 for p, _ in chunk:
                     p.unlink(missing_ok=True)     # only after a confirmed 200
                 merged.unlink(missing_ok=True)

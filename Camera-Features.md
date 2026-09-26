@@ -10,6 +10,10 @@ The figures repeated here are a summary for convenience and defer to it on confl
 `COSTS-1.3.md` is superseded: several of its point estimates were single samples taken
 under unrecorded lighting, and v1.4 re-bases them.
 
+**The camera's raw ONVIF capability replies** — every service it advertises, queried live
+and redacted — are in `CAM02-CAPABILITIES.md`. They are *advertised* by definition; this
+file stays authoritative for what was verified.
+
 **Every row is marked verified or advertised.** This project has been bitten repeatedly by
 the difference — a service can appear in `GetServices` and still fault on every call (see
 "What does not work" below), and the whole point of an inventory is to be trustworthy
@@ -50,6 +54,14 @@ recording); Media streaming supports RTP multicast, RTP/TCP and RTP/RTSP/TCP.
 | `SubStream` | H.264 **640×360** @ 15 fps, 500 kbps configured | G.711 64 kbps | **yes** (`cam-02` ingests this) |
 
 Both profiles carry a `VideoAnalyticsConfiguration` (`VideoAnalyticsName`).
+
+**H.265: verified** (2026-09-26, `measurements/codec-phase0.md` §2). Both encoders offer
+H265 — Main up to 2560×1440 (128–8192 kbps), Sub up to 640×360 (64–2048 kbps) — but only
+through **Media2** (`ver20/media`); Media1 cannot express it. Switching `VideoEncodeSub`
+with `SetVideoEncoderConfiguration` sticks on read-back, keeps the RTSP URI, and MediaMTX
+reconnects by itself (~7 s gap). The read-back still says `Profile="High"` under H265; the
+bitstream is Main. Both encoders use GOP 45 (3 s). Switching is now a per-camera setting
+in the local admin GUI (guide §21).
 
 **Audio is now optional and off by default** (guide §18). When enabled for a camera,
 `stream-cam02.sh` depayloads the G.711 track and transcodes it to AAC; when disabled, the
@@ -157,7 +169,12 @@ separate claims here, and an earlier revision got the boundary wrong.
 - *ONVIF:* `SetVideoAnalyticsConfiguration` is a **silent no-op** on this camera — it
   returns success and changes nothing. Verified by sending `Sensitivity=55` (payload
   confirmed to carry 55) and reading back `80` immediately after, twice. The advertised
-  ONVIF 2.0 analytics service (`ver20/analytics/wsdl`) exposes **no callable operations**.
+  ONVIF 2.0 analytics service (`ver20/analytics/wsdl`) *does* answer its read calls —
+  `GetSupportedRules`, `GetRules`, `GetSupportedAnalyticsModules`, `GetAnalyticsModules`
+  (**verified** 2026-09-26 with raw SOAP, `CAM02-CAPABILITIES.md` §7); only its
+  `GetServiceCapabilities` faults. An earlier revision said it exposes no callable
+  operations at all, which is withdrawn. Its write calls (`ModifyRules`,
+  `ModifyAnalyticsModules`) remain *untested*.
   An earlier revision claimed "both are writable via `SetVideoAnalyticsConfiguration`" —
   inferred from the parameters being exposed, never tested, and **wrong**.
 - *Vendor HTTP API:* the camera's **own web UI does set the cell grid and sensitivity**,

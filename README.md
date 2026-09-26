@@ -75,6 +75,7 @@ either GUI controls exactly that process.
 | **ONVIF detection** | Motion, cell-grid motion and human-shape detection drive automatic clip capture |
 | **ONVIF device control** | IR-cut filter (day/night) from either GUI; WS-Discovery + one-click camera registration from a local admin app |
 | **Optional audio** | Per-camera, off by default, for both cameras — [`AUDIO.md`](AUDIO.md) |
+| **H.264 or H.265, per camera** | Wherever the camera's own hardware encodes it; set on the camera from the local admin GUI, shown read-only in the cloud client. H.264 stays the default, and a viewer whose browser can't decode H.265 is told how to fix it — guide §21 |
 | **Durable outage buffering** | Records to a USB stick while AWS is unreachable and backfills on recovery — [`OUTAGE.md`](OUTAGE.md) |
 | **Remote control** | Outbound MQTT over 443 (ALPN), so it traverses HTTPS-only firewalls |
 | **Device identity** | One X.509 certificate and an IoT role alias — **no static AWS keys on the Pi** |
@@ -314,6 +315,8 @@ adapter/            on-device Python and pipelines
   sync_mediamtx_paths.py  re-adds camera paths after every MediaMTX start
   rematch_cameras.py  follows ONVIF cameras to a new IP (timer)
   onvif_discovery.py  WS-Discovery scan + ONVIF enrichment
+  onvif_media2.py     ONVIF Media2: read and switch a camera's video codec
+  codec_caps.py       which codecs each camera can deliver, and the default
   onvif-admin/        local Flask GUI
   bin/                GStreamer pipelines, detect-hw.sh, operator tools
 config/             templates for /etc/adapter/ (adapter.env, cameras/*.env)
@@ -343,10 +346,11 @@ point — getting it wrong twice made Start/Stop silently do nothing (`FoundAndF
 | [`LAUNCH.md`](LAUNCH.md) | Operational runbook — what to run, in order, and how to verify |
 | [`COSTS-1.4.md`](COSTS-1.4.md) | The cost model. Authoritative for any bitrate or dollar figure |
 | [`Camera-Features.md`](Camera-Features.md) | What the ONVIF camera actually does, marked **verified** vs *advertised* |
+| [`CAM02-CAPABILITIES.md`](CAM02-CAPABILITIES.md) | The ONVIF camera's raw capability replies, service by service — what it *advertises* |
 | [`AUDIO.md`](AUDIO.md) | Optional audio: design, the rules its two silent bugs left, withdrawn claims |
 | [`OUTAGE.md`](OUTAGE.md) | Durable outage buffering: design, measurements, open questions |
 | [`OUTBOUND-CLOUD.md`](OUTBOUND-CLOUD.md) | The outbound-only architectural thesis |
-| [`NETWORK.md`](NETWORK.md) | MediaMTX's role and ports, how discovery was built, and two open options: an isolated camera segment on `eth0`, H.265 on `cam-02` |
+| [`NETWORK.md`](NETWORK.md) | MediaMTX's role and ports, how discovery was built, the codec choice as built (canonical: guide §21), and one open option: an isolated camera segment on `eth0` |
 | [`measurements/`](measurements/) | Raw recorded results |
 
 `COSTS-1.3.md` and `Demo-AWS-Video-MCh-15.md` are earlier material, kept for the history

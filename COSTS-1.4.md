@@ -854,26 +854,37 @@ producer-active gate takes the rolling pre-roll from ~19 GB/day of writes to ~0.
 ### 7.4 Codec — H.265 on `cam-02`
 
 Viable only on `cam-02`; `cam-01` is hardware-locked to H.264 (the Pi's VideoCore VI has
-no HEVC encode block, `NETWORK.md` §4).
+no HEVC encode block, `NETWORK.md` §4; software x265 was measured and cannot hold 720p15,
+guide §21.1). **Built 2026-09-26** as a per-camera choice in the admin GUI (guide §21).
 
 Re-based onto the 24/7 estimate (1.211 Mbps) rather than v1.3's 0.937:
 
-| | H.264 | H.265 @ 40 % | H.265 @ 50 % |
-|---|---|---|---|
-| Bitrate | 1.211 | 0.727 | 0.606 |
-| KVS recording | $3.94 | $2.36 | $1.97 |
-| S3 recording | $0.89 | $0.65 | $0.59 |
-| Delta | $3.05 | $1.72 | $1.38 |
+| | H.264 | H.265 @ 31 % *(measured\*)* | H.265 @ 40 % | H.265 @ 50 % |
+|---|---|---|---|---|
+| Bitrate | 1.211 | 0.836 | 0.727 | 0.606 |
+| KVS recording | $3.94 | $2.72 | $2.36 | $1.97 |
+| S3 recording | $0.89 | $0.70 | $0.65 | $0.59 |
+| Delta | $3.05 | $2.02 | $1.72 | $1.38 |
+
+\* **One sample, extrapolated.** `cam-02`'s sub-stream, same daylight scene, 60 s each,
+back to back: H.264 166 kbps, H.265 114 kbps (`measurements/codec-phase0.md` §5). Applying
+that ratio to the main-stream 24/7 base is an assumption, and night-time — noise-dominated,
+where §3 found the bitrate swings — is not measured yet. The S3 column uses the split the
+40/50 % columns imply ($0.29 fixed + $0.60 × bitrate ratio). Until a night sample exists,
+read the saving as **30–50 %**, not 40–50 %.
 
 Because KVS recording is linear in bitrate, **the dollar saving equals the bitrate saving
 exactly.** Not so on S3, where only the storage line moves — the same cut yields ~27–34 %
 there. H.265 pays off hardest on the architecture this document otherwise argues against.
 
-**The complication:** browser HEVC playback isn't guaranteed. `hls.js` in
-Chrome/Firefox/most Android can't reliably decode it; Safari/iOS can. Closing that needs
-either on-demand transcode at playback (real per-minute compute, unquantified) or dual
-continuous streams (paying KVS ingest twice — the codec saving and the dual-stream cost
-must be netted, not assumed additive).
+**The complication:** browser HEVC playback isn't guaranteed — and it turned out to
+depend on the browser *and* the machine rather than on the browser alone: on one Windows PC
+Chrome played it while Firefox and Edge did not until Microsoft's HEVC Video Extensions were
+installed; Safari always did (guide §21.6). The two closures priced here — on-demand
+transcode at playback (real per-minute compute, unquantified) or dual continuous streams
+(paying KVS ingest twice — the codec saving and the dual-stream cost must be netted, not
+assumed additive) — were **not** built. H.265 is opt-in per camera, H.264 stays the default,
+and a viewer whose browser can't decode it is told how to fix that. Cost: zero.
 
 ### 7.5 Segment length
 

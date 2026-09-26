@@ -8,9 +8,11 @@ source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, I
 CERTS="${VMS_HOME}/certs"
 
 # Video is genuine passthrough -- no jpegdec/videoconvert/v4l2h264enc chain like
-# stream-cam01.sh needs for the PW310. The camera already outputs real H.264 (§16.3(a));
-# this pipeline just depacketizes RTP and repackages for kvssink, which is why it's
-# dramatically lighter on CPU (§16.3(b)'s point, made concrete rather than just argued).
+# stream-cam01.sh needs for the PW310. The camera already outputs real H.264 or H.265
+# (§16.3(a); its codec is set on the camera, from the admin GUI); this pipeline just
+# depacketizes RTP and repackages for kvssink, which is why it's dramatically lighter on
+# CPU (§16.3(b)'s point, made concrete rather than just argued). Which depayloader is
+# decided by what MediaMTX actually receives -- stream-codec.py, producer-lib.sh.
 #
 # Audio is NOT passthrough, and cannot be. The camera emits G.711 A-law, which kvssink's
 # pad template does accept (audio/x-alaw) -- but KVS's *reader* APIs do not: both
@@ -55,13 +57,21 @@ AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/camera-audio.py cam-02 || true)"
 eval "${AUDIO_ENV}"
 
+# The codec MediaMTX is receiving, never the registry's opinion of it. No video within
+# the wait is a failure on purpose: systemd retries, as it always has for a dead source.
+VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
+             ${VMS_HOME}/adapter/bin/stream-codec.py cam-02)" \
+  || { echo "stream-cam02: no H.264/H.265 video from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
+eval "${VIDEO_ENV}"
+source "${VMS_HOME}/adapter/bin/producer-lib.sh"
+VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
+
 if [ "${AUDIO:-off}" = "on" ]; then
-  echo "stream-cam02: audio ENABLED (${AUDIO_CODEC:-PCMA} -> AAC 8kHz)"
-  exec gst-launch-1.0 -v \
+  echo "stream-cam02: audio ENABLED (${AUDIO_CODEC:-PCMA} -> AAC 8kHz), video ${VIDEO_CODEC}"
+  producer_run stream-cam02 -v \
     rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
-    ! rtph264depay ! h264parse config-interval=-1 \
-    ! video/x-h264,stream-format=avc,alignment=au ! queue ! kvs.video_0 \
+    ! ${VIDEO_CHAIN} ! queue ! kvs.video_0 \
     src. ! application/x-rtp,media=audio ! queue \
     ! rtppcmadepay ! alawdec ! audioconvert \
     ! audio/x-raw,rate=8000,channels=1 \
@@ -78,11 +88,10 @@ fi
 # pipeline with "Internal data stream error ... not-linked" -- intermittently, so Start
 # worked only every other press (FoundAndFixed.md #43). The fakesink branch is inert when
 # there is no audio track.
-echo "stream-cam02: audio disabled (video only)"
-exec gst-launch-1.0 -v \
+echo "stream-cam02: audio disabled (video only), video ${VIDEO_CODEC}"
+producer_run stream-cam02 -v \
   rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
   src. ! application/x-rtp,media=video \
-  ! rtph264depay ! h264parse config-interval=-1 \
-  ! video/x-h264,stream-format=avc,alignment=au \
+  ! ${VIDEO_CHAIN} \
   ! ${KVSSINK} \
   src. ! application/x-rtp,media=audio ! fakesink sync=false async=false

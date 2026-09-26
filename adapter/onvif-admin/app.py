@@ -26,9 +26,12 @@ from flask import Flask, jsonify, request, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import camera_control
+import codec_caps
 import config
+import mediamtx_api
 import onvif_discovery
 from aws_device_creds import get_session
+from onvif_media2 import Media2Client, Media2Error, encoder_summary
 
 app = Flask(__name__, static_folder="static")
 
@@ -78,6 +81,12 @@ def list_cameras():
         # so this is always derivable -- send it rather than have the page re-implement
         # the naming convention itself.
         i["mediamtxPath"] = camera_control.mediamtx_path_name(i["cameraId"])
+        # Codec selector support: what MediaMTX actually receives right now (None when the
+        # source is offline), and why any codec is not selectable -- shown in the GUI
+        # rather than silently leaving an option out (codec_caps.unavailable_reason).
+        i["onWireCodec"] = mediamtx_api.path_video_codec(i["mediamtxPath"])
+        i["videoCodecUnavailable"] = {
+            c: r for c in codec_caps.CODECS if (r := codec_caps.unavailable_reason(i, c))}
     return jsonify({"cameras": sorted(items, key=lambda c: c["cameraId"])})
 
 
@@ -149,7 +158,13 @@ def register_camera():
             values[":ref"] = endpoint_ref
         table.update_item(Key={"cameraId": camera_id}, UpdateExpression=update,
                           ExpressionAttributeValues=values)
-        return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"], "updated": True}), 200
+        # Re-ask the codec capabilities: the stream URI may now point at another profile,
+        # or the row at another device. If the camera can't be asked right now the
+        # existing answer is kept (codec_caps.refresh_item).
+        _, caps_status = codec_caps.refresh_item(
+            table, table.get_item(Key={"cameraId": camera_id})["Item"])
+        return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"],
+                        "updated": True, "codecCaps": caps_status}), 200
 
     # 1. MediaMTX path, live via its local API -- no YAML edit, no restart, so the
     #    other already-running cameras are undisturbed.
@@ -176,19 +191,32 @@ def register_camera():
         requests.delete(f"{MEDIAMTX_API}/v3/config/paths/delete/{mediamtx_path}", timeout=5)
         return jsonify({"error": f"provisioning failed: {provision.stderr.strip()}"}), 500
 
-    # 3. The KVS stream itself.
+    # 3. Which codecs the camera can deliver and which is the default (codec_caps.py) --
+    #    asked before the KVS stream exists, because its MediaType is set at creation.
+    #    A camera that can't be asked is recorded conservatively (H.265 not offered)
+    #    rather than failing a registration whose path and unit already exist.
+    row = {"cameraId": camera_id, "mode": "passthrough", "onvifHost": host, "onvifPort": port,
+           "onvifUser": user, "onvifPassword": password, "rtspUrl": stream_uri}
+    try:
+        codec_fields = codec_caps.probe(row)
+    except Exception as e:  # noqa: BLE001 -- see above
+        codec_fields = codec_caps.fallback(row, e)
+
+    # 4. The KVS stream itself.
     kv = get_session(REGION).client("kinesisvideo")
     try:
         stream_arn = kv.create_stream(
-            StreamName=camera_id, DataRetentionInHours=24, MediaType="video/h264",
+            StreamName=camera_id, DataRetentionInHours=24,
+            MediaType=f"video/{codec_fields['videoCodecDefault'] or 'h264'}",
         )["StreamARN"]
     except kv.exceptions.ResourceInUseException:
         stream_arn = kv.describe_stream(StreamName=camera_id)["StreamInfo"]["StreamARN"]
 
-    # 4. The registry row -- Phase 1 of the credential-storage plan: plain attributes.
+    # 5. The registry row -- Phase 1 of the credential-storage plan: plain attributes.
     #    Phase 2 (SSM Parameter Store SecureString + a credentialRef here instead of
     #    onvifPassword) is a deliberately deferred follow-up, not done in this pass.
     table.put_item(Item={
+        **codec_fields,
         "cameraId": camera_id,
         **({"onvifEndpointRef": endpoint_ref} if endpoint_ref else {}),
         "mode": "passthrough",
@@ -360,6 +388,66 @@ def set_outage_buffer(camera_id):
     return jsonify({"cameraId": camera_id, "outageBufferSec": secs, "appliesOn": "within 60s"})
 
 
+@app.post("/api/cameras/<camera_id>/codec")
+def set_codec(camera_id):
+    """Switch a camera's video codec -- on the camera itself, so everything downstream
+    follows: MediaMTX, the local preview, the outage buffer and the KVS producer.
+
+    Deliberately only here, in the LAN-side tool, and deliberately camera-wide (the design
+    decision behind codec selection): there is no cloud route to change it, and nothing
+    per-consumer. Only a codec the camera's own hardware produces is accepted
+    (videoCodecCaps, codec_caps.py) -- a software-encode path does not exist on this Pi.
+
+    A running KVS producer is not stopped first: MediaMTX closes its session when the
+    source's codec changes, and the producer restarts itself on the new codec in ~10 s
+    (stream-codec.py, FoundAndFixed.md #44). The registry is written only after the
+    camera reads the change back, so it never claims a codec the camera refused.
+    """
+    codec = (request.get_json(force=True, silent=True) or {}).get("videoCodec")
+    if codec not in codec_caps.CODECS:
+        return jsonify({"error": f"videoCodec must be one of {list(codec_caps.CODECS)}"}), 400
+
+    table = cameras_table()
+    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    reason = codec_caps.unavailable_reason(item, codec)
+    if reason:
+        return jsonify({"error": f"{codec_caps.NAMES[codec]} not available: {reason}"}), 400
+
+    switched = False
+    if (item.get("videoCodecCaps") or {}).get(codec) == "camera":
+        token = item.get("videoEncoderToken")
+        if not token:
+            return jsonify({"error": "no Media2 encoder recorded for this camera -- "
+                                     "re-register it to read its capabilities"}), 409
+        try:
+            cam = Media2Client.for_camera(item)
+            before = encoder_summary(cam.encoder_config(token))["codec"]
+            cam.set_codec(token, codec)          # read-back verified, raises otherwise
+        except Media2Error as e:
+            return jsonify({"error": f"camera refused the change: {e}"}), 502
+        switched = before != codec
+    # "pi-hw": the adapter's own encoder produces this codec already (cam-01, H.264-only by
+    # decision) -- there is nothing on a camera to switch, only the choice to record.
+
+    table.update_item(Key={"cameraId": camera_id},
+                      UpdateExpression="SET videoCodec = :c",
+                      ExpressionAttributeValues={":c": codec})
+    return jsonify({"cameraId": camera_id, "videoCodec": codec, "switched": switched,
+                    "producer": camera_control.get_stream_status(camera_id)})
+
+
+@app.get("/api/cameras/<camera_id>/on-wire")
+def on_wire_codec(camera_id):
+    """The codec MediaMTX receives right now -- polled by the GUI while a switch settles.
+    Local only (no registry read), so polling it costs AWS nothing."""
+    if not CAMERA_ID_RE.match(camera_id):
+        return jsonify({"error": "bad camera id"}), 400
+    path = camera_control.mediamtx_path_name(camera_id)
+    return jsonify({"cameraId": camera_id, "onWire": mediamtx_api.path_video_codec(path)})
+
+
 @app.post("/api/cameras/<camera_id>/ir")
 def set_ir(camera_id):
     mode = (request.get_json(force=True, silent=True) or {}).get("mode")
@@ -386,4 +474,8 @@ def stream_action(camera_id, action):
 
 
 if __name__ == "__main__":
+    # Codec capabilities for every camera, refreshed each time this service starts (it runs
+    # from boot). In the background: AWS or a camera being unreachable must not delay the
+    # GUI, and a failure here only ever means stale information, never a dead camera.
+    codec_caps.refresh_in_background(cameras_table)
     app.run(host="0.0.0.0", port=8080)

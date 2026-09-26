@@ -1954,6 +1954,9 @@ yours, and the part nobody else's tutorial-follower will have.
 | `No such element "kvssink"` | `GST_PLUGIN_PATH` not pointing at the SDK `build/` dir |
 | Build dies around OpenSSL/curl (`Terminated signal … cc1` burst) | nested `--parallel` in `kvscproducer-src/CMake/Utilities.cmake` — `-j`/`PARALLEL_BUILD` don't reach it; apply patch 1 (§4.2; FoundAndFixed.md #2, #28) |
 | Fragments rejected, console empty | missing `h264parse config-interval=-1` |
+| H.265 ingests, but HLS/`GetClip` fail with missing codec private data | caps without `stream-format=hvc1` — kvssink takes CPD only from `codec_data` (§21.4) |
+| Producer `inactive` after a camera drop or codec switch, cloud stream dead | gst-launch exited 0 on the closed session; producers must treat any end as failure (`producer_run`, FoundAndFixed.md #44) |
+| Clip or replay fails with "codec private data is not consistent" | the window spans a codec switch — split it at `videoCodecActiveSince` (§21.5) |
 | TLS error on credentials endpoint | wrong root CA — needs SFSRootCAG2, not AmazonRootCA1 |
 | MQTT connects, publish silently fails | policy resource missing the topic wildcard |
 | Playback stalls after ~5 min | HLS session URL expired; client must re-fetch |
@@ -1981,7 +1984,7 @@ software.
 | Capability | Cloud Adapter Mini | This prototype | Effort to close |
 |---|---|---|---|
 | Channels | 8 or 16 | 2 real (§16.3a); N via `kvs-cam@` | ~~S~~ **done** for 2; saturation test open (§16.6) |
-| Video handling | pass-through H.264/H.265 | `cam-02` pass-through, `cam-01` transcode | ~~S~~ **done** (§16.3b) |
+| Video handling | pass-through H.264/H.265 | `cam-02` pass-through, `cam-01` transcode; H.264/H.265 per camera where its hardware encodes it (`cam-01`: H.264 only — the Pi has no HEVC encoder) | ~~S~~ **done** (§16.3b, §21) |
 | Frame rate to cloud | capped at 10 fps | 15 fps, configurable (§2.7) | **done** |
 | Recording policy | motion-triggered by default | manual default; motion / cell-motion / human per camera | ~~M~~ **done** (`Camera-Features.md` §9) |
 | Outage buffering | 32 GB USB, auto-backfill | **57 GB USB, auto-backfill — closed** (§16.3c) | ~~M~~ **done**, 27.4 % → 99.8 % gap-fill |
@@ -3628,3 +3631,230 @@ happens to storage or reads. §9 is the small, safe version of the argument; §1
 full one. Neither replaces KVS entirely — both keep it for what it's actually good at
 (live, low-latency, random-seek access), and route only what benefits from S3's
 economics (durable, cheap, long-lived, sequential archive) away from it.
+
+---
+
+## 21. Appendix D — H.264 or H.265, per camera
+
+Every camera can be set to H.264 or H.265 **where its own hardware can encode it**. The
+choice is made in the local admin GUI and applied to the camera itself. The camera's
+encoder switches, so the local preview, the outage buffer and the cloud stream all follow
+it. The cloud client shows the codec but cannot change it. The default is whatever needs no
+software encoding, and among those, what the camera already sends. Every existing camera
+therefore stayed exactly as it was.
+
+Built on 2026-09-26. The raw evidence (commands, numbers, the browser matrix) is in
+`measurements/codec-phase0.md`; this section keeps the design and the reasons for it.
+
+### 21.1 Where the encoding happens decides what can be offered
+
+| Camera | H.264 | H.265 |
+|---|---|---|
+| `cam-01`, USB, encoded on the Pi | **Pi hardware** (`v4l2h264enc`) | **not offered** |
+| ONVIF camera whose encoder offers both (`cam-02`) | camera | camera |
+| ONVIF camera without H.265 | camera | not offered |
+
+**The Pi 4 cannot encode H.265 in hardware.** Its only encode block is H.264
+(`/dev/video11`). `/dev/video19 rpi-hevc-dec` is a *decoder*. GStreamer's V4L2 plugin
+registers `v4l2h265enc` only when an HEVC encoder device exists, and on this Pi it doesn't.
+`adapter/bin/detect-hw.sh` uses exactly that as its probe (`hw_encoders`, `--encoders`,
+and the `HW encoders` line of `--print`). No model name is involved; a Pi 5 would report
+no hardware encoder at all.
+
+**Software H.265 was measured and rejected.** `x265enc` (ultrafast, zerolatency) on real
+PW310 video, with the `v4l2h264enc` publisher for comparison:
+
+| cam-01 encoding | frame rate held | CPU (of 4 cores) |
+|---|---|---|
+| H.264, hardware, 1280×720 @15 | 15 | 0.11 |
+| H.265, x265, 1280×720 @15 | **no — ~9.8 fps** | 3.3 |
+| H.265, x265, 960×540 @15 | 15.4 | 2.8 |
+| H.265, x265, 640×360 @15 | 15.4 | 1.55 |
+
+A synthetic `videotestsrc` pattern had suggested ~1 core at 23 fps. Real sensor content is
+far harder to encode, so any codec change of this kind has to be measured on the camera,
+not on a test pattern. Because the preview and outage buffer carry the selected codec
+(§21.3), the encode would sit in the publisher and run 24/7. The decision was to keep
+`cam-01` on H.264. The admin GUI shows H.265 for it as *not available* and says why:
+it would need software encoding, which this Pi cannot sustain. There is no software-encode
+path anywhere in the design.
+
+**An ONVIF camera's codecs are only visible through Media2.** Media1's encoding enum stops
+at JPEG/MPEG4/H264, and the WSDL set bundled with the Python ONVIF library has no ver20
+media service. `adapter/onvif_media2.py` therefore speaks the few Media2 calls needed
+directly (GetProfiles, GetVideoEncoderConfigurationOptions, SetVideoEncoderConfiguration),
+with WS-Security digest auth and the camera's clock offset. The registered `rtspUrl` is
+matched to its profile by port and path. Zero or several matches is an error, never a guess.
+
+### 21.2 The registry fields, and who writes them
+
+| Field | Written by | Meaning |
+|---|---|---|
+| `videoCodecCaps` | `adapter/codec_caps.py` | `{"h264": …, "h265": …}`, each `camera`, `pi-hw` or `none` |
+| `videoCodecDefault` | `codec_caps.py` | the hardware-first default: no software encode; if both qualify, what the camera sends now; tie → H.264 |
+| `videoEncoderToken` | `codec_caps.py` | the Media2 encoder configuration behind the registered stream |
+| `videoCodecProbe` | `codec_caps.py` | `local`, `media2`, or why it fell back |
+| `videoCodec` | admin GUI, on a switch | the user's choice; absent means the default |
+| `videoCodecActive` | producer, at start | what the cloud stream last carried |
+| `videoCodecActiveSince` | producer, at start | when it replaced another codec; clips are split there (§21.5) |
+
+The capability fields are refreshed every time the admin GUI starts (it runs from boot), and
+again at registration and re-registration. A camera that can't be asked keeps the answer it
+already has; `cam-02` drops off the network for minutes at a time on its own, and
+overwriting a good answer on every blip would make the GUI flap. A camera never asked
+successfully gets a conservative fallback: only the codec observably arriving, H.265 not
+offered. `codec_caps.py --dry-run` shows what would be written.
+
+These fields are for the GUIs only. **No pipeline chooses hardware from them.** `cam-01`
+must still start with AWS unreachable, and producers ask MediaMTX instead (§21.4).
+
+### 21.3 Set on the camera, and only in the admin GUI
+
+`POST /api/cameras/<id>/codec` (`adapter/onvif-admin/app.py`) accepts only a codec the
+hardware can produce. It switches the camera's encoder, keeping resolution, frame rate,
+bitrate and GOP, and **reads the change back** before writing `videoCodec`. This camera
+family has accepted ONVIF writes and ignored them before (`Camera-Features.md` §4), so a
+write that isn't reflected on read-back is reported as refused.
+
+Two consequences follow from switching the camera rather than a copy of its stream:
+
+- **Everything downstream follows.** The local preview and the outage buffer show the
+  selected codec, which is the design decision. The alternative, transcoding only the cloud
+  stream, would have kept a second codec on the Pi and a software encoder running.
+- **There is deliberately no cloud route.** Codec is a property of the camera on the LAN.
+  The cloud client's `GET /cameras` carries `videoCodec`, `videoEncode` and
+  `videoCodecActive` for display only.
+
+On `cam-02` the switch takes ~3 s to apply. MediaMTX's source then drops and reconnects by
+itself within 7–14 s with the new track; the RTSP URI does not change. The first reconnect
+can read a half-reconfigured SDP (`invalid SPS: not enough bits`), and the next attempt 5 s
+later succeeds. The read-back keeps saying `Profile="High"` under H.265, but the bitstream is
+Main. The GUI confirms before switching and names the consequences. It then follows the
+codec *actually arriving* (`GET …/on-wire`, from MediaMTX) and restarts an open preview.
+
+### 21.4 Producers follow what MediaMTX receives
+
+`adapter/bin/stream-codec.py` runs at every producer start and asks MediaMTX which codec
+is arriving. The registry is not asked, because the camera is the source of truth once its
+encoder can be switched. The check needs no AWS, and it waits up to 30 s for the source; no
+video means exit 1 and a systemd retry, as a dead source always has. On a change it also
+records `videoCodecActive`/`Since` and corrects the stream's KVS `MediaType`. That step is
+best-effort, on an 8-second budget, so AWS can never hold up a start. The producer role
+needed `kinesisvideo:UpdateStream` for it (`cloud/iam/kvs-producer-policy.json`).
+
+`adapter/bin/producer-lib.sh` builds the video chain for `stream-cam02.sh` and
+`stream-channel.sh`:
+
+```text
+h264: rtph264depay ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au
+h265: rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au
+```
+
+**`stream-format=hvc1` is not optional.** kvssink sends codec private data only from the
+caps' `codec_data`, and its H.265 pad template pins no stream format. An Annex-B stream
+would ingest and never play back. This is the same ingest-versus-playback asymmetry §18.1
+describes for audio, and it's why H.265 was verified at `GetHLSStreamingSessionURL` and in
+a browser, not at `PutMedia`. The H.264 chain is token for token what ran before; this was
+checked by running the old and new scripts against a stub `gst-launch-1.0`, in both audio
+branches.
+
+**A codec switch while streaming costs ~10 s of cloud video.** MediaMTX closes the
+producer's session when the source changes; the producer then exits and restarts on the new
+codec. This only works because a producer now treats *any* end of its pipeline as a failure
+(`producer_run` in `producer-lib.sh`). Before that, a closed session looked like a clean
+exit, and `Restart=on-failure` left the stream down (FoundAndFixed.md #44). The same fix
+covers a camera dropping off the network.
+
+### 21.5 KVS: one codec per session, one codec per clip
+
+KVS plays H.265: live HLS carries `CODECS="hvc1.1.6.L90.0"` in fMP4 (`get_hls_url.py`
+pins `FRAGMENTED_MP4` explicitly), and `GetClip` returns MP4s tagged `hvc1`, which Safari
+accepts. With audio on, H.265 video + AAC ingests with zero rejected frames. The §18.3
+arithmetic depends on frame rate and GOP, which a codec switch doesn't change. `MediaType`
+is consumer metadata, changed with `UpdateStream`; **a stream never has to be recreated**
+for a new codec, so the archive and ARN stay.
+
+What KVS refuses is **mixing codecs in one request**:
+
+| Request spanning a switch | Result |
+|---|---|
+| `GetClip` | `InvalidCodecPrivateDataException: The codec private data is not consistent between all fragments` — the whole clip |
+| ON_DEMAND HLS | playlist lists everything, then HTTP 400 at the first fragment of the new codec |
+| LIVE HLS opened after the switch | plays |
+
+A live viewer's session breaks at a switch, and the client already fetches a new session
+when its old one fails. Clips are handled in `record_clip.py` and `clip_to_s3.py`
+(`codec_windows`). A window that crosses `videoCodecActiveSince` is **split into one clip
+per codec**, both labelled `codec-switch`, rather than trimmed, so no footage is dropped.
+Measured on a real switch: a manual recording across it gave H.264 (14 s) + H.265 (21 s),
+and a detection 5 s before it gave H.264 (5 s) + H.265 (24 s). One side of a split may be
+empty (the ~10 s restart); only "no footage on either side" is an error. Only the latest
+switch is recorded, so two switches within one 45 s detection window would still lose that
+window.
+
+**Every clip records its own codec** (`videoCodec` on the `clips` row), and the cloud
+client shows it after the duration ("· 27 sec. · H.265"). It is read from the clip file,
+not the camera's registry row: the two halves of a split differ, and the registry only knows
+the current codec. `record_clip.py` and `clip_to_s3.py` read the sample-entry type from the
+MP4's `moov` box (`mp4_video_codec`); `moov` only, since `ftyp`'s brand list can say `avc1`
+and `mdat` can contain anything. The outage uploader takes it from its ffprobe of the
+segments. Rows made before this were backfilled the same way, from each object in S3. An
+H.265 clip in a browser that can't decode it is flagged in the list, before anyone presses Play.
+
+The outage buffer needed one rule. MediaMTX records H.265 as `hvc1`, and the uploader's
+`-c:v copy` merge keeps whatever tag it is given (an `hev1` input merges to an `hev1` clip,
+which Safari refuses). `merge()` therefore forces `-tag:v hvc1` for HEVC. A codec change
+mid-outage already starts a new clip, because the run signature includes the codec
+(`OUTAGE.md`).
+
+### 21.6 Browsers: the reason H.264 stays the default
+
+Whether a browser plays H.265 depends on **the browser and the machine together**:
+
+| Browser | H.265 |
+|---|---|
+| Chrome 154, Windows PC 1 | plays |
+| Firefox 156 and Edge 153, same PC 1 | **no**, until Microsoft's *HEVC Video Extensions* ("HEVC-Videoerweiterungen") were installed, then yes |
+| Firefox and Edge, Windows PC 2 | plays |
+| Safari | plays, no add-on |
+| Chromium on the Pi (headless) | no |
+
+Chrome and Edge are both Chromium and still disagreed on one machine, so no user-agent rule
+can predict support. Both GUIs ask the browser at runtime instead
+(`MediaSource.isTypeSupported('video/mp4; codecs="hvc1…"')`, and `canPlayType` for plain
+MP4 clips). That probe predicted the outcome correctly in every case tested:
+
+- **Cloud client:**
+  - Each camera's subtitle shows its codec and encoder.
+  - An H.265 camera in a browser without support gets a warning line.
+  - A notice at the top explains the fix. On Windows that's the Store link to the HEVC Video
+    Extensions.
+  - hls.js's `manifestIncompatibleCodecsError` and a failing clip map to the same message
+    instead of a raw player error.
+- **Admin GUI:**
+  - A permanent line says whether *this* browser can play H.265, because that's where a
+    camera gets switched.
+  - A preview that can't decode H.265 says so instead of "no signal".
+
+### 21.7 Cost
+
+On `cam-02`'s sub-stream, same daylight scene, back to back: **H.264 166 kbps, H.265
+114 kbps, a 31 % saving**. That's one sample, below the 40–50 % that `COSTS-1.4.md` §7.4
+assumes, and night-time (noise-dominated) content is still unmeasured. KVS recording cost
+is linear in bitrate, so the saving carries over to ingest and viewing egress. `COSTS-1.4.md`
+§7.4 is authoritative for the figures. The browser gap that section says would need a
+playback transcode or a second stream is handled more cheaply here: H.265 is opt-in per
+camera, and each viewer whose browser can't decode it is told how to fix that.
+
+### 21.8 Verifying a change
+
+```bash
+adapter/bin/detect-hw.sh --print                 # "HW encoders : h264" on a Pi 4
+venv-adapter/bin/python3 adapter/codec_caps.py --dry-run   # caps + default per camera
+curl -s http://127.0.0.1:8080/api/cameras/cam-02/on-wire    # what MediaMTX receives now
+journalctl -u kvs-cam02.service -n 50 | grep -E 'video h26|stream-codec'
+aws kinesisvideo describe-stream --stream-name cam-02 --query StreamInfo.MediaType
+# then, as always: GetHLSStreamingSessionURL -> CODECS="hvc1..." -> ffprobe + one decoded
+# frame -> a browser. The cloud path is the check that catches a missing codec_data
+# (FoundAndFixed.md #16's lesson); ffprobe on the local RTSP proves nothing about it.
+```

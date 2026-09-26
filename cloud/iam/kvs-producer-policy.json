@@ -8,7 +8,8 @@
         "kinesisvideo:GetDataEndpoint",
         "kinesisvideo:PutMedia",
         "kinesisvideo:TagStream",
-        "kinesisvideo:CreateStream"
+        "kinesisvideo:CreateStream",
+        "kinesisvideo:UpdateStream"
       ],
       "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-*/*"
     },

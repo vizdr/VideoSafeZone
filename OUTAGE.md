@@ -146,6 +146,9 @@ Two consequences:
   `ulaw`/`alaw` inside MP4, so `-c copy` would yield a clip that plays in `ffplay` and is
   silent in the cloud client. This is the same ingest-permissive / playback-strict trap
   the audio work hit three times (guide §18.1).
+- **H.265 leaves as `hvc1`.** A camera switched to H.265 (guide §21) records as `hvc1`,
+  but `-c:v copy` keeps whatever tag its input has, and Safari refuses `hev1`. The merge
+  forces `-tag:v hvc1` for HEVC so the clip does not depend on the recorder's choice.
 
 ### 3.2 Which MediaMTX fields are live-patchable
 
@@ -302,11 +305,12 @@ Segments are already safe in `outage/<id>/`, so recovery has no critical section
    with boto3 managed transfer.
 2. Partition into maximal runs that `ffprobe` cleanly **and share a track layout** — a
    layout change is not hypothetical, since toggling `audioEnabled` applies on the next
-   producer start and could land mid-outage. Then:
+   producer start and could land mid-outage, and a codec switch (guide §21) changes the
+   video codec. The layout includes the codec, so either starts a new clip. Then:
    ```bash
    ffmpeg -nostdin -f concat -safe 0 -i list.txt \
           -fflags +genpts -max_interleave_delta 0 \
-          -c:v copy -c:a aac -b:a 32k -movflags +faststart out.mp4
+          -c:v copy -c:a aac -b:a 32k -movflags +faststart out.mp4   # + -tag:v hvc1 for H.265
    ```
    `-c:a aac` is not optional (§3.1). `32k` not `64k` for 8 kHz sources — 64 k trips
    `Too many bits 8192 > 6144 per frame`, the same 1024-samples-per-frame arithmetic that

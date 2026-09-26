@@ -1,13 +1,14 @@
 # Networking notes: MediaMTX, ONVIF discovery, VLANs
 
 Companion notes to the build guide, covering the local media-relay layer, camera
-discovery, network isolation for the camera segment, and the H.265 option. First written
+discovery, network isolation for the camera segment, and the codec choice. First written
 while planning the MVP (as a companion to `Demo-AWS-Video-MCh-15.md`) — kept separate from
 the runbook because it's reference material, not a build sequence.
 
 > **Status, reviewed 2026-09-26 against the built system.** §1 (MediaMTX) and §2
 > (discovery) now describe what was built, with the planning-era differences noted.
-> §3 (camera-segment isolation) and §4 (H.265 on `cam-02`) are still open design options.
+> §3 (camera-segment isolation) is still an open design option; §4 (H.264/H.265 per camera)
+> was built the same day and now summarises guide §21.
 > A bare `§` refers to the build guide, `Demo-AWS-Video-revCosts4.md` (numbering unchanged
 > from `MCh-15`) — except "§3 below"/"see §4", which are this file's, and cited sections
 > of other files, which name the file. `#N` are entries in `FoundAndFixed.md`.
@@ -290,96 +291,50 @@ FritzBox 7583 ──(WLAN, trusted)── Pi wlan0   (AWS: MQTT, KVS — outboun
 
 ## 4. Codec choice: H.264 vs H.265, per camera
 
-### Current state
+**Built 2026-09-26.** The canonical write-up is guide §21, the evidence
+`measurements/codec-phase0.md`. What follows is the networking-relevant summary and the
+corrections this section's planning-era version needed.
 
-Both channels are pinned to H.264 today, confirmed in the actual code, not just the
-runbook:
+### What was built
 
-- `adapter/onvif-admin/app.py` (`register_camera`) creates every KVS stream with
-  `MediaType="video/h264"`.
-- `adapter/bin/stream-cam01.sh` (PW310, transcoded) and `adapter/bin/stream-cam02.sh`
-  (real ONVIF camera, genuine passthrough) both use the identical H.264-specific video
-  chain: `rtph264depay ! h264parse ! video/x-h264,... ! kvssink` (plus an optional AAC
-  audio branch, §18).
+Every camera can run H.264 or H.265 **where its own hardware encodes it**, chosen in the
+local admin GUI and applied to the camera's encoder, so MediaMTX, the local preview, the
+outage buffer and the cloud stream all carry the same codec. Producers read the codec
+MediaMTX actually receives (`adapter/bin/stream-codec.py`) and pick
+`rtph264depay ! h264parse` or `rtph265depay ! h265parse ! video/x-h265,stream-format=hvc1`
+accordingly (`adapter/bin/producer-lib.sh`). For MediaMTX nothing changes: it relays either
+codec, re-serves it over RTSP and its local HLS (fMP4, `hvc1`), and records it for the
+outage buffer (`hvc1` as well).
 
-`cam-02`'s camera supports H.265 as an alternate profile, but its registered RTSP URL
-(`rtspUrl` in the registry, which MediaMTX is given at every start) deliberately points at
-its H.264 sub-stream — most ONVIF cameras expose both so an
-integrator can pick whichever the downstream system supports. That's a choice, not a
-camera limitation.
+### What the planning version got right
 
-### Why cam-01 (PW310) has to stay H.264
+- **cam-01 (PW310) stays H.264.** The Pi 4's only encode block is H.264; its HEVC block
+  decodes only. Software `x265enc` was measured on real content and cannot hold 720p15
+  (~9.8 fps on 3.3 cores; guide §21.1), so H.265 is not offered for `cam-01`.
+- **Passthrough makes the codec free on the adapter.** `cam-02` switches with no CPU cost
+  on the Pi; its camera encodes both (Media2 only — Media1 cannot express H.265).
 
-Not a policy choice — a hardware fact. The Pi 4B's VideoCore VI exposes exactly one H.264
-hardware encode block (`v4l2h264enc`, `/dev/video11`). There is a hardware HEVC block on
-the BCM2711, but it's **decode-only** (used for 4K video playback), not encode. So `cam-01`
-can never produce H.265 without falling back to software `x265enc`, which is considerably
-more expensive than the `x264enc` software fallback already noted as a stopgap in the main
-doc's §2.5. `cam-01` is architecturally stuck on H.264.
+### What it got wrong
 
-### Why cam-02 (real ONVIF camera, passthrough) is a different case
+- **No stream recreation.** `MediaType` is consumer metadata and `UpdateStream` changes it;
+  the archive and ARN stay. The producer updates it on a switch
+  (`kinesisvideo:UpdateStream` in the producer policy). The old step 3, "delete and
+  recreate the stream", was never necessary.
+- **Browser support is not "Safari yes, Chrome/Firefox no".** Measured: Chrome on Windows
+  played H.265 where Firefox and Edge on the same PC did not, until Microsoft's HEVC Video
+  Extensions were installed; on a second PC all three did; Safari always did. It depends on
+  browser *and* machine, so both GUIs probe the viewer's browser at runtime and explain the
+  fix, instead of either GUI guessing (guide §21.6).
+- **The cost of the browser gap** is neither a playback transcode nor a second stream:
+  H.265 is opt-in per camera and H.264 stays the default.
 
-Initially considered and rejected on a "keep both channels symmetric for clean
-measurements" argument — on reconsideration, that argument doesn't hold once the change
-is scoped to `cam-02` only:
+### What a switch costs
 
-- The two channels were never actually coupled. Each camera has its own producer unit,
-  its own KVS stream and its own registry row — codec is just another per-camera
-  property, not something that needs to match across cameras.
-- **Passthrough makes the codec free on the adapter.** `stream-cam02.sh` never decodes
-  anything — `rtspsrc ! rtph264depay ! h264parse ! kvssink` is a byte-level RTP relay.
-  Swapping to `rtph265depay ! h265parse` with `video/x-h265` caps costs the same
-  near-zero CPU. Unlike `cam-01`, there's no encode-cost trade-off standing in the way at
-  all.
-- KVS's HEVC support (ingestion and `GetHLSStreamingSessionURL`/`GetDASHStreamingSessionURL`
-  playback) is mature, not bleeding-edge — the friction isn't on the AWS side of the
-  pipe.
-
-This is actually a cleaner experiment than the existing transcode-vs-passthrough
-comparison: same passthrough architecture, **codec as the only variable**, no
-encoder-load confound. It would directly demonstrate H.265's ~40–50% bitrate/bandwidth
-saving over H.264 at equal quality — directly relevant to the main doc's §16.6 conclusion
-that uplink bandwidth, not the adapter, is the binding constraint at scale.
-
-### The one real remaining constraint: browser playback
-
-Client-side HEVC decode support in the browser HLS path (`hls.js`/MSE) is inconsistent:
-reliable on Safari/iOS, generally unsupported on Chrome/Firefox desktop and on most
-Android Chrome builds (a licensing gap, not a technical one). `cam-02`'s stream would
-likely fail to render in the same generic browser client that plays `cam-01` fine, unless
-viewed from an HEVC-capable browser/device. This is a genuine trade-off worth measuring
-directly (test Chrome, Firefox, Safari, an Android phone; record what actually happens)
-rather than assuming — in keeping with the main doc's "measure, don't assert" approach to
-§10.
-
-### Migration steps, if pursued
-
-1. Point `cam-02` at the camera's H.265 profile — find the URI via ONVIF
-   `GetProfiles`/`GetStreamUri` on the HEVC profile token, then Re-register `cam-02` with
-   it in the admin GUI (`LAUNCH.md` E3), which updates the registry and the MediaMTX path.
-2. `stream-cam02.sh`: swap `rtph264depay ! h264parse` → `rtph265depay ! h265parse`, caps
-   to `video/x-h265`.
-3. `MediaType` is set at KVS stream creation and can't be changed on an existing stream —
-   `cam-02`'s current stream (`stream/cam-02/1788026766462`) would need to be deleted and
-   recreated with `MediaType="video/h265"`, which gives it a new ARN suffix. No IAM edit
-   follows from that: every KVS-scoped policy uses `stream/cam-*/*` (checked against the
-   deployed policies 2026-09-26; the `cloud/iam/` files now match them, FoundAndFixed.md
-   #41).
-4. Verify the producer SDK build actually has HEVC support compiled in before touching
-   AWS — `gst-inspect-1.0 kvssink` and check its accepted caps — same discipline as the
-   main doc's §2.6 ("verify before touching AWS").
-5. Either accept `cam-02` only plays reliably on HEVC-capable clients, or measure that gap
-   explicitly across browsers/devices as its own result.
-
-### Cost implication
-
-`COSTS-1.4.md` §7.4 works the dollar side of this (re-based onto the measured 24/7 bitrate): switching `cam-02` to H.265 cuts KVS
-ingest and viewing egress by roughly the same 40–50 % as the bitrate reduction, since KVS
-recording cost is linear in bitrate. It also shows the saving is larger on KVS than on S3
-(S3's PUT/index costs don't scale with bitrate at all), and prices out — qualitatively,
-pending measurement — the two ways to close the browser-HEVC gap above: on-demand
-transcode at playback time, or a dual H.265-archive/H.264-live stream pair using the Pi's
-hardware HEVC decode block feeding the already-proven `v4l2h264enc` encode path.
+About 3 s for the camera to apply it and 7–14 s until MediaMTX receives the new codec; a
+running producer restarts itself on it, ~10 s without cloud video. KVS will not serve a
+clip or an ON_DEMAND session across the switch, so clip windows are split there (guide
+§21.5). The saving: 31 % on `cam-02`'s sub-stream in one daylight sample (`COSTS-1.4.md`
+§7.4).
 
 ---
 
@@ -394,5 +349,6 @@ hardware HEVC decode block feeding the already-proven `v4l2h264enc` encode path.
       plus the rematch timer (§2).
 - [ ] Wire up the Pi's built-in `eth0` for the isolated camera segment; retire the
       camera's current path through the FritzBox's flat LAN. (Still open, 2026-09-26.)
-- [ ] Decide whether to run `cam-02` on H.265 (see §4) — test the ONVIF HEVC profile URI
-      and browser-compatibility matrix before recreating the KVS stream.
+- [x] ~~Decide whether to run `cam-02` on H.265 (see §4)~~ — built as a per-camera choice
+      in the admin GUI (guide §21); no stream recreation needed. Still open: a night-time
+      bitrate comparison (`COSTS-1.4.md` §7.4).
