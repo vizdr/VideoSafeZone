@@ -13,9 +13,11 @@ Recreating a path disconnects every reader -- a running KVS producer included. T
 fields used by the outage buffer ARE in that whitelist; `source` is NOT. So changing a
 camera's source URI costs a reconnect and changing its recording settings does not.
 """
+import time
+
 import requests
 
-API = "http://127.0.0.1:9997"
+API ="http://127.0.0.1:9997"
 TIMEOUT = 5
 
 
@@ -66,6 +68,34 @@ def path_video_codec(path: str) -> str | None:
         if name in ("H264", "H265"):
             return name.lower()
     return None
+
+
+def flowing_paths(sample_sec: float = 1.0) -> set:
+    """Names of the paths whose media is actually arriving: `bytesReceived` grew across
+    `sample_sec`, with the path ready at both samples.
+
+    `ready` is not proof. It describes a handshake -- a source connected and declared its
+    tracks -- and a publisher that then stalls stays `ready`, tracks and all, while nothing
+    flows (FoundAndFixed.md #50; the same trap as `systemctl is-active`, one layer further
+    in). A source that reconnects between the samples resets its counter and reads as not
+    flowing, which is the safe side: the caller simply asks again.
+    """
+    def snapshot():
+        try:
+            r = requests.get(f"{API}/v3/paths/list", timeout=TIMEOUT)
+            r.raise_for_status()
+            return {p["name"]: p for p in r.json().get("items", []) if p.get("ready")}
+        except (requests.RequestException, ValueError):
+            return {}
+    before = snapshot()
+    time.sleep(sample_sec)
+    after = snapshot()
+    return {name for name, p in after.items()
+            if name in before and (p.get("bytesReceived") or 0) > (before[name].get("bytesReceived") or 0)}
+
+
+def path_is_flowing(path: str, sample_sec: float = 1.0) -> bool:
+    return path in flowing_paths(sample_sec)
 
 
 def patch_path(path: str, conf: dict) -> None:

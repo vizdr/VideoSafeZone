@@ -76,6 +76,15 @@ python3 adapter/observe_state.py
 
 ### Deploying a Lambda
 
+**The AWS account (596633517506) is shared with the base project, `VMS`
+(github.com/vizdr/VMS).** Both repositories deploy the same function names and the same
+client object, and neither deploy command names a repository, so a deploy from here
+silently replaces whatever `VMS` last deployed — and the reverse (FoundAndFixed.md #48).
+Before deploying, look at what is live and where it came from:
+`aws lambda get-function-configuration --function-name <fn> --query LastModified`, and
+compare the live code with this tree (`aws lambda get-function --function-name <fn>
+--query Code.Location` gives a download link). Coordinate when the other side is newer.
+
 Every function in `cloud/lambda/` is deployed the same way — zip the single file, push it:
 ```bash
 cd cloud/lambda && zip -q <name>.zip <name>.py && \
@@ -85,6 +94,11 @@ Function names use hyphens (`get-hls-url`), files use underscores (`get_hls_url.
 IAM policy documents for each function's role live in `cloud/iam/`.
 
 ### Deploying the browser client
+
+Same shared account as the Lambdas (above), and **the client bucket keeps no versions**:
+an overwritten `index.html` can only be redeployed from a working tree. Check first:
+`aws s3api head-object --bucket vms-demo-client-596633517506 --key index.html --query
+LastModified`, and diff the live copy (`curl` it from CloudFront) against this tree.
 
 ```bash
 aws s3 cp client/index.html s3://vms-demo-client-596633517506/index.html \
@@ -175,6 +189,9 @@ pipeline errors and CPU/logs look right" — decode an actual frame and look at 
 black only in a browser was caught this way (FoundAndFixed.md #13), and so was the
 reverse: a probe that looked corrupted but was only a probing artifact. CLI tools like `ffmpeg`/`ffprobe` are far more tolerant of malformed streams than a
 browser's MSE decoder, so "ffmpeg played it" is necessary but not sufficient evidence.
+The same goes one layer in: MediaMTX keeps a stalled path `"ready": true`, tracks and all,
+so code that needs "video is arriving" checks that `bytesReceived` grows
+(`mediamtx_api.flowing_paths()`, FoundAndFixed.md #50), never `ready`.
 
 ## Architecture
 
@@ -256,7 +273,9 @@ Kinesis Video Stream. Each runs its pipeline through `producer_run`
 (`adapter/bin/producer-lib.sh`), which exits non-zero whenever the pipeline ends: a
 session MediaMTX closes (camera dropped, codec switched) is otherwise a clean exit that
 `Restart=on-failure` ignores, leaving the stream down while the unit looks stopped
-(FoundAndFixed.md #44). **This is the layer Start/Stop buttons (in either GUI) actually
+(FoundAndFixed.md #44). It also watches the pipeline's output and kills it on the EOS
+lines, because kvssink can wedge after an EOS instead of exiting — `active`, uploading
+nothing (#46). **This is the layer Start/Stop buttons (in either GUI) actually
 control** — toggling it does not affect MediaMTX or the camera's own feed, which keep
 running regardless. This is a common point of confusion: the "local preview" (MediaMTX
 HLS) and the "KVS push" (cloud) are independent signals.

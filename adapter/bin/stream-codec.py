@@ -8,7 +8,8 @@ set on the camera itself (admin GUI -> onvif_media2.py), so what MediaMTX receiv
 truth -- and asking it needs no AWS, which keeps every producer startable while AWS is
 unreachable (the rule cam-01 already lives by).
 
-Waits up to --wait seconds for the path to come up with H.264 or H.265 video. If it does
+Waits up to --wait seconds for the path to come up with H.264 or H.265 video that is
+actually flowing (its byte counter growing -- `ready` alone is not proof, #50). If it does
 not, prints nothing and exits 1, so the unit fails and systemd retries (Restart=on-failure)
 -- what a dead source has always meant for a producer.
 
@@ -35,11 +36,17 @@ RECORD_BUDGET_SEC = 8
 
 
 def wait_for_codec(path: str, wait: int) -> str | None:
+    """The path's video codec once media is actually *flowing* -- not merely `ready`.
+    A source can connect, declare its tracks and stall, and MediaMTX keeps calling that
+    path ready (FoundAndFixed.md #50); starting a producer on it only builds a pipeline
+    that waits for frames that never come. So the byte counter has to grow first."""
     deadline = time.monotonic() + wait
     while True:
         codec = mediamtx_api.path_video_codec(path)
-        if codec or time.monotonic() >= deadline:
+        if codec and mediamtx_api.path_is_flowing(path):
             return codec
+        if time.monotonic() >= deadline:
+            return None
         time.sleep(1)
 
 
@@ -88,7 +95,7 @@ def main() -> int:
     path = camera_control.mediamtx_path_name(args.camera_id)
     codec = wait_for_codec(path, args.wait)
     if not codec:
-        print(f"stream-codec.py: no H.264/H.265 video on MediaMTX path '{path}' after "
+        print(f"stream-codec.py: no H.264/H.265 video flowing on MediaMTX path '{path}' after "
               f"{args.wait}s", file=sys.stderr)
         return 1
 

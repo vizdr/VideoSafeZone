@@ -155,7 +155,9 @@ echo "/swapfile none swap sw,pri=10 0 0" | sudo tee -a /etc/fstab
 echo "vm.swappiness=10" | sudo tee /etc/sysctl.d/99-low-swappiness.conf
 ```
 
-Exact `earlyoom` arguments: `LAUNCH.md` A1.
+Exact `earlyoom` arguments: `LAUNCH.md` A1. **On Wi-Fi, also switch power save off**
+(`LAUNCH.md` A1) — with it on, the local admin GUI times out in the browser while the Pi
+itself reports everything healthy.
 
 ### 2. Environment
 

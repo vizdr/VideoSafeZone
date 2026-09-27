@@ -16,8 +16,9 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-45 defects, from the first build (2026-08-20) through the move onto a second Pi
-(2026-09-24/25) to the codec-selection work (2026-09-26).
+50 entries, from the first build (2026-08-20) through the move onto a second Pi
+(2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
+project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -66,11 +67,16 @@ advice (guide §15 "Known traps").
 | 43 | cam-02 played only after several Start/Stop/Reload rounds | pipeline / client | 2026-09-26 | fixed |
 | 44 | A producer stopped for good whenever MediaMTX closed its session | pipeline / systemd | 2026-09-26 | fixed |
 | 45 | Manual recording without footage returned a raw AWS 500, not the intended 503 | Lambda | 2026-09-26 | fixed |
+| 46 | The producer could hang `active` on EOS, uploading nothing | pipeline / systemd | 2026-09-27 | fixed (ported from VMS) |
+| 47 | Admin GUI timed out in the browser; cam-02 dropped out while uploading (Wi-Fi power save, shared air) | network / Wi-Fi | 2026-09-27 | fixed |
+| 48 | Deploys from two repositories into one AWS account overwrote each other | process / deployment | 2026-09-27 | fixed (process) |
+| 49 | *(VMS only — feature not in this repository)* | — | 2026-09-27 | not applicable |
+| 50 | MediaMTX reported a path `ready` while no media flowed | verification | 2026-09-27 | fixed |
 
 ### What they have in common
 
-- **Most were silent.** #5, #7, #13, #15, #16, #18, #20, #21, #32, #36, #37, #39, #42 and #44
-  all passed "it ran without errors". The recurring cause is a tool that reports success on
+- **Most were silent.** #5, #7, #13, #15, #16, #18, #20, #21, #32, #36, #37, #39, #42, #44, #46,
+  #47 and #50 all passed "it ran without errors". The recurring cause is a tool that reports success on
   the wrong question. `systemctl is-active` says `inactive` for a unit that doesn't exist
   (#7, #37). `check=False` swallows a failure (#7). `ffmpeg` plays what a browser won't
   (#13). KVS ingest accepts what KVS playback refuses (#16). `sudo -n` passes on a cached
@@ -901,4 +907,139 @@ The codec-switch split needs exactly that test anyway: one side of a split may
 legitimately have no footage. Verified on the deployed `record-clip`: the same empty window
 now returns `503 {'error': 'no footage found for that time range -- was the stream live
 throughout?'}`.
+
+---
+
+## Ported from the base project, and shared air (2026-09-27)
+
+This repository and its base project `VMS` (github.com/vizdr/VMS) share an AWS account, a
+Pi and, until now, their defect numbers: #44 and #45 are the same bugs in both. VMS found
+#46–#50 on 2026-09-26/27; they are recorded here under the same numbers, each with what was
+checked *on this Pi*, so a `#N` means the same thing in either repository.
+
+### #46 — The producer could hang `active` on EOS, uploading nothing
+
+**Found:** in VMS (its #46), verifying #44's fix. **Referenced from:**
+`adapter/bin/producer-lib.sh` (`producer_run`), LAUNCH.md A8.
+
+#44's fix assumes gst-launch *returns* when MediaMTX closes its session, and turns that
+return into a failure. VMS measured that it sometimes does not return at all: kvssink takes
+the EOS, its `PutMedia` connection starves (`Operation too slow. Less than 30 bytes/sec`,
+then `exited without triggering end-of-stream. Service call result: 599`), and the process
+stays alive — `active (running)`, `NRestarts=0`, zero `PERSISTED` acks, for 4+ minutes.
+That is worse than #44: the unit reports itself as streaming in both GUIs.
+
+**On this Pi** the hang did not reproduce on the one try made: a MediaMTX kick of
+`kvs-cam02`'s reader session (`POST /v3/rtspsessions/kick/<id>`, the trigger VMS used) with
+the old code ended in `Got EOS` → `pipeline ended` → restart. It is intermittent, and the
+cost of missing it is a producer that looks healthy while uploading nothing, so the fix was
+ported rather than waited for.
+
+**Fix:** VMS's `producer_run`. gst-launch's output goes through a named pipe the function
+reads line by line — forwarded to the journal and matched against
+`PRODUCER_FATAL_PATTERNS` (`The server closed the connection.`, `EOS Event received in
+sink`, `Got EOS from element`). On a match it `kill -9`s the pipeline (SIGTERM would wait
+on the wedged teardown), stops reading instead of waiting for EOF, and exits 1. The FIFO
+lives in `$RUNTIME_DIRECTORY` (`RuntimeDirectory=vms-producer`, added to LAUNCH.md A8's
+units), falling back to one fixed-name FIFO per camera in `/tmp` when the unit lacks it —
+as the installed units here do until A8 is re-run. VMS's entry records three mechanisms
+that look right and are not (`| while read`, both forms of `coproc`).
+
+**Verified here:** stub pipelines that exit 0, exit 3, or hang after printing a fatal line
+all end in exit 1, the hanging ones within 1 s. Live on `kvs-cam02` (FIFO in `/tmp`): kick
+→ `'The server closed the connection.' -- the source closed the session; killing the
+pipeline` → `status 137, killed by the watchdog` → restart 6 s later on H.265, exactly one
+`gst-launch` for cam-02 afterwards (no orphan).
+
+### #47 — Admin GUI timed out in the browser; cam-02 dropped out while uploading
+
+**Found:** in VMS (its #47: "Local Admin can not be launched — `Netzwerk-Zeitüberschreitung`"),
+and reported here the same day: the admin GUI would not open and neither camera could be
+watched after opening the cloud client. **Referenced from:** LAUNCH.md A1, README (install).
+
+The Pi is on Wi-Fi only (`eth0` has no carrier), at −68 dBm, and on this Pi **`iw dev wlan0
+get power_save` said `on`** — VMS's fix had been made on its own installation, not here.
+With power save on the radio sleeps between beacons: traffic the Pi starts works, but a
+connection coming *in* — the admin GUI on :8080, the only inbound service in this
+outbound-only design — times out in the browser while every check on the Pi says healthy.
+
+This Pi showed a second, larger symptom of the same shared radio. **cam-02's RTSP source
+into MediaMTX broke only while a producer was uploading:** `TCP timeout`, `connection reset
+by peer`, `EOF`, `218 RTP packets lost`, every 10–40 s.
+
+| When | Upload to AWS | cam-02 source errors |
+|---|---|---|
+| 2026-09-26 19:00–20:59 | `kvs-cam01` running (18:43–20:33) | 36, 38 per hour |
+| 2026-09-26 21:00 | stopped 20:35 | 4 |
+| overnight to 15:00 | none | 0 |
+| 2026-09-27 15:00 hour | `cam01` from 15:14, `cam02` from 15:18 | 70 (first at 15:16) |
+
+One radio carries cam-02's stream *in* and the cloud upload *out*, on a weak link, with
+power save on. The producers restarted correctly after every break (#44) — which is exactly
+why nothing could be watched: the stream never stayed up. The same starved link made
+kvssink's credential fetch fail on name resolution (`Resolving timed out after 3000
+milliseconds`, 4 times in 3 h; the SDK allows DNS 3 s), which is how `kvs-cam01` failed to
+start at 15:18.
+
+**Fix:** power save off, persisted in NetworkManager (LAUNCH.md A1 has the commands and the
+proof). The NetworkManager profile needs single quotes around a name like `FRITZ!Box …` —
+inside double quotes bash treats `!` as history expansion (`event not found`).
+
+**Verified** the same afternoon: `iw` reads `Power save: off`, the profile reads `disable`,
+and with **both** producers uploading for 8 minutes — the load that broke cam-02 before —
+cam-02 logged 0 source errors, 0 producer restarts and 0 DNS timeouts, while KVS acknowledged
+238 cam-01 and 160 cam-02 fragments, exactly one per GOP (2 s and 3 s). The signal is still
+weak (−70 dBm); if the dropouts return, the next step is a cable — the camera on the Pi's
+`eth0` (`NETWORK.md` §3's isolated segment) takes its stream off the air entirely.
+
+### #48 — Deploys from two repositories into one AWS account overwrote each other
+
+**Found:** in VMS (its #48), investigating "streaming does not work at all on both cameras".
+**Referenced from:** CLAUDE.md ("Deploying a Lambda", "Deploying the browser client").
+
+VMS and this repository deploy the same function names and the same client object into
+account 596633517506, and neither deploy command names a repository. On 2026-09-26 VMS
+deployed `record-clip` (20:00 UTC) and `index.html` (20:03 UTC) over this repository's
+H.265-era versions — losing the codec-split clip windows, the MP4 codec sniffing and the
+client's HEVC detection — silently: the commands are idempotent and nothing errors. The
+client bucket keeps no versions. VMS restored everything from this tree on 2026-09-27 and
+synced its own copies, so both trees now hold the same client and Lambdas.
+
+**Checked here:** the live client (CloudFront) is byte-identical to this repository. The
+Lambdas could not be compared — the AWS CLI session had expired; rerun the comparison in
+CLAUDE.md "Deploying a Lambda" after `aws login`.
+
+**Fix (process):** CLAUDE.md's two deploy sections now say the account is shared, and how
+to check what is live, and from where, before deploying.
+
+### #49 — *(VMS only)*: automatic rollback read its backup list too late
+
+Recorded so the numbers stay aligned with VMS. The defect is in VMS's camera-configuration
+apply/rollback (`_apply_and_verify`, `configure-camera.sh`), which this repository does not
+have — nothing to fix here. The lesson it shares with #50 — test the safety net, don't read
+it — applies generally.
+
+### #50 — MediaMTX reported a path `ready` while no media flowed
+
+**Found:** in VMS (its #50): `GET /v3/paths/get/cam01` said `"ready": true` with
+`"tracks": ["H264"]` while `ffprobe` got `width=0 height=0`. **Referenced from:**
+`adapter/mediamtx_api.py` (`flowing_paths`), `adapter/bin/stream-codec.py`,
+`adapter/onvif-admin/` (`on-wire`, codec status).
+
+`ready` describes a handshake — a source connected and declared its tracks — not media
+arriving. This repository used it three ways as if it meant "video is here":
+`stream-codec.py` started a producer as soon as the path was ready; the admin GUI's codec
+switch confirmed "on the wire: H.265" on it; and the table's status line said the same.
+
+**Reproduced here:** an ffmpeg publisher on a throwaway path, frozen with SIGSTOP. For the
+9 s observed, MediaMTX kept reporting `ready=True`, `tracks=['H264']` and a detectable codec,
+while `bytesReceived` stood still at 121630.
+
+**Fix:** `mediamtx_api.flowing_paths()` / `path_is_flowing()` — a path counts as live only
+when `bytesReceived` grows across a ~1 s sample. `stream-codec.py` now waits for flow, not
+readiness, before a producer starts; the admin GUI's `on-wire` returns `flowing`, the switch
+confirms only once video flows, and the status line distinguishes "on the wire" from
+"declared, but no video is flowing". Verified: the frozen publisher reads `flowing=False`
+from the first sample; both live cameras read `True`; a missing path exits `stream-codec.py`
+with "no H.264/H.265 video flowing".
 

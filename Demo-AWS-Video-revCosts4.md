@@ -3761,7 +3761,9 @@ branches.
 **A codec switch while streaming costs ~10 s of cloud video.** MediaMTX closes the
 producer's session when the source changes; the producer then exits and restarts on the new
 codec. This only works because a producer now treats *any* end of its pipeline as a failure
-(`producer_run` in `producer-lib.sh`). Before that, a closed session looked like a clean
+(`producer_run` in `producer-lib.sh`), and kills a pipeline that wedges after the EOS
+instead of ending (FoundAndFixed.md #46). It also starts only once video is actually
+flowing, not when MediaMTX first calls the path ready (#50). Before that, a closed session looked like a clean
 exit, and `Restart=on-failure` left the stream down (FoundAndFixed.md #44). The same fix
 covers a camera dropping off the network.
 

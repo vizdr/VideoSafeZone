@@ -82,6 +82,23 @@ journalctl --list-boots | tail -2      # after the next reboot: two boots, the o
 
 Until then, `journalctl _SYSTEMD_USER_UNIT=<unit>.service` reads a user unit's log.
 
+**If the Pi is on Wi-Fi: switch power save off** (FoundAndFixed.md #47). With it on, the
+radio sleeps between beacons. Traffic the Pi *starts* is fine, but connections coming *in*
+(the admin GUI on :8080, the only inbound service here) time out in the browser while every
+check on the Pi says the service is healthy, and a weak link loses camera packets and DNS
+replies too. The persistent setting belongs to NetworkManager, which owns the connection:
+
+```bash
+nmcli -t -f NAME,TYPE connection show --active            # your Wi-Fi connection's name
+# single quotes: a '!' in the name (e.g. 'FRITZ!Box …') is history expansion inside "…"
+sudo nmcli connection modify '<SSID>' 802-11-wireless.powersave 2   # 2 = disable, survives reboot
+sudo iw dev wlan0 set power_save off                                 # takes effect now
+iw dev wlan0 get power_save                                          # proof: "Power save: off"
+```
+
+A cable on `eth0` avoids the question entirely, and on a weak signal it is the better fix:
+the same radio carries the camera's RTSP *in* and the cloud upload *out* (#47).
+
 ### A2. Environment — persisted to `~/.bashrc`
 
 ```bash
@@ -654,6 +671,7 @@ Environment=LD_LIBRARY_PATH=${KVS_SDK_DIR}/open-source/local/lib
 ExecStart=${VMS_HOME}/adapter/bin/stream-cam${cam}.sh
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=vms-producer
 
 [Install]
 WantedBy=multi-user.target
@@ -676,6 +694,7 @@ Environment=LD_LIBRARY_PATH=${KVS_SDK_DIR}/open-source/local/lib
 ExecStart=${VMS_HOME}/adapter/bin/stream-channel.sh
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=vms-producer
 CPUAccounting=true
 MemoryAccounting=true
 
@@ -688,7 +707,10 @@ sudo systemctl daemon-reload
 
 `kvs-cam@.service` above adds `User=` and the two `Environment=` lines that the guide's
 §16.6 sketch omits — without them the producer fails with `No such element "kvssink"`
-(#30).
+(#30). `RuntimeDirectory=vms-producer` on all three gives the producer's EOS watchdog a
+place for its pipe that systemd creates for `User=` and removes on stop (FoundAndFixed.md
+#46); a unit without it still works — the watchdog falls back to one fixed-name FIFO per
+camera in `/tmp`.
 
 **Check what was written:**
 

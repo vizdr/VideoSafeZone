@@ -314,8 +314,11 @@ function codecOptions(c) {
 }
 
 function codecStatus(c) {
-  const lines = [c.onWireCodec ? `on the wire: ${CODEC_NAMES[c.onWireCodec]}`
-                               : "no video from this camera right now"];
+  // "on the wire" only when bytes are actually arriving: MediaMTX keeps a stalled path
+  // `ready`, track and all (FoundAndFixed.md #50).
+  const lines = [!c.onWireCodec ? "no video from this camera right now"
+    : c.onWireFlowing ? `on the wire: ${CODEC_NAMES[c.onWireCodec]}`
+    : `${CODEC_NAMES[c.onWireCodec]} declared, but no video is flowing right now`];
   for (const [k, reason] of Object.entries(c.videoCodecUnavailable || {})) {
     lines.push(`${CODEC_NAMES[k]} unavailable: ${esc(reason)}`);
   }
@@ -326,9 +329,13 @@ function codecStatus(c) {
 }
 
 async function waitOnWire(id, codec, seconds) {
-  for (let i = 0; i < seconds; i++) {
+  // The new codec counts as arrived only once its video is flowing, not when MediaMTX
+  // first reports the track (FoundAndFixed.md #50). Each ask takes ~1 s (a byte sample).
+  const until = Date.now() + seconds * 1000;
+  while (Date.now() < until) {
     try {
-      if ((await api(`/api/cameras/${id}/on-wire`)).onWire === codec) return true;
+      const d = await api(`/api/cameras/${id}/on-wire`);
+      if (d.onWire === codec && d.flowing) return true;
     } catch (e) { /* MediaMTX mid-reconnect; keep asking */ }
     await new Promise(r => setTimeout(r, 1000));
   }
@@ -367,7 +374,7 @@ async function setCodec(id, codec) {
       const arrived = await waitOnWire(id, codec, 30);
       el.textContent = arrived
         ? `on the wire: ${name}` + (r.producer === "active" ? " — cloud stream restarting by itself (~10 s)" : "")
-        : `camera accepted ${name}, but no ${name} video has arrived yet — check the preview`;
+        : `camera accepted ${name}, but no ${name} video is flowing yet — check the preview`;
     } else {
       el.textContent = `${name} — no change needed`;
     }

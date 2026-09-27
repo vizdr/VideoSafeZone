@@ -74,6 +74,9 @@ def scan():
 @app.get("/api/cameras")
 def list_cameras():
     items = cameras_table().scan()["Items"]
+    # One ~1 s sample for all paths: MediaMTX's `ready` is not proof that video arrives
+    # (FoundAndFixed.md #50), its byte counter growing is.
+    flowing = mediamtx_api.flowing_paths()
     for i in items:
         i.pop("onvifPassword", None)  # never echo the credential back to the page
         # Every camera has a MediaMTX path regardless of mode (cam-01's transcode
@@ -85,6 +88,7 @@ def list_cameras():
         # source is offline), and why any codec is not selectable -- shown in the GUI
         # rather than silently leaving an option out (codec_caps.unavailable_reason).
         i["onWireCodec"] = mediamtx_api.path_video_codec(i["mediamtxPath"])
+        i["onWireFlowing"] = i["mediamtxPath"] in flowing
         i["videoCodecUnavailable"] = {
             c: r for c in codec_caps.CODECS if (r := codec_caps.unavailable_reason(i, c))}
     return jsonify({"cameras": sorted(items, key=lambda c: c["cameraId"])})
@@ -440,12 +444,15 @@ def set_codec(camera_id):
 
 @app.get("/api/cameras/<camera_id>/on-wire")
 def on_wire_codec(camera_id):
-    """The codec MediaMTX receives right now -- polled by the GUI while a switch settles.
-    Local only (no registry read), so polling it costs AWS nothing."""
+    """The codec MediaMTX receives right now, and whether video is actually flowing --
+    polled by the GUI while a switch settles. `flowing` samples the byte counter for ~1 s:
+    after a switch the path can be `ready` with the new track declared while nothing
+    arrives yet (FoundAndFixed.md #50). Local only, so polling it costs AWS nothing."""
     if not CAMERA_ID_RE.match(camera_id):
         return jsonify({"error": "bad camera id"}), 400
     path = camera_control.mediamtx_path_name(camera_id)
-    return jsonify({"cameraId": camera_id, "onWire": mediamtx_api.path_video_codec(path)})
+    return jsonify({"cameraId": camera_id, "onWire": mediamtx_api.path_video_codec(path),
+                    "flowing": mediamtx_api.path_is_flowing(path)})
 
 
 @app.post("/api/cameras/<camera_id>/ir")
