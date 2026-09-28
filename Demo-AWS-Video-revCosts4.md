@@ -1697,6 +1697,42 @@ differ, and the operator means producer time.
 **Checkpoint 8:** publishing an event to `adapter/adapter-01/event` produces a playable
 MP4 in S3 and a row in DynamoDB.
 
+### 9.3 Listing clips a page at a time
+
+The client lists each camera's clips from `GET /clips?camera=…` (Lambda `list-clips`),
+ten per page, newest first, with **Newest / Newer / Older** under the list. The route
+used to return the newest 50 and nothing more, so older clips could not be reached from
+the browser at all (FoundAndFixed.md #51).
+
+The contract:
+
+- `limit` — clips per page, 1–50. Absent means 50, the old behaviour: VMS calls the same
+  function without it (FoundAndFixed.md #48).
+- `before` — the `next` of the previous page; absent for the newest page.
+- The response is `{"clips": [...], "next": "<startTs>" | null}`. `next` is null on the
+  last page.
+
+Three design choices, each for a reason:
+
+- **A cursor, not a page number.** DynamoDB can't skip to "page 3". It continues from a
+  key, so `next` is the `startTs` of the page's last clip. The Lambda builds
+  `ExclusiveStartKey` itself from the validated `camera` plus that timestamp, so a cursor
+  can never reach another camera's clips. The key need not still exist, so deleting the
+  clip a cursor points at doesn't break paging.
+- **One item more than the page.** DynamoDB also sets `LastEvaluatedKey` when a page ends
+  exactly on the last clip, which would offer an Older page that turns out empty. The
+  Lambda queries `limit + 1` and sets `next` only if the extra item came back. It runs the
+  per-clip `head_object` (live storage tier) on the page only.
+- **"Page N", not "clips 11–20".** The client keeps a stack of the cursors it has
+  followed. After a delete, the cursors stay put and a page can hold fewer than ten, so a
+  clip range would be wrong.
+
+Where the client lands: Refresh and a finished manual recording go to the newest page.
+A tier change reloads the page being viewed. Deleting a page's last clip reloads that
+page, which steps back a page once nothing is older. The 30-second new-clip poll asks for
+`limit=1` and compares against the newest clip, which is recorded only when the newest
+page is shown. So viewing an older page raises no false "New clips" hint.
+
 ---
 
 ## 10. Phase 9 — Measurements (what makes this a portfolio piece)

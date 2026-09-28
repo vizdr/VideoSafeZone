@@ -71,7 +71,7 @@ either GUI controls exactly that process.
 | **Multi-camera** | USB (transcoded) and ONVIF/RTSP (passthrough) side by side. Cameras come from a DynamoDB registry, not a hardcoded list — adding one works everywhere immediately |
 | **Hardware encoding** | Pi 4's JPEG-decode, ISP-convert and H.264-encode blocks, ~2× CPU reduction vs software |
 | **Live view** | Cloud HLS via KVS, Cognito-authenticated, served over HTTPS through CloudFront |
-| **Evidence clips** | Manual recording, plus detection-triggered clips; browse, play, re-tier (Standard / IA / Deep Archive) and delete from the browser |
+| **Evidence clips** | Manual recording, plus detection-triggered clips; browse (ten per page, newest first), play, re-tier (Standard / IA / Deep Archive) and delete from the browser |
 | **ONVIF detection** | Motion, cell-grid motion and human-shape detection drive automatic clip capture |
 | **ONVIF device control** | IR-cut filter (day/night) from either GUI; WS-Discovery + one-click camera registration from a local admin app |
 | **Optional audio** | Per-camera, off by default, for both cameras — [`AUDIO.md`](AUDIO.md) |

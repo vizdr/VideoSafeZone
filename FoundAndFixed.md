@@ -16,7 +16,7 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-50 entries, from the first build (2026-08-20) through the move onto a second Pi
+51 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49).
 
@@ -72,11 +72,12 @@ project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49).
 | 48 | Deploys from two repositories into one AWS account overwrote each other | process / deployment | 2026-09-27 | fixed (process) |
 | 49 | *(VMS only — feature not in this repository)* | — | 2026-09-27 | not applicable |
 | 50 | MediaMTX reported a path `ready` while no media flowed | verification | 2026-09-27 | fixed |
+| 51 | Clips older than the newest 50 could not be reached from the browser | Lambda / cloud client | 2026-09-28 | fixed (paging) |
 
 ### What they have in common
 
 - **Most were silent.** #5, #7, #13, #15, #16, #18, #20, #21, #32, #36, #37, #39, #42, #44, #46,
-  #47 and #50 all passed "it ran without errors". The recurring cause is a tool that reports success on
+  #47, #50 and #51 all passed "it ran without errors". The recurring cause is a tool that reports success on
   the wrong question. `systemctl is-active` says `inactive` for a unit that doesn't exist
   (#7, #37). `check=False` swallows a failure (#7). `ffmpeg` plays what a browser won't
   (#13). KVS ingest accepts what KVS playback refuses (#16). `sudo -n` passes on a cached
@@ -1043,3 +1044,29 @@ confirms only once video flows, and the status line distinguishes "on the wire" 
 from the first sample; both live cameras read `True`; a missing path exits `stream-codec.py`
 with "no H.264/H.265 video flowing".
 
+### #51 — Clips older than the newest 50 could not be reached from the browser
+
+**Found:** 2026-09-28, reading `list_clips.py` while planning clip-list paging.
+**Referenced from:** guide §9.3, `cloud/lambda/list_clips.py`.
+
+`list-clips` queried DynamoDB with `Limit=50` and returned that one page, with no way to
+ask for the next. The client rendered whatever came back. With more than 50 clips on a
+camera, the older ones disappeared from the browser: they couldn't be played, re-tiered
+or deleted there, and nothing said so. Detection mode can easily produce 50 clips on one
+camera, and the outage backfill adds more. The comment beside the loop ("fine at demo
+scale (tens of clips)") covered the per-clip `head_object` cost, not the cut-off.
+
+**Fix:** paging (guide §9.3). The route takes `limit` and a `before` cursor and returns
+`next`. The client shows ten clips per page with Newest / Newer / Older. A caller without
+`limit` still gets the newest 50, so VMS, which shares the function (#48), is unaffected.
+Verified locally: the real Lambda over a moto DynamoDB/S3 walks lists of 0, 1, 9, 10, 11,
+20 and 23 clips with no gap, overlap or empty last page. The page in headless Chromium
+was also driven through paging, tier change, delete, the new-clip hint and a recording,
+against both a USB and an ONVIF camera.
+
+**Live, 2026-09-28**, through API Gateway `test-invoke-method` (it skips the Cognito
+authorizer): cam-02's 33 clips page 10/10/10/3 in the same order as the pre-deploy
+response, and cam-01's two fit one page. A request without `limit` returns a body
+identical to the pre-deploy one. Bad `limit`/`before` values get 400. When checking this
+way, pass the cursor decoded (`+00:00`, not `%2B00:00`): `test-invoke-method` hands the
+query string to the Lambda without decoding it, unlike a real request.
