@@ -1700,38 +1700,46 @@ MP4 in S3 and a row in DynamoDB.
 ### 9.3 Listing clips a page at a time
 
 The client lists each camera's clips from `GET /clips?camera=…` (Lambda `list-clips`),
-ten per page, newest first, with **Newest / Newer / Older** under the list. The route
+ten per page, newest first. Under the list is a pager:
+**« Newest ‹ Newer 1 2 3 … N Older › Oldest »**, plus the camera's clip total. The route
 used to return the newest 50 and nothing more, so older clips could not be reached from
 the browser at all (FoundAndFixed.md #51).
 
 The contract:
 
-- `limit` — clips per page, 1–50. Absent means 50, the old behaviour: VMS calls the same
-  function without it (FoundAndFixed.md #48).
-- `before` — the `next` of the previous page; absent for the newest page.
-- The response is `{"clips": [...], "next": "<startTs>" | null}`. `next` is null on the
-  last page.
+- `limit`: clips per page, 1–50. If it's absent, the route returns the newest 50 as
+  `{"clips": [...]}`, exactly the old response. VMS calls the same function without it
+  (FoundAndFixed.md #48).
+- `page`: a 1-based page number, or `last`. With it, the response adds
+  `"page"`, `"pages"` and `"total"`.
+- A page past the end comes back as the last page, not an error. The list may have
+  shrunk since the client last looked; the client shows whichever page it gets back.
 
-Three design choices, each for a reason:
+Design choices, each for a reason:
 
-- **A cursor, not a page number.** DynamoDB can't skip to "page 3". It continues from a
-  key, so `next` is the `startTs` of the page's last clip. The Lambda builds
-  `ExclusiveStartKey` itself from the validated `camera` plus that timestamp, so a cursor
-  can never reach another camera's clips. The key need not still exist, so deleting the
-  clip a cursor points at doesn't break paging.
-- **One item more than the page.** DynamoDB also sets `LastEvaluatedKey` when a page ends
-  exactly on the last clip, which would offer an Older page that turns out empty. The
-  Lambda queries `limit + 1` and sets `next` only if the extra item came back. It runs the
-  per-clip `head_object` (live storage tier) on the page only.
-- **"Page N", not "clips 11–20".** The client keeps a stack of the cursors it has
-  followed. After a delete, the cursors stay put and a page can hold fewer than ten, so a
-  clip range would be wrong.
+- **Page numbers from the key list.** DynamoDB can't count a partition or skip to "page
+  4". It can only continue from a key. So with `page`, the Lambda first reads every clip's
+  `startTs` for the camera (`ProjectionExpression`, following `LastEvaluatedKey`). That
+  gives the total and the key that ends page `page - 1`, and the page itself is one more
+  `Query` with that key as `ExclusiveStartKey`. The start key is built from the validated
+  `camera` and a key just read, so it can never reach another camera's clips. The cost is
+  a read of the camera's whole partition per page shown. Clip items are a few hundred
+  bytes, so that is one request up to thousands of clips. Past that, keep a per-camera
+  counter instead.
+- **The poll doesn't count.** The 30-second new-clip poll sends `limit=1` without `page`:
+  one item, no key read.
+- **`head_object` on the page only.** The live storage tier is read per clip shown, never
+  per clip counted.
 
-Where the client lands: Refresh and a finished manual recording go to the newest page.
-A tier change reloads the page being viewed. Deleting a page's last clip reloads that
-page, which steps back a page once nothing is older. The 30-second new-clip poll asks for
-`limit=1` and compares against the newest clip, which is recorded only when the newest
-page is shown. So viewing an older page raises no false "New clips" hint.
+How the numbers stay current: every load returns `pages` and `total`, and the pager is
+redrawn from them. Refresh, clicking a page, and a finished manual recording all reload.
+So does a delete: every delete reloads the page being viewed, which refills it from older
+clips, and if the page no longer exists the last page comes back instead. The numbers
+don't change while the list sits untouched: the "New clips" hint is the prompt to Refresh.
+On 10 pages or more, the pager shows the first, the last and two either side of the current page,
+with "…" for the gaps. Refresh and a recording go to page 1; a tier change reloads the
+page being viewed. The poll compares against the newest clip, recorded only while page 1
+is shown, so viewing an older page raises no false "New clips" hint.
 
 ---
 

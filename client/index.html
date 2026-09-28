@@ -75,6 +75,10 @@
   .clips-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.6rem; }
   .clips-pager.hidden { display: none; }
   .clips-pager button { font-size: 0.8rem; padding: 0.3rem 0.7rem; margin-right: 0; }
+  .clips-pager .pg-numbers { display: contents; }
+  .clips-pager .pg-num { min-width: 2.2rem; padding: 0.3rem 0.4rem; }
+  .clips-pager .pg-num.pg-current:disabled { background: #333; color: #fff; border-color: #333; font-weight: 600; }
+  .clips-pager .pg-gap { color: #888; padding: 0 0.2rem; }
   .clips-page-label { color: #888; font-size: 0.85rem; margin: 0 0.5rem; }
   .clips-alert {
     display: none;                 /* only present when there is something to say */
@@ -475,8 +479,10 @@ function renderCameraPanel(cam) {
       <div id="clipsPager-${cam.id}" class="clips-pager hidden">
         <button class="pg-first" onclick="loadClips('${cam.id}', 'first')">&laquo; Newest</button>
         <button class="pg-newer" onclick="loadClips('${cam.id}', 'newer')">&lsaquo; Newer</button>
-        <span class="clips-page-label"></span>
+        <span class="pg-numbers"></span>
         <button class="pg-older" onclick="loadClips('${cam.id}', 'older')">Older &rsaquo;</button>
+        <button class="pg-last" onclick="loadClips('${cam.id}', 'last')">Oldest &raquo;</button>
+        <span class="clips-page-label"></span>
       </div>
     </div>`;
   return div;
@@ -532,7 +538,7 @@ async function login() {
       state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null,
                         recordingTimer: null, refreshTimer: null, netRetries: 0,
                         clipsTimer: null, renderedLatest: null, listen: false,
-                        pageCursors: [null], pageNext: null, pageLoading: false,
+                        page: 1, pages: 1, total: 0, pageLoading: false,
                         outageBufferSec: cam.outageBufferSec || 0 };
       camerasDiv.appendChild(renderCameraPanel(cam));
       // The <select> is built via innerHTML, so the stored value has to be applied after
@@ -858,39 +864,39 @@ async function stopRecording(camera) {
   }
 }
 
-// Shows one page of CLIPS_PAGE_SIZE clips, newest first. `page` is "first" (newest),
-// "older", "newer", or "current" (reload the page being viewed, e.g. after a tier change).
-// Pages are addressed by cursor, not number: pageCursors is the stack of `before` values
-// that reached each page viewed so far (null = the newest page), and pageNext is the
-// server's cursor for the next older page, null on the last one.
+// Shows one page of CLIPS_PAGE_SIZE clips, newest first. `page` is a page number, "first"
+// (newest), "last" (oldest), "older", "newer", or "current" (reload the page being viewed,
+// e.g. after a tier change or a delete). Every response carries the camera's current page
+// count and clip total, so the page numbers follow deletes and new clips on each load; a
+// page past the end comes back as the last page (list_clips.py).
 async function loadClips(camera, page = "current") {
   const s = state[camera];
   const list = document.getElementById(`clipsList-${camera}`);
-  let cursors = s.pageCursors;
-  if (page === "first") cursors = [null];
-  else if (page === "older" && s.pageNext) cursors = [...cursors, s.pageNext];
-  else if (page === "newer" && cursors.length > 1) cursors = cursors.slice(0, -1);
-  const before = cursors[cursors.length - 1];
+  const target = page === "first" ? 1
+    : page === "last" ? "last"
+    : page === "older" ? s.page + 1
+    : page === "newer" ? Math.max(1, s.page - 1)
+    : page === "current" ? s.page
+    : page;
   // Only the latest request may render: a slow response must not overwrite a newer page.
   const req = s.clipsReq = (s.clipsReq || 0) + 1;
   s.pageLoading = true;
   renderClipsPager(camera);
   list.innerHTML = "<li>Loading…</li>";
   try {
-    const q = `camera=${camera}&limit=${CLIPS_PAGE_SIZE}` +
-      (before ? `&before=${encodeURIComponent(before)}` : "");
+    const q = `camera=${camera}&limit=${CLIPS_PAGE_SIZE}&page=${target}`;
     const r = await fetch(`${API}/clips?${q}`, { headers: { Authorization: idToken } });
     const data = await r.json();
     if (req !== s.clipsReq) return;
     s.pageLoading = false;
     if (!r.ok) { list.innerHTML = `<li>Error: ${data.error || r.status}</li>`; renderClipsPager(camera); return; }
-    // committed only now, so a failed "older" leaves the user where they were
-    s.pageCursors = cursors;
-    s.pageNext = data.next || null;
-    // A page emptied by deletes (here or in another window): step back to a newer one.
-    if (data.clips.length === 0 && cursors.length > 1) return loadClips(camera, "newer");
+    // taken from the response only, so a failed load leaves the user where they were;
+    // a list-clips that predates page numbers returns none -- one page, then
+    s.page = data.page || 1;
+    s.pages = data.pages || 1;
+    s.total = data.total ?? data.clips.length;
     renderClipsPager(camera);
-    if (cursors.length === 1) {
+    if (s.page === 1) {
       // remember the newest clip so checkForNewClips() can spot arrivals, and clear any
       // pending hint since the newest page is now on screen. An older page shows neither.
       s.renderedLatest = data.clips.length ? data.clips[0].startTs : null;
@@ -941,18 +947,44 @@ async function loadClips(camera, page = "current") {
   }
 }
 
-// "Page N" rather than "clips 11-20": a cursor stays put when clips before it are deleted,
-// so a page can hold fewer than CLIPS_PAGE_SIZE and a clip range would be wrong.
+// The page numbers to offer: all of them up to 9 pages, else the first, the last and two
+// either side of the current one, with null marking each gap ("…").
+function clipPageNumbers(page, pages) {
+  if (pages <= 9) return Array.from({ length: pages }, (_, i) => i + 1);
+  const shown = [...new Set([1, page - 2, page - 1, page, page + 1, page + 2, pages])]
+    .filter(n => n >= 1 && n <= pages).sort((a, b) => a - b);
+  const out = [];
+  shown.forEach((n, i) => { if (i && n - shown[i - 1] > 1) out.push(null); out.push(n); });
+  return out;
+}
+
 function renderClipsPager(camera) {
   const s = state[camera];
   const pager = document.getElementById(`clipsPager-${camera}`);
   if (!pager) return;
-  const n = s.pageCursors.length;
-  pager.classList.toggle("hidden", n === 1 && !s.pageNext);
-  pager.querySelector(".clips-page-label").textContent = `Page ${n}`;
-  pager.querySelector(".pg-first").disabled = s.pageLoading || n === 1;
-  pager.querySelector(".pg-newer").disabled = s.pageLoading || n === 1;
-  pager.querySelector(".pg-older").disabled = s.pageLoading || !s.pageNext;
+  const { page, pages, pageLoading: busy } = s;
+  pager.classList.toggle("hidden", pages <= 1);
+  const nums = pager.querySelector(".pg-numbers");
+  nums.innerHTML = "";
+  for (const n of clipPageNumbers(page, pages)) {
+    if (n === null) {
+      nums.insertAdjacentHTML("beforeend", '<span class="pg-gap">…</span>');
+      continue;
+    }
+    const b = document.createElement("button");
+    b.className = "pg-num" + (n === page ? " pg-current" : "");
+    b.textContent = n;
+    b.disabled = busy || n === page;
+    if (n === page) b.setAttribute("aria-current", "page");
+    b.onclick = () => loadClips(camera, n);
+    nums.appendChild(b);
+  }
+  pager.querySelector(".clips-page-label").textContent =
+    `${s.total} clip${s.total === 1 ? "" : "s"}`;
+  pager.querySelector(".pg-first").disabled = busy || page === 1;
+  pager.querySelector(".pg-newer").disabled = busy || page === 1;
+  pager.querySelector(".pg-older").disabled = busy || page === pages;
+  pager.querySelector(".pg-last").disabled = busy || page === pages;
 }
 
 async function setClipTier(s3Key, tier, li, camera) {
@@ -994,10 +1026,9 @@ async function deleteClip(s3Key, startTs, when, li, camera) {
     }
     closeClipPlayer();
     li.remove();
-    // The last clip on this page is gone: reload it -- that brings in the older clips if
-    // any, or steps back to a newer page (loadClips), or says "No clips yet."
-    const list = document.getElementById(`clipsList-${camera}`);
-    if (list.children.length === 0) loadClips(camera, "current");
+    // Reload the page: it refills from the older clips, the page count and total follow,
+    // and a page that no longer exists comes back as the new last page (loadClips).
+    loadClips(camera, "current");
   } catch (e) {
     statusEl.textContent = "Network error: " + e.message;
   }

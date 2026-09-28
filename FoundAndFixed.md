@@ -1056,17 +1056,29 @@ or deleted there, and nothing said so. Detection mode can easily produce 50 clip
 camera, and the outage backfill adds more. The comment beside the loop ("fine at demo
 scale (tens of clips)") covered the per-clip `head_object` cost, not the cut-off.
 
-**Fix:** paging (guide §9.3). The route takes `limit` and a `before` cursor and returns
-`next`. The client shows ten clips per page with Newest / Newer / Older. A caller without
-`limit` still gets the newest 50, so VMS, which shares the function (#48), is unaffected.
-Verified locally: the real Lambda over a moto DynamoDB/S3 walks lists of 0, 1, 9, 10, 11,
-20 and 23 clips with no gap, overlap or empty last page. The page in headless Chromium
-was also driven through paging, tier change, delete, the new-clip hint and a recording,
-against both a USB and an ONVIF camera.
+**Fix:** paging (guide §9.3). The route takes `limit` and `page` (a number or `last`) and
+returns `page`, `pages` and `total`. The client shows ten clips per page, with numbered
+pages 1..N, Newest / Newer / Older / Oldest, and the clip total. All of them are redrawn on
+every load, so they follow deletes and new clips. A caller without `limit` still gets the
+newest 50, so VMS, which shares the function (#48), is unaffected. (The first version,
+live for a few hours on 2026-09-28, used a `before`/`next` cursor. Cursors can't give a
+page count or jump to the last page, so it was replaced.)
+Verified locally: the real Lambda over a moto DynamoDB/S3 pages lists of 0, 1, 9, 10, 11,
+20, 23 and 61 clips with no gap, overlap or empty last page. It also counts keys past
+DynamoDB's 1 MB response page, clamps a page past the end, and renumbers after deletes and
+additions. The page in headless Chromium was driven through numbered jumps, Oldest,
+windowed numbers on a 95-clip camera, deletes that remove a page, new clips, a tier
+change, a recording and a failed load, on both a USB and an ONVIF camera.
 
 **Live, 2026-09-28**, through API Gateway `test-invoke-method` (it skips the Cognito
-authorizer): cam-02's 33 clips page 10/10/10/3 in the same order as the pre-deploy
-response, and cam-01's two fit one page. A request without `limit` returns a body
-identical to the pre-deploy one. Bad `limit`/`before` values get 400. When checking this
-way, pass the cursor decoded (`+00:00`, not `%2B00:00`): `test-invoke-method` hands the
-query string to the Lambda without decoding it, unlike a real request.
+authorizer), after deploying the page-number version:
+- cam-02's 35 clips page 10/10/10/5 as 4 pages, total 35, in the same order as the
+  unpaged response. cam-01's two clips fit one page.
+- `page=last` and `page=99` both return page 4.
+- A request without `limit`/`page` returns the pre-paging `{"clips": [...]}` shape,
+  unchanged.
+- Bad `page`/`limit` values get 400.
+
+When checking this way with a value that holds a `+`, pass it decoded:
+`test-invoke-method` hands the query string to the Lambda without decoding it, unlike a
+real request.
