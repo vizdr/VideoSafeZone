@@ -16,9 +16,11 @@ Each run (kvs-camera-rematch.timer, LAUNCH.md A8) does one multicast scan, then 
 passthrough camera:
   * no endpoint ref yet, device answers at its onvifHost -> learn the ref
   * ref found at a different address -> move it: onvifHost/onvifPort, and the host part of
-    rtspUrl (credentials, RTSP port and path unchanged) -- registry first, then MediaMTX
+    rtspUrl and of liveRtspUrl, the live view's sub stream (credentials, RTSP port and path
+    unchanged) -- registry first, then MediaMTX, both paths
   * ref not found -> nothing. The camera may just be off; absence proves nothing.
-It refuses to guess: a ref on two rows, or a new address another camera already has, is
+Unregistered cameras are not in the list at all (sync_mediamtx_paths.load_cameras leaves
+them out), so their deleted paths are never recreated. It refuses to guess: a ref on two rows, or a new address another camera already has, is
 logged and skipped.
 
 When the registry can't be written (AWS down), the MediaMTX path and the local cache are
@@ -117,16 +119,24 @@ def rematch(cameras, found, dry_run=False):
                 f"not rewriting a hand-edited URL; Re-register it (LAUNCH.md E3)")
             continue
 
+        fields = {"onvifHost": new_host, "onvifPort": new_port, "rtspUrl": new_url}
+        if cam.get("liveRtspUrl"):
+            new_live = move_url(cam["liveRtspUrl"], host, new_host)
+            if new_live is None:
+                log(f"{camera_id}: found at {new_host}, but its liveRtspUrl host isn't {host} -- "
+                    f"not rewriting a hand-edited URL; Re-register it (LAUNCH.md E3)")
+                continue
+            fields["liveRtspUrl"] = new_live
+
         log(f"{camera_id}: moved {host} -> {new_host}; rtspUrl -> {paths.redact(new_url)}{suffix}")
         if dry_run:
             continue
         try:
-            registry_update(camera_id, {"onvifHost": new_host, "onvifPort": new_port,
-                                        "rtspUrl": new_url}, host)
+            registry_update(camera_id, fields, host)
         except Exception as e:  # noqa: BLE001 -- local move still happens; registry retried next run
             log(f"{camera_id}: registry write failed ({type(e).__name__}: {e}); "
                 f"moving the MediaMTX path anyway, registry retried next run")
-        cam.update(onvifHost=new_host, onvifPort=new_port, rtspUrl=new_url)
+        cam.update(fields)
         hosts_in_use.add(new_host)
         changed = True
         moved.append(cam)

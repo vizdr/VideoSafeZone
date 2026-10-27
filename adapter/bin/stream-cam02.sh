@@ -5,6 +5,7 @@ set -e
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
 source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
+source "${VMS_HOME}/adapter/bin/producer-lib.sh"     # producer_run
 CERTS="${VMS_HOME}/certs"
 
 # Video is genuine passthrough -- no jpegdec/videoconvert/v4l2h264enc chain like
@@ -27,8 +28,10 @@ CERTS="${VMS_HOME}/certs"
 #   - kvssink's audio pad wants stream-format=raw, NOT the adts that aacparse will
 #     happily produce by default.
 #
-# A-law (rtppcmadepay/alawdec), not mu-law: MediaMTX reports muLaw=false and ffprobe
-# agrees (pcm_alaw). ONVIF cannot tell you this -- its enum is just "G711".
+# The G.711 law comes from the wire (stream-codec.py's AUDIO_TRACK: pcma or pcmu), never a
+# constant. ONVIF can't tell ("G711" covers both), and the law is a setting in the camera's
+# own audio page: cam-02 sent A-law until one change there made it mu-law, and the A-law
+# depayloader then never delivered, which stalled the video too (FoundAndFixed.md #71).
 #
 # DO NOT resample the audio up to 48 kHz. It looks harmless and it is not:
 # GStreamer audio buffers carry no DTS, and kvssink synthesises one as
@@ -57,41 +60,58 @@ AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/camera-audio.py cam-02 || true)"
 eval "${AUDIO_ENV}"
 
-# The codec MediaMTX is receiving, never the registry's opinion of it. No video within
-# the wait is a failure on purpose: systemd retries, as it always has for a dead source.
+# The codec MediaMTX is actually receiving, never the registry's opinion of it -- a camera's
+# encoder is changed on the camera, so the wire is the only thing that cannot be stale. No
+# video within stream-codec.py's wait is a failure on purpose: systemd retries, which is
+# what a dead source has always meant for a producer. stream-codec.py also records the
+# codec (registry `videoCodecActive`, KVS `MediaType`) on a hard time budget, so a slow or
+# unreachable AWS can never delay a start.
 VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/stream-codec.py cam-02)" \
   || { echo "stream-cam02: no H.264/H.265 video from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
 eval "${VIDEO_ENV}"
-source "${VMS_HOME}/adapter/bin/producer-lib.sh"
+# Unquoted where it is used below, on purpose: gst-launch needs these as separate tokens,
+# exactly like ${KVSSINK}.
 VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
 
+# The depayloader for the law MediaMTX receives, as in stream-channel.sh. No G.711 track (or
+# another codec): video only. kvssink collects across its pads, so an audio branch that can't
+# deliver stalls the video as well while the unit stays active (guide §18).
+case "${AUDIO_TRACK:-none}" in
+  pcma) AUDIO_DEPAY="rtppcmadepay ! alawdec" ;;
+  pcmu) AUDIO_DEPAY="rtppcmudepay ! mulawdec" ;;
+  *)    AUDIO_DEPAY="" ;;
+esac
+if [ "${AUDIO:-off}" = "on" ] && [ -z "${AUDIO_DEPAY}" ]; then
+  echo "stream-cam02: audio is on, but MediaMTX receives ${AUDIO_TRACK:-no audio}, not G.711 -- video only" >&2
+  AUDIO=off
+fi
+
 if [ "${AUDIO:-off}" = "on" ]; then
-  echo "stream-cam02: audio ENABLED (${AUDIO_CODEC:-PCMA} -> AAC 8kHz), video ${VIDEO_CODEC}"
+  echo "stream-cam02: audio ENABLED (${AUDIO_TRACK} -> AAC 8kHz), video ${VIDEO_CODEC}"
   producer_run stream-cam02 -v \
     rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
     ! ${VIDEO_CHAIN} ! queue ! kvs.video_0 \
     src. ! application/x-rtp,media=audio ! queue \
-    ! rtppcmadepay ! alawdec ! audioconvert \
+    ! ${AUDIO_DEPAY} ! audioconvert \
     ! audio/x-raw,rate=8000,channels=1 \
-    ! voaacenc bitrate=32000 ! aacparse \
+    ! ${AAC_ENC} ! aacparse \
     ! audio/mpeg,mpegversion=4,stream-format=raw ! queue ! kvs.audio_0 \
     ${KVSSINK}
 fi
 
-# Video-only: the pipeline that ran before audio existed, plus a sink for the unused
-# audio track, so turning the setting off sends exactly the pre-audio video.
-# Video-only still has to *consume* an audio track if the source carries one (cam-02's
-# G.711 is always there, audio setting or not): a bare `rtspsrc ! rtph264depay` leaves
-# that pad unlinked, and when its first packets beat the video's, rtspsrc stops the whole
-# pipeline with "Internal data stream error ... not-linked" -- intermittently, so Start
-# worked only every other press (FoundAndFixed.md #43). The fakesink branch is inert when
-# there is no audio track.
+# Video-only -- and deliberately NOT byte-for-byte the pre-audio pipeline any more: the
+# audio pad is linked to a fakesink. MediaMTX re-serves the camera's G.711 track whether
+# or not `audioEnabled` is set, and an rtspsrc pad that nobody links can abort the entire
+# pipeline with "streaming stopped, reason not-linked (-1)" when it happens to be exposed
+# before the video pad -- a pad-ordering race, so it fires intermittently and looks like a
+# flaky camera (FoundAndFixed.md #43). The fakesink is inert when the source has no audio
+# track at all, which is cam-01's case, so the same shape is safe everywhere.
 echo "stream-cam02: audio disabled (video only), video ${VIDEO_CODEC}"
 producer_run stream-cam02 -v \
   rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
-  src. ! application/x-rtp,media=video \
+  src. ! application/x-rtp,media=video ! queue \
   ! ${VIDEO_CHAIN} \
   ! ${KVSSINK} \
-  src. ! application/x-rtp,media=audio ! fakesink sync=false async=false
+  src. ! application/x-rtp,media=audio ! queue ! fakesink sync=false async=false

@@ -12,6 +12,16 @@ VALID_MODES = {"manual", "motion", "cellMotion", "human"}
 cameras_table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
 
 
+def unregistered_response(camera_id, item):
+    """409 for a camera unregistered in an admin GUI, else None. The registry is shared with VMS:
+    list-cameras no longer shows such a camera, but an open page or a direct API call can still
+    name it (VMS-PORT-PLAN.md D4). Same check in every Lambda that acts on a camera."""
+    if item and item.get("unregisteredAt"):
+        return {"statusCode": 409, "headers": CORS, "body": json.dumps(
+            {"error": f"'{camera_id}' is unregistered: re-register it in the admin GUI first"})}
+    return None
+
+
 def lambda_handler(event, context):
     try:
         body = json.loads(event.get("body") or "{}")
@@ -26,6 +36,8 @@ def lambda_handler(event, context):
         if not item:
             return {"statusCode": 400, "headers": CORS,
                     "body": json.dumps({"error": f"unknown camera '{camera_id}'"})}
+        if r := unregistered_response(camera_id, item):
+            return r
 
         # A detection mode requires an ONVIF event subscription, which requires an ONVIF
         # host. Rejecting here rather than only hiding the option in the UI: the API is
@@ -34,6 +46,15 @@ def lambda_handler(event, context):
         if mode != "manual" and not item.get("onvifHost"):
             return {"statusCode": 400, "headers": CORS, "body": json.dumps(
                 {"error": f"'{camera_id}' has no ONVIF host, so it supports only 'manual'"})}
+
+        # detectionModes: what the camera's own ONVIF event list supports, recorded by the admin
+        # GUI. A mode outside it would subscribe to events the camera never sends, and nothing
+        # would ever be recorded (FoundAndFixed.md #65). Absent = not known yet: allowed.
+        supported = item.get("detectionModes")
+        if mode != "manual" and supported is not None and mode not in supported:
+            return {"statusCode": 409, "headers": CORS, "body": json.dumps(
+                {"error": f"'{camera_id}' doesn't publish the events for '{mode}' "
+                          f"(it supports: {', '.join(supported) or 'no detection mode'})"})}
 
         cameras_table.update_item(
             Key={"cameraId": camera_id},

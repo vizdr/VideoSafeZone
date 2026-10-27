@@ -12,6 +12,8 @@
   table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
   th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; font-size: 0.9rem; }
   .status { color: #666; font-size: 0.85rem; margin-top: 0.4rem; }
+  .cam-id { color: #888; font-size: 0.75rem; font-weight: normal; }
+  .name-input { width: 7.5em; font-size: 0.75rem; padding: 0.1rem 0.25rem; margin-top: 0.25rem; }
   /* inline-flex + align-items:center keeps the box on the text's own line. A bare
      <label><input> ... </label> lets the box drift onto its own row in a table cell. */
   .cb { display: inline-flex; align-items: center; gap: 0.35rem;
@@ -27,11 +29,16 @@
   .device-card .meta { font-size: 0.85rem; color: #555; }
   .badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 1rem; background: #2a7d2a; color: #fff; margin-left: 0.35rem; }
   .badge-registered { background: #555; }
+  .badge-unregistered { background: #b8860b; }
+  .badge-muted { background: #999; }
+  .trigger-note { font-size: 0.75rem; color: #666; max-width: 240px; margin: 0.2rem 0; }
+  button.danger { color: #c0392b; }
   .kvs-state { font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 1rem; color: #fff; white-space: nowrap; }
   .kvs-active { background: #2a7d2a; }
   .kvs-inactive { background: #999; }
   .kvs-failed { background: #c0392b; }
   .kvs-activating, .kvs-deactivating { background: #b8860b; }
+  .kvs-no-producer { background: #b8860b; }
   .ctl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-bottom: 0.3rem; }
   .ctl-row button { margin-right: 0; }
   .register-form { display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #ccc; }
@@ -61,7 +68,7 @@
 <h2>1. Discover</h2>
 <p>
   <label>ONVIF username <input id="scanUser" value="admin" size="10"></label>
-  <label>Password <input id="scanPass" type="password" size="10"></label>
+  <label>Password <input id="scanPass" type="password" size="10" placeholder="may be empty"></label>
   <button onclick="scan()">Scan LAN</button>
   <span id="scanStatus" class="status"></span>
 </p>
@@ -71,7 +78,7 @@
 <p id="hevcNote" class="hevc-note"></p>
 <button onclick="loadCameras()">Refresh</button>
 <table id="camerasTable">
-  <thead><tr><th>ID</th><th>Mode / video</th><th>IR</th><th>Host</th><th>Local preview</th><th>KVS push</th><th>Recording</th><th>Control</th></tr></thead>
+  <thead><tr><th>Camera</th><th>Mode</th><th>IR</th><th>Host</th><th>Local preview</th><th>KVS push</th><th>Recording</th><th>Control</th></tr></thead>
   <tbody id="camerasBody"></tbody>
 </table>
 
@@ -93,7 +100,8 @@
 </p>
 <div id="analytics"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<!-- Pinned: @latest can change under the page without a deploy (FoundAndFixed.md #66). -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.3"></script>
 <script>
 async function api(path, opts) {
   const r = await fetch(path, {
@@ -105,11 +113,72 @@ async function api(path, opts) {
   return data;
 }
 
-// Populated by loadCameras() -- maps an already-registered camera's ONVIF host to its
-// cameraId, so a rescan of the same LAN can label a match as already-registered instead
-// of presenting it as a brand new camera to add.
-let registeredByHost = {};
-let registeredByRef = {};   // WS-Discovery endpoint ref -> cameraId: still matches after an IP change
+// Populated by loadCameras(). A discovered device is matched to a registry row by its
+// WS-Discovery endpoint reference first (stable across an IP change, rematch_cameras.py),
+// then by host, so a rescan labels an already-known camera instead of offering it as new.
+// Unregistered rows are matched the same way: they are hidden from the table and offered
+// for Re-register only here, on the discovered device they are.
+let registeredByRef = {}, registeredByHost = {};
+let unregisteredByRef = {}, unregisteredByHost = {};
+// Registered stream URIs (credentials removed by the server) by cameraId, so the form
+// preselects the stream a camera already uses.
+let registeredUriById = {};
+// The last scan's devices, for the registration forms' stream and frame-rate selectors.
+let discovered = [];
+
+// Display names, cameraId -> name, from /api/cameras. A name is the one free text a person
+// types that both pages show, and this page has no login: everything that can carry one goes
+// through esc(). The server allows only letters, digits, space, - _ . anyway.
+let cameraNames = {};
+const esc = v => String(v ?? "").replace(/[&<>"']/g,
+  ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+// Plain text (textContent, confirm()): "Kitchen (cam-03)", or the ID when there is no name.
+const camLabel = id => cameraNames[id] ? `${cameraNames[id]} (${id})` : id;
+// HTML: the name in bold, the ID beside it in small print.
+const camHtml = id => cameraNames[id]
+  ? `<b>${esc(cameraNames[id])}</b> <span class="cam-id">${esc(id)}</span>` : `<b>${esc(id)}</b>`;
+
+// Only 10 and 15 fps exist on this page, each only where the encoder accepts it, and no
+// other rate is ever shown (VMS-PORT-PLAN.md D5; onvif_media2.FPS_CHOICES).
+const FPS_CHOICES = [10, 15];
+const DEFAULT_FPS = 10;       // what a newly registered camera gets unless changed in the form
+
+const codecName = e => ({ H264: "H.264", H265: "H.265", JPEG: "JPEG", G711: "G.711" }[e] || e);
+const fpsShown = f => FPS_CHOICES.includes(f) ? ` @${f} fps` : "";
+const streamText = x => `${x.name} ${codecName(x.encoding)} ${x.width}×${x.height}${fpsShown(x.fps)}`;
+const audioText = a => `${codecName(a.encoding)} ${a.sampleRateKHz} kHz`;
+const MODE_NAMES = { motion: "Motion", cellMotion: "Cell grid", human: "Human" };
+// The detection modes a discovered camera offers (onvif_events.detection_map), each with the
+// topic behind it; "manual" is always possible.
+function triggerText(details) {
+  if (details.detectionError) return `unknown (no ONVIF events: ${esc(details.detectionError)})`;
+  const d = details.detection || {};
+  const offered = Object.keys(MODE_NAMES).filter(m => d[m]);
+  return offered.length
+    ? "Manual, " + offered.map(m => `<span title="${esc(d[m].topic)} (${esc(d[m].field)})">${MODE_NAMES[m]}</span>`).join(", ")
+    : "Manual only (the camera publishes no detection events over ONVIF)";
+}
+
+// Two RTSP URIs name the same stream when path and query agree, credentials aside
+// (onvif_media2.same_stream, the server's version of this).
+function sameStream(a, b) {
+  const key = u => {
+    try {
+      const x = new URL(u);
+      const q = x.search.slice(1).split("&").filter(p => p && !/^(user|pass|pwd)/i.test(p)).sort().join("&");
+      return (x.pathname.replace(/\/$/, "") || "/") + "?" + q;
+    } catch (e) { return u; }
+  };
+  return key(a) === key(b);
+}
+
+// The frame-rate options for one stream: only the ones of 10 and 15 its encoder accepts.
+// `selected` not among them: an empty "choose" entry is selected instead of showing the rate.
+function fpsOptions(choices, selected) {
+  const offered = FPS_CHOICES.filter(f => choices.includes(f));
+  const none = offered.includes(selected) ? "" : `<option value="" selected disabled>choose 10 or 15</option>`;
+  return none + offered.map(f => `<option value="${f}" ${f === selected ? "selected" : ""}>${f}</option>`).join("");
+}
 
 async function scan() {
   const user = document.getElementById("scanUser").value;
@@ -118,43 +187,95 @@ async function scan() {
   const devicesEl = document.getElementById("devices");
   statusEl.textContent = "scanning (a few seconds)...";
   devicesEl.innerHTML = "";
-  await loadCameras(); // refresh registeredByHost before labeling scan results
+  await loadCameras(); // refresh the registry maps before labeling scan results
   try {
     const data = await api("/api/scan", { method: "POST", body: JSON.stringify({ user, password }) });
     statusEl.textContent = `${data.devices.length} device(s) found`;
-    data.devices.forEach((d, i) => devicesEl.appendChild(renderDevice(d, i)));
+    discovered = data.devices;
+    data.devices.forEach((d, i) => { devicesEl.appendChild(renderDevice(d, i)); pickStream(i, true); });
+    // An unregistered camera that answered neither by identity nor at its last address: say
+    // which, so its ID can be typed into the form of the device it now is.
+    const foundIds = new Set(data.devices.map(d => matchDevice(d).id).filter(Boolean));
+    const missing = Object.entries(unregisteredByHost).filter(([, id]) => !foundIds.has(id));
+    if (missing.length) {
+      const p = document.createElement("p");
+      p.className = "status";
+      p.textContent = "Unregistered, not found: "
+        + missing.map(([host, id]) => `${camLabel(id)} (last at ${host})`).join(", ")
+        + ". If one of them is a device above, enter its ID in that device's form to re-register it.";
+      devicesEl.appendChild(p);
+    }
   } catch (e) {
     statusEl.textContent = "";
-    devicesEl.innerHTML = `<p class="error">${e.message}</p>`;
+    devicesEl.innerHTML = `<p class="error">${esc(e.message)}</p>`;
   }
+}
+
+function deviceHost(d) {
+  return d.xaddr ? d.xaddr.split("://")[1].split("/")[0].split(":")[0] : "?";
+}
+
+// {id, hidden}: the registry row a discovered device is -- identity first, then address.
+function matchDevice(d) {
+  const host = deviceHost(d);
+  const byRef = d.epr && (registeredByRef[d.epr] || unregisteredByRef[d.epr]);
+  if (byRef) return { id: byRef, hidden: !!unregisteredByRef[d.epr] };
+  if (registeredByHost[host]) return { id: registeredByHost[host], hidden: false };
+  if (unregisteredByHost[host]) return { id: unregisteredByHost[host], hidden: true };
+  return { id: null, hidden: false };
 }
 
 function renderDevice(d, i) {
   const div = document.createElement("div");
   div.className = "device-card";
   const details = d.details;
-  const host = d.xaddr ? d.xaddr.split("://")[1].split("/")[0].split(":")[0] : "?";
+  const host = deviceHost(d);
   const port = d.xaddr && d.xaddr.includes(":") ? (d.xaddr.split("://")[1].split("/")[0].split(":")[1] || 80) : 80;
-  const existingId = (d.epr && registeredByRef[d.epr]) || registeredByHost[host];
+  // Either way the form re-registers an existing row; for a hidden camera that also brings it back.
+  const { id: existingId, hidden } = matchDevice(d);
+  // Found by enrichment, so only with a working login: the microphone (from the profile, or the
+  // stream's own SDP when the profile lists none), and the streams with the frame rates each
+  // encoder accepts (onvif_discovery.enrich_sync).
+  const audio = details && details.audio;
+  const streams = (details && details.streams) || [];
+  const audioBadge = !details ? "" : !audio ? '<span class="badge badge-muted">No microphone</span>'
+    : audio.supported ? `<span class="badge"${audio.fromStream ? ' title="Found in the stream itself: the camera\'s ONVIF profile does not list it"' : ""}>Microphone · ${esc(audioText(audio))}</span>`
+    : `<span class="badge badge-muted" title="The producer records G.711 only">Microphone · ${esc(codecName(audio.encoding))}, not supported</span>`;
 
   div.innerHTML = `
-    <div><strong>${details ? `${details.manufacturer} ${details.model}` : d.xaddr || "unknown"}</strong>
+    <div><strong>${details ? esc(`${details.manufacturer} ${details.model}`) : esc(d.xaddr || "unknown")}</strong>
       ${details && details.has_ir_control ? '<span class="badge">IR control</span>' : ""}
-      ${existingId ? `<span class="badge badge-registered">Registered as ${existingId}</span>` : ""}
+      ${audioBadge}
+      ${existingId && !hidden ? `<span class="badge badge-registered">Registered as ${esc(camLabel(existingId))}</span>` : ""}
+      ${hidden ? `<span class="badge badge-unregistered">Unregistered: was ${esc(camLabel(existingId))}</span>` : ""}
     </div>
-    <div class="meta">${d.xaddr || ""}</div>
-    ${details ? `<div class="meta">Profile: ${details.profile} · Stream: ${details.stream_uri}</div>` : ""}
-    ${d.enrichError ? `<div class="error meta">${d.enrichError}</div>` : ""}
-    <p><button onclick="toggleForm(${i})">${existingId ? `Re-register ${existingId}` : "Register this camera"}</button></p>
+    <div class="meta">${esc(d.xaddr || "")}</div>
+    ${details ? `<div class="meta">Profile: ${esc(details.profile)} · Stream: ${esc(details.stream_uri)}</div>` : ""}
+    ${streams.length ? `<div class="meta">Streams: ${streams.map(x => esc(streamText(x))).join(" · ")}</div>` : ""}
+    ${details ? `<div class="meta" title="From the camera's own ONVIF event list. Offered is not proven: a detection may need enabling in the camera's web interface first.">Recording triggers: ${triggerText(details)}</div>
+    <div class="meta">${triggerNote(details.webUrl)} After registering, check them with "Test triggers".</div>` : ""}
+    ${details && details.streamsError ? `<div class="meta">Streams unknown (no ONVIF Media2): ${esc(details.streamsError)}</div>` : ""}
+    ${d.enrichError ? `<div class="error meta">${esc(d.enrichError)}</div>` : ""}
+    <p><button onclick="toggleForm(${i})">${existingId ? `Re-register ${esc(camLabel(existingId))}` : "Register this camera"}</button>
+       <button onclick="dismissDevice(this)" title="Hide this scan result. Nothing is changed; Scan LAN shows it again.">Cancel</button></p>
     <div id="form-${i}" class="register-form">
-      <label>Camera ID (e.g. cam-03) <input id="cid-${i}" placeholder="cam-03" value="${existingId || ""}" ${existingId ? "readonly" : ""}></label>
-      <label>ONVIF host <input id="host-${i}" value="${host}"></label>
-      <label>ONVIF port <input id="port-${i}" value="${port}"></label>
-      <label>ONVIF username <input id="user-${i}" value="${document.getElementById('scanUser').value}"></label>
-      <label>ONVIF password <input id="pass-${i}" type="password" value="${document.getElementById('scanPass').value}"></label>
-      <label>RTSP stream URI <input id="uri-${i}" value="${details ? details.stream_uri : ''}"></label>
-      <input type="hidden" id="epr-${i}" value="${d.epr || ''}">
+      <label>Camera ID (e.g. cam-03) <input id="cid-${i}" placeholder="cam-03" value="${esc(existingId || "")}" ${existingId ? "readonly" : ""}></label>
+      <label title="What both pages show, beside the ID. Letters, digits, space, - _ . -- up to 32. Changeable later in the table.">Name (optional, e.g. Kitchen)
+        <input id="fname-${i}" maxlength="32" placeholder="Kitchen" value="${esc(cameraNames[existingId] || "")}"></label>
+      <label>ONVIF host <input id="host-${i}" value="${esc(host)}"></label>
+      <label>ONVIF port <input id="port-${i}" value="${esc(port)}"></label>
+      <label>ONVIF username <input id="user-${i}" value="${esc(document.getElementById('scanUser').value)}"></label>
+      <label>ONVIF password (may be empty) <input id="pass-${i}" type="password" value="${esc(document.getElementById('scanPass').value)}"></label>
+      ${streams.length ? `<label>Stream to record <select id="fstream-${i}" onchange="pickStream(${i})">
+        ${streams.map((x, k) => `<option value="${k}">${esc(streamText(x))}</option>`).join("")}</select></label>` : ""}
+      <label>RTSP stream URI <input id="uri-${i}" value="${esc(details ? details.stream_uri : '')}"></label>
+      ${streams.length ? `<label>Frame rate <select id="ffps-${i}"></select>
+        <span id="ffpsNote-${i}" class="meta"></span></label>` : ""}
+      <input type="hidden" id="epr-${i}" value="${esc(d.epr || '')}">
       <p><label><input type="checkbox" id="ir-${i}" ${details && details.has_ir_control ? "checked" : ""} style="width:auto"> Has IR control</label></p>
+      ${details ? `<p><label title="Found on the camera's profile or in its stream. Recording audio stays off until switched on in the table below.">
+        <input type="checkbox" id="faudio-${i}" ${audio && audio.supported ? "checked" : "disabled"} style="width:auto">
+        Has microphone -- audio can then be switched on per camera</label></p>` : ""}
       <button onclick="register(${i})">${existingId ? "Re-register" : "Register"}</button>
       <span id="regStatus-${i}" class="status"></span>
     </div>`;
@@ -166,15 +287,69 @@ function toggleForm(i) {
   el.style.display = el.style.display === "block" ? "none" : "block";
 }
 
+// The form's stream selector drives the URI and the frame-rate options. On first fill it
+// preselects the stream an already registered camera uses (else main) and DEFAULT_FPS.
+// A stream whose encoder offers neither 10 nor 15 gets no frame rate at all (D5).
+function pickStream(i, first = false) {
+  const streams = ((discovered[i] || {}).details || {}).streams || [];
+  const sel = document.getElementById(`fstream-${i}`);
+  if (!sel || !streams.length) return;
+  if (first) {
+    const known = registeredUriById[matchDevice(discovered[i]).id];
+    const k = known ? streams.findIndex(x => sameStream(x.uri, known)) : -1;
+    sel.value = String(Math.max(k, 0));
+  }
+  const x = streams[Number(sel.value)];
+  document.getElementById(`uri-${i}`).value = x.uri;
+  const fs = document.getElementById(`ffps-${i}`), note = document.getElementById(`ffpsNote-${i}`);
+  const offered = FPS_CHOICES.filter(f => x.fpsChoices.includes(f));
+  fs.innerHTML = offered.map(f => `<option value="${f}">${f}</option>`).join("");
+  fs.disabled = !offered.length;
+  if (offered.length) fs.value = String(offered.includes(DEFAULT_FPS) ? DEFAULT_FPS : offered[0]);
+  note.textContent = offered.length ? "" : "this camera offers neither 10 nor 15 fps: it keeps its own rate";
+}
+
+// Hides one scan result, open form included. With the last one gone the whole Discover output
+// goes too: the "N device(s) found" line and the note on unregistered cameras not found.
+function dismissDevice(btn) {
+  btn.closest(".device-card").remove();
+  if (!document.querySelector("#devices .device-card")) {
+    document.getElementById("devices").innerHTML = "";
+    document.getElementById("scanStatus").textContent = "";
+  }
+}
+
+// A camera's display name, saved when the field loses focus. Only the heading is redrawn, so
+// a running preview isn't interrupted.
+async function setName(id, input) {
+  const st = document.getElementById(`nameStatus-${id}`);
+  st.className = "status";
+  st.textContent = "saving…";
+  try {
+    const r = await api(`/api/cameras/${id}/name`, { method: "POST",
+      body: JSON.stringify({ displayName: input.value }) });
+    if (r.displayName) cameraNames[id] = r.displayName; else delete cameraNames[id];
+    input.value = r.displayName || "";
+    document.getElementById(`camName-${id}`).innerHTML = camHtml(id);
+    st.textContent = r.unchanged ? "" : r.displayName ? "saved -- the cloud page shows it on its next load" : "name removed";
+  } catch (e) {
+    st.textContent = e.message;
+    st.className = "status error";
+    input.value = cameraNames[id] || "";
+  }
+}
+
 async function register(i) {
   const statusEl = document.getElementById(`regStatus-${i}`);
-  statusEl.textContent = "saving...";
+  statusEl.textContent = "saving... (a new camera takes up to ~30 s: its video is checked first)";
   statusEl.className = "status";
+  const fpsSel = document.getElementById(`ffps-${i}`);
   try {
     const result = await api("/api/cameras", {
       method: "POST",
       body: JSON.stringify({
         cameraId: document.getElementById(`cid-${i}`).value.trim(),
+        displayName: document.getElementById(`fname-${i}`).value.trim(),   // "" clears it
         host: document.getElementById(`host-${i}`).value.trim(),
         port: document.getElementById(`port-${i}`).value.trim(),
         user: document.getElementById(`user-${i}`).value,
@@ -182,9 +357,19 @@ async function register(i) {
         streamUri: document.getElementById(`uri-${i}`).value.trim(),
         hasIrControl: document.getElementById(`ir-${i}`).checked,
         endpointRef: document.getElementById(`epr-${i}`).value,
+        // Left out (undefined) when the scan couldn't read the camera or no rate is offered:
+        // the camera keeps its own.
+        fps: fpsSel && !fpsSel.disabled && fpsSel.value ? Number(fpsSel.value) : undefined,
+        audioCapable: document.getElementById(`faudio-${i}`) ? document.getElementById(`faudio-${i}`).checked : undefined,
       }),
     });
-    statusEl.textContent = result.updated ? "re-registered -- details updated." : "registered.";
+    const f = result.fps;
+    const fpsText = !f ? "" : f.error ? ` Frame rate not set: ${f.error}`
+      : ` The camera is set to ${f.configured} fps.`;
+    const prod = result.producer && result.producer !== "unchanged" ? ` Producer: ${result.producer}.` : "";
+    statusEl.textContent = (result.reactivated
+      ? `re-registered -- ${camLabel(result.cameraId)} is back in both GUIs. Its KVS push is stopped: Start Remote when wanted.`
+      : result.updated ? "re-registered -- details updated." : "registered.") + prod + fpsText;
     loadCameras();
   } catch (e) {
     statusEl.textContent = e.message;
@@ -241,7 +426,9 @@ function stopPreview(id) {
   }
 }
 
-function togglePreview(id, mediamtxPath) {
+// The preview is live view: the camera's sub stream when it records its main stream
+// (previewPath from /api/cameras, live_view.py), otherwise the recorded stream's path.
+function togglePreview(id, mediamtxPath = mediamtxPaths[id]) {
   const box = document.getElementById(`previewBox-${id}`);
   const btn = document.getElementById(`previewBtn-${id}`);
   if (previewPlayers[id]) {
@@ -287,169 +474,76 @@ function togglePreview(id, mediamtxPath) {
 }
 
 let currentCameraIds = [];
-let mediamtxPathById = {};
-
-// ---- Video codec (H.264 / H.265) --------------------------------------------------------
-// Chosen here and only here, and applied to the camera itself: its own encoder switches,
-// so MediaMTX, the local preview, the outage buffer and the cloud stream all follow. Only
-// codecs the camera's (or the Pi's) hardware produces are selectable; for any other the
-// reason is shown instead of the option silently missing (codec_caps.py).
-const CODEC_NAMES = { h264: "H.264", h265: "H.265" };
-const ENCODER_NAMES = { camera: "camera encoder", "pi-hw": "Pi hardware encoder" };
-
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
-}
-
-function selectedCodec(c) { return c.videoCodec || c.videoCodecDefault || "h264"; }
-
-function codecOptions(c) {
-  const caps = c.videoCodecCaps || {};
-  return Object.keys(CODEC_NAMES).map(k => {
-    const off = (c.videoCodecUnavailable || {})[k];
-    const label = off ? `${CODEC_NAMES[k]} — not available`
-                      : `${CODEC_NAMES[k]} · ${ENCODER_NAMES[caps[k]] || "hardware"}`;
-    return `<option value="${k}" ${off ? "disabled" : ""}>${label}</option>`;
-  }).join("");
-}
-
-function codecStatus(c) {
-  // "on the wire" only when bytes are actually arriving: MediaMTX keeps a stalled path
-  // `ready`, track and all (FoundAndFixed.md #50).
-  const lines = [!c.onWireCodec ? "no video from this camera right now"
-    : c.onWireFlowing ? `on the wire: ${CODEC_NAMES[c.onWireCodec]}`
-    : `${CODEC_NAMES[c.onWireCodec]} declared, but no video is flowing right now`];
-  for (const [k, reason] of Object.entries(c.videoCodecUnavailable || {})) {
-    lines.push(`${CODEC_NAMES[k]} unavailable: ${esc(reason)}`);
-  }
-  if (selectedCodec(c) === "h265" && !hevcPlayable()) {
-    lines.push("this browser can't show H.265 — see the note above");
-  }
-  return lines.join("<br>");
-}
-
-async function waitOnWire(id, codec, seconds) {
-  // The new codec counts as arrived only once its video is flowing, not when MediaMTX
-  // first reports the track (FoundAndFixed.md #50). Each ask takes ~1 s (a byte sample).
-  const until = Date.now() + seconds * 1000;
-  while (Date.now() < until) {
-    try {
-      const d = await api(`/api/cameras/${id}/on-wire`);
-      if (d.onWire === codec && d.flowing) return true;
-    } catch (e) { /* MediaMTX mid-reconnect; keep asking */ }
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  return false;
-}
-
-async function setCodec(id, codec) {
-  const sel = document.getElementById(`codec-${id}`);
-  const el = document.getElementById(`codecStatus-${id}`);
-  const prev = sel.dataset.current;
-  if (codec === prev) return;
-  const name = CODEC_NAMES[codec];
-  const msg = [
-    `Switch ${id} to ${name}?`, "",
-    "This changes the camera's own encoder, so the local preview, the outage buffer and " +
-    "the cloud stream all switch with it.",
-    "• If the cloud stream is running, it restarts by itself — about 10 s without video.",
-    "• A recorded clip cannot span the moment of the switch.",
-  ];
-  if (codec === "h265") {
-    msg.push("• Viewers whose browser can't decode H.265 will not see this camera " +
-             "(both GUIs tell them how to fix that).");
-    if (!hevcPlayable()) msg.push("", "This browser can't play H.265: the local preview here will stay blank.");
-  }
-  if (!confirm(msg.join("\n"))) { sel.value = prev; return; }
-
-  const wasPreviewing = !!previewPlayers[id];
-  sel.disabled = true;
-  el.textContent = `switching the camera to ${name}…`;
-  try {
-    const r = await api(`/api/cameras/${id}/codec`, { method: "POST",
-      body: JSON.stringify({ videoCodec: codec }) });
-    sel.dataset.current = codec;
-    if (r.switched) {
-      el.textContent = `camera switched to ${name} — waiting for its video (~10 s)…`;
-      const arrived = await waitOnWire(id, codec, 30);
-      el.textContent = arrived
-        ? `on the wire: ${name}` + (r.producer === "active" ? " — cloud stream restarting by itself (~10 s)" : "")
-        : `camera accepted ${name}, but no ${name} video is flowing yet — check the preview`;
-    } else {
-      el.textContent = `${name} — no change needed`;
-    }
-    if (wasPreviewing) {            // the old preview died with the old stream; start a new one
-      stopPreview(id);
-      togglePreview(id, mediamtxPathById[id]);
-    }
-  } catch (e) {
-    sel.value = prev;               // never show a codec the camera refused
-    el.textContent = e.message;
-  } finally {
-    sel.disabled = false;
-  }
-}
+let mediamtxPaths = {};   // cameraId -> the MediaMTX path the preview plays, as the server names it
 
 async function loadCameras() {
   for (const id in previewPlayers) stopPreview(id);
   const body = document.getElementById("camerasBody");
   body.innerHTML = "<tr><td colspan=8>loading...</td></tr>";
   try {
-    const data = await api("/api/cameras");
-    registeredByHost = {};
-    registeredByRef = {};
+    const all = await api("/api/cameras");
+    // Unregistered cameras stay out of everything below; only Discover offers them again.
+    const data = { cameras: all.cameras.filter(c => !c.unregisteredAt) };
+    registeredByRef = {}; registeredByHost = {};
+    unregisteredByRef = {}; unregisteredByHost = {};
     currentCameraIds = data.cameras.map(c => c.cameraId);
-    for (const c of data.cameras) {
-      if (c.onvifHost) registeredByHost[c.onvifHost] = c.cameraId;
-      if (c.onvifEndpointRef) registeredByRef[c.onvifEndpointRef] = c.cameraId;
+    mediamtxPaths = Object.fromEntries(data.cameras.map(c => [c.cameraId, c.previewPath || c.mediamtxPath]));
+    registeredUriById = Object.fromEntries(all.cameras.filter(c => c.streamUri).map(c => [c.cameraId, c.streamUri]));
+    cameraNames = Object.fromEntries(all.cameras.filter(c => c.displayName).map(c => [c.cameraId, c.displayName]));
+    for (const c of all.cameras) {
+      const hidden = !!c.unregisteredAt;
+      if (c.onvifHost) (hidden ? unregisteredByHost : registeredByHost)[c.onvifHost] = c.cameraId;
+      if (c.onvifEndpointRef) (hidden ? unregisteredByRef : registeredByRef)[c.onvifEndpointRef] = c.cameraId;
     }
     body.innerHTML = "";
     for (const c of data.cameras) {
+      const id = c.cameraId;
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${c.cameraId}</td>
-        <td>${c.mode}
-          <div style="margin-top:4px">
-            <select id="codec-${c.cameraId}" onchange="setCodec('${c.cameraId}', this.value)"
-                    style="font-size:0.8rem"
-                    title="Video codec, set on the camera itself: preview, outage buffer and cloud stream all follow">
-              ${codecOptions(c)}
-            </select>
-            <div id="codecStatus-${c.cameraId}" class="status">${codecStatus(c)}</div>
-          </div>
-        </td>
+        <td><span id="camName-${id}">${camHtml(id)}</span>
+          <div><input id="name-${id}" class="name-input" maxlength="32" placeholder="name"
+                      value="${esc(c.displayName || "")}" onchange="setName('${id}', this)"
+                      title="A name both pages show beside the ID, e.g. Kitchen. Empty: the ID only."></div>
+          <div id="nameStatus-${id}" class="status"></div></td>
+        <td>${esc(c.mode)}</td>
         <td>${c.hasIrControl ? "yes" : "no"}</td>
-        <td>${c.onvifHost || ""}</td>
+        <td>${esc(c.onvifHost || "")}</td>
         <td class="preview-cell">
-          <div class="preview-box" id="previewBox-${c.cameraId}"><span class="preview-msg">no preview</span></div>
-          <button id="previewBtn-${c.cameraId}" onclick="togglePreview('${c.cameraId}','${c.mediamtxPath}')" style="font-size:0.7rem; padding:0.15rem 0.4rem; margin-top:2px;">▶ Local preview</button>
+          <div class="preview-box" id="previewBox-${id}"><span class="preview-msg">no preview</span></div>
+          <button id="previewBtn-${id}" onclick="togglePreview('${id}')" style="font-size:0.7rem; padding:0.15rem 0.4rem; margin-top:2px;">▶ Local preview</button>
         </td>
-        <td><span id="kvsState-${c.cameraId}" class="kvs-state">…</span></td>
+        <td><span id="kvsState-${id}" class="kvs-state">…</span></td>
         <td>
-          <select id="recMode-${c.cameraId}"
-                  onchange="setRecordingMode('${c.cameraId}', this.value)"
+          <select id="recMode-${id}"
+                  onchange="setRecordingMode('${id}', this.value)"
                   style="font-size:0.8rem" ${c.onvifHost ? "" : "disabled"}>
             <option value="manual">Manual</option>
             <option value="motion">Motion</option>
             <option value="cellMotion">Cell grid</option>
             <option value="human">Human</option>
           </select>
-          <div id="recModeStatus-${c.cameraId}" class="status"></div>
+          <div id="recModeStatus-${id}" class="status"></div>
+          ${c.onvifHost ? `
+          <div class="trigger-note" id="trigNote-${id}">${triggerNote(c.webUrl)}</div>
+          <button id="trigTest-${id}" onclick="toggleTriggerTest('${id}')"
+                  title="Listens to the camera for up to a minute while you walk past, for every trigger it offers"
+                  style="font-size:0.75rem; padding:0.15rem 0.4rem">Test triggers</button>
+          <div id="trigStatus-${id}" class="status">${lastTestText(c.detectionTests)}</div>` : ""}
           <div>
             <label class="cb ${c.audioCapable ? "" : "disabled"}"
                    title="${c.audioCapable ? "Adds sound to the live view and to every clip. Applies on this camera's next Start." : "This camera has no usable audio source"}">
-              <input type="checkbox" id="audio-${c.cameraId}"
-                     onchange="setAudio('${c.cameraId}', this.checked)"
+              <input type="checkbox" id="audio-${id}"
+                     onchange="setAudio('${id}', this.checked)"
                      ${c.audioCapable ? "" : "disabled"}>
               record microphone
             </label>
-            <div id="audioStatus-${c.cameraId}" class="status"></div>
+            <div id="audioStatus-${id}" class="status"></div>
           </div>
           <div style="margin-top:4px">
             <label class="cb" title="Buffer footage to the USB drive while AWS is unreachable. Applies within 60s; only runs while this camera's KVS push is active.">
               outage buffer
-              <select id="outage-${c.cameraId}"
-                      onchange="setOutageBuffer('${c.cameraId}', this.value)"
+              <select id="outage-${id}"
+                      onchange="setOutageBuffer('${id}', this.value)"
                       style="font-size:0.75rem">
                 <option value="0">off</option>
                 <option value="30">30s</option>
@@ -463,57 +557,96 @@ async function loadCameras() {
                 <option value="86400">24h</option>
               </select>
             </label>
-            <div id="outageStatus-${c.cameraId}" class="status"></div>
+            <div id="outageStatus-${id}" class="status"></div>
           </div>
+          <div style="margin-top:4px">
+            <label class="cb" title="The recorded stream's video encoder, set on the camera itself: preview, outage buffer and cloud stream all follow. Switching interrupts this camera's video for about 10 s.">
+              video
+              <select id="codec-${id}"
+                      onchange="setCodec('${id}', this.value)"
+                      style="font-size:0.75rem" disabled>
+                <option value="h264">H.264</option>
+                <option value="h265">H.265</option>
+              </select>
+            </label>
+            <div id="codecStatus-${id}" class="status">checking…</div>
+          </div>
+          ${c.onvifHost ? `
+          <div style="margin-top:4px">
+            <label class="cb" title="Which of the camera's streams is recorded. Live view uses the sub stream whenever there is one. Switching interrupts this camera's video for about 10 s.">
+              stream
+              <select id="stream-${id}" onchange="setStreamChoice('${id}', {stream: this.value})"
+                      style="font-size:0.75rem" disabled></select>
+            </label>
+            <label class="cb" id="fpsLabel-${id}" title="The camera's frame rate on the recorded stream, 10 or 15. The keyframe interval keeps its length in seconds. Applied on the camera at once; counted on the wire before it reports done.">
+              fps
+              <select id="fps-${id}" onchange="setStreamChoice('${id}', {fps: Number(this.value)})"
+                      style="font-size:0.75rem" disabled></select>
+            </label>
+            <div id="streamStatus-${id}" class="status">checking…</div>
+          </div>` : ""}
         </td>
         <td>
           <div class="ctl-row">
-            <button onclick="streamAction('${c.cameraId}','start')">Start Remote</button>
-            <button onclick="streamAction('${c.cameraId}','stop')">Stop Remote</button>
+            <button id="startBtn-${id}" onclick="streamAction('${id}','start')">Start Remote</button>
+            <button onclick="streamAction('${id}','stop')">Stop Remote</button>
           </div>
           ${c.hasIrControl ? `
           <div class="ctl-row">
-            <button onclick="setIr('${c.cameraId}','AUTO')">IR Auto</button>
-            <button onclick="setIr('${c.cameraId}','OFF')">IR Off</button>
-            <button onclick="setIr('${c.cameraId}','ON')">IR On</button>
+            <!-- ONVIF IrCutFilter: ON = filter in = day (colour, IR off); OFF = night (B/W, IR on).
+                 The old labels had it backwards: "IR On" sent ON, the day command (FoundAndFixed.md #64). -->
+            <button onclick="setIr('${id}','AUTO')" title="The camera's light sensor decides">Day/Night Auto</button>
+            <button onclick="setIr('${id}','ON')" title="IR-cut filter in: colour, IR illuminator off">Day</button>
+            <button onclick="setIr('${id}','OFF')" title="IR-cut filter out: black-and-white, IR illuminator on">Night</button>
           </div>` : ""}
-          <span id="ctlStatus-${c.cameraId}" class="status"></span>
+          ${c.mode === "passthrough" && c.onvifHost ? `
+          <div class="ctl-row">
+            <button class="danger" onclick="unregisterCamera('${id}')"
+                    title="Hide this camera from both GUIs and stop its KVS push. Its stream, clips and settings are kept: Discover finds it again, with a Re-register button.">Unregister</button>
+          </div>` : ""}
+          <span id="ctlStatus-${id}" class="status"></span>
         </td>`;
       body.appendChild(tr);
       // set after insertion: the row is built via innerHTML, so a `selected` attribute
       // in the template would need per-option conditionals
-      const sel = tr.querySelector(`#recMode-${c.cameraId}`);
+      const sel = tr.querySelector(`#recMode-${id}`);
       if (sel) sel.value = c.recordingMode || "manual";
-      const aud = tr.querySelector(`#audio-${c.cameraId}`);
+      const aud = tr.querySelector(`#audio-${id}`);
       if (aud) aud.checked = !!c.audioEnabled;
-      const ob = tr.querySelector(`#outage-${c.cameraId}`);
+      const ob = tr.querySelector(`#outage-${id}`);
       if (ob) ob.value = String(c.outageBufferSec || 0);
-      const cs = tr.querySelector(`#codec-${c.cameraId}`);
-      if (cs) { cs.value = selectedCodec(c); cs.dataset.current = cs.value; }
-      mediamtxPathById[c.cameraId] = c.mediamtxPath;
+      loadCodec(id);   // not awaited: a slow camera must not hold up the table
+      if (c.onvifHost) loadStream(id);
+      if (c.onvifHost) { limitModes(sel, c.detectionModes); loadDetection(id); }
     }
     const anSel = document.getElementById("anCam");
     if (anSel) {
       anSel.innerHTML = data.cameras.filter(c => c.onvifHost)
-        .map(c => `<option value="${c.cameraId}">${c.cameraId}</option>`).join("");
+        .map(c => `<option value="${c.cameraId}">${esc(camLabel(c.cameraId))}</option>`).join("");
     }
     refreshAllStreamStatuses();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan=8 class="error">${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan=8 class="error">${esc(e.message)}</td></tr>`;
   }
 }
 
 // Queries systemctl (via GET /api/cameras/<id>/status) directly, not "what did the last
 // button click do" -- this is what actually proves the KVS push is running or not,
 // including catching a unit that crashed or was stopped by something other than this
-// page. Polled continuously so it stays true even if you never touch the buttons.
+// page. Polled continuously so it stays true even if you never touch the buttons. Local
+// only: the server checks the ID against its local registry cache, never AWS
+// (FoundAndFixed.md #56). "no-producer": the camera was registered from the other SD card
+// and has no unit on this Pi yet -- Re-register provisions one.
 async function refreshStreamStatus(id) {
   const el = document.getElementById(`kvsState-${id}`);
   if (!el) return; // row no longer in the DOM (e.g. mid table-rebuild)
   try {
     const data = await api(`/api/cameras/${id}/status`);
-    el.textContent = data.state;
+    const none = data.state === "no-producer";
+    el.textContent = none ? "no producer on this Pi: Re-register" : data.state;
     el.className = "kvs-state kvs-" + data.state;
+    const start = document.getElementById(`startBtn-${id}`);
+    if (start) { start.disabled = none; start.title = none ? "Re-register this camera from Discover first" : ""; }
   } catch (e) {
     el.textContent = "?";
     el.className = "kvs-state";
@@ -535,7 +668,7 @@ async function setRecordingMode(id, mode) {
       body: JSON.stringify({ recordingMode: mode }) });
     el.textContent = mode === "manual"
       ? "manual only"
-      : `${mode} active — needs KVS push running`;
+      : `${MODE_NAMES[mode] || mode} active — needs KVS push running`;
   } catch (e) {
     el.textContent = e.message;
   }
@@ -574,6 +707,260 @@ async function setOutageBuffer(id, secs) {
   }
 }
 
+// The recorded stream's video codec (guide §21). Read once per table load, never polled: it
+// asks the camera over ONVIF. What MediaMTX receives (`wire`) is shown as the truth; the
+// camera's own read-back only when it disagrees, because it can be stale (cam-03).
+const CODEC_LABEL = { h264: "H.264", h265: "H.265" };
+const ENCODED_BY = { camera: "encoded in the camera", "pi-hw": "encoded by the Pi" };
+
+function codecText(d) {
+  const w = d.wire;
+  const parts = [w ? `${CODEC_LABEL[w.codec]} ${w.width}×${w.height}` : "no video right now"];
+  const shown = w ? w.codec : d.configured;
+  const by = d.options && d.options[shown] && ENCODED_BY[d.options[shown].encodedBy];
+  if (by) parts.push(by);
+  for (const [c, o] of Object.entries(d.options || {})) {
+    if (!o.available) parts.push(`${CODEC_LABEL[c]}: ${o.reason}`);
+  }
+  if (w && d.configured && d.configured !== w.codec) {
+    parts.push(`the camera reports ${CODEC_LABEL[d.configured] || d.configured} but sends ${CODEC_LABEL[w.codec]}`);
+  }
+  if (shown === "h265" && !hevcPlayable()) parts.push("this browser can't show H.265 — see the note above");
+  return parts.join(" · ");
+}
+
+async function loadCodec(id) {
+  const sel = document.getElementById(`codec-${id}`);
+  const el = document.getElementById(`codecStatus-${id}`);
+  if (!sel || !el) return;
+  sel.disabled = true;
+  el.className = "status";
+  try {
+    const d = await api(`/api/cameras/${id}/codec`);
+    for (const opt of sel.options) {
+      const o = d.options[opt.value];
+      opt.disabled = !(o && o.available);
+      opt.title = o && !o.available ? o.reason : "";
+    }
+    sel.value = d.wire ? d.wire.codec : (d.configured || "h264");
+    sel.disabled = !d.switchable;
+    el.textContent = codecText(d);
+  } catch (e) {
+    sel.selectedIndex = -1;   // unknown, not "H.264": an unreachable camera shows no codec
+    el.textContent = `codec: ${e.message}`;
+    el.className = "status error";
+  }
+}
+
+async function setCodec(id, codec) {
+  const sel = document.getElementById(`codec-${id}`);
+  const el = document.getElementById(`codecStatus-${id}`);
+  const msg = [`Switch the recorded stream of ${camLabel(id)} to ${CODEC_LABEL[codec]}?`, "",
+    "This changes the camera's own encoder: about 10 s without video in the preview, the cloud " +
+    "stream and any recording. A recorded clip cannot span the moment of the switch.",
+    "A stopped KVS push picks the new codec up at its next Start."];
+  if (codec === "h265") {
+    msg.push("Viewers whose browser can't decode H.265 will not see this camera (both GUIs tell them how to fix that).");
+    if (!hevcPlayable()) msg.push("", "This browser can't play H.265: the local preview here will stay blank.");
+  }
+  if (!confirm(msg.join("\n"))) {
+    loadCodec(id);   // put the selector back to what the camera actually sends
+    return;
+  }
+  // The preview's HLS muxer dies with the camera's session; reopen it on the new codec after.
+  const hadPreview = !!previewPlayers[id];
+  if (hadPreview) togglePreview(id);
+  sel.disabled = true;
+  el.className = "status";
+  el.textContent = `switching to ${CODEC_LABEL[codec]}… (about 10 s, done when MediaMTX receives it)`;
+  try {
+    const r = await api(`/api/cameras/${id}/codec`, { method: "POST",
+      body: JSON.stringify({ videoCodec: codec }) });
+    el.textContent = r.unchanged
+      ? `already ${CODEC_LABEL[codec]} — camera untouched`
+      : `now ${CODEC_LABEL[r.wire.codec]} ${r.wire.width}×${r.wire.height} (video back after ${r.tookSec} s)` +
+        (r.producer === "active" ? " — cloud stream restarting by itself" : "");
+    if (r.registry && !r.registry.recorded) el.textContent += ` · not saved to the registry: ${r.registry.reason}`;
+    sel.disabled = false;
+    if (hadPreview) togglePreview(id);
+  } catch (e) {
+    el.className = "status error";
+    el.textContent = e.message;
+    setTimeout(() => loadCodec(id), 4000);
+  }
+}
+
+// Stream (main/sub) and frame rate of an ONVIF camera, read once per table load like the codec.
+// Only 10 and 15 are offered, each only where the encoder accepts it; a camera at another rate
+// shows "choose 10 or 15", never its rate (D5). Nothing changes until someone chooses.
+async function loadStream(id, keepStatus = false) {
+  const ss = document.getElementById(`stream-${id}`);
+  const fs = document.getElementById(`fps-${id}`);
+  const st = document.getElementById(`streamStatus-${id}`);
+  if (!ss) return;
+  try {
+    const d = await api(`/api/cameras/${id}/stream`);
+    const cur = d.streams.find(x => x.name === d.current);
+    ss.innerHTML = d.streams.map(x =>
+      `<option value="${esc(x.name)}">${esc(x.name)} ${x.width}×${x.height} ${esc(codecName(x.encoding))}</option>`).join("")
+      + (cur ? "" : `<option value="" disabled>not one of these</option>`);
+    ss.value = cur ? cur.name : "";
+    ss.disabled = d.streams.length < 2;
+    const offered = cur ? cur.fpsChoices.filter(f => FPS_CHOICES.includes(f)) : [];
+    fs.innerHTML = offered.length ? fpsOptions(offered, cur.fps) : "";
+    fs.disabled = !offered.length;
+    document.getElementById(`fpsLabel-${id}`).hidden = cur && !offered.length;
+    const notes = [];
+    if (cur && !offered.length) notes.push("this camera offers neither 10 nor 15 fps");
+    const live = liveText(d);
+    if (live) notes.push(live);
+    if (!keepStatus) { st.textContent = notes.join(" · "); st.className = "status"; }
+    if (d.live && d.live.path) mediamtxPaths[id] = d.live.path;
+  } catch (e) {
+    st.textContent = `stream: ${e.message}`;
+    st.className = "status error";
+  }
+}
+
+// Live view (this preview and the cloud Live player) shows the sub stream while main is recorded.
+function liveText(d) {
+  if (!d.live || d.live.stream !== "sub" || d.current === "sub") return "";
+  const w = d.live.wire;
+  return `live view: sub stream${w ? ` (${w.codec.toUpperCase()} ${w.width}×${w.height})` : ""}, preview and cloud`;
+}
+
+async function setStreamChoice(id, change) {
+  const ss = document.getElementById(`stream-${id}`);
+  const fs = document.getElementById(`fps-${id}`);
+  const st = document.getElementById(`streamStatus-${id}`);
+  if (change.fps !== undefined && !FPS_CHOICES.includes(change.fps)) return;
+  ss.disabled = fs.disabled = true;
+  // A stream switch can move the preview to another path (live view): close it now, reopen it
+  // on whatever path loadStream() reports afterwards.
+  const hadPreview = !!previewPlayers[id];
+  if (hadPreview) togglePreview(id);
+  st.className = "status";
+  st.textContent = change.stream ? `switching to the ${change.stream} stream… (video pauses ~10 s)`
+                                 : `setting ${change.fps} fps, then counting frames…`;
+  try {
+    const r = await api(`/api/cameras/${id}/stream`, { method: "POST", body: JSON.stringify(change) });
+    const parts = [];
+    if (r.stream) parts.push(`now ${r.stream}: ${r.wire.codec.toUpperCase()} ${r.wire.width}×${r.wire.height}`);
+    if (r.fps) parts.push(`${r.fps.measured ?? "?"} fps measured (keyframe every ${r.fps.govLength} frames)`);
+    if (r.liveView) parts.push(r.liveView.error ? `live view: ${r.liveView.error}`
+                               : `live view: ${r.liveView.live === "sub" ? "sub stream" : "this stream"}`);
+    st.textContent = parts.join(" · ") + (r.warning ? ` -- ${r.warning}` : "");
+    if (r.warning) st.className = "status error";
+  } catch (e) {
+    st.textContent = e.message;
+    st.className = "status error";
+  }
+  await loadStream(id, true);
+  if (hadPreview) togglePreview(id);
+  loadCodec(id);              // a stream switch can change the codec and size the codec line shows
+}
+
+// Grey out the detection modes a camera's ONVIF event list doesn't support (FoundAndFixed.md
+// #65): choosing one would subscribe to events the camera never sends. `modes` null = not known.
+function limitModes(sel, modes) {
+  if (!sel || !Array.isArray(modes)) return;
+  for (const opt of sel.options) {
+    if (opt.value === "manual") continue;
+    const ok = modes.includes(opt.value);
+    opt.disabled = !ok;
+    opt.title = ok ? "" : "this camera doesn't publish the events for this mode";
+  }
+}
+
+// Ask the camera which modes it supports; the server also records them for the cloud page,
+// with the camera's settings page and the last trigger test.
+async function loadDetection(id) {
+  try {
+    const d = await api(`/api/cameras/${id}/detection`);
+    limitModes(document.getElementById(`recMode-${id}`), d.modes);
+    const note = document.getElementById(`trigNote-${id}`);
+    if (note) note.innerHTML = triggerNote(d.webUrl);
+    const st = document.getElementById(`trigStatus-${id}`);
+    if (st && !triggerPolls[id]) st.textContent = lastTestText(d.tests);
+  } catch (e) { /* keep what the registry said */ }
+}
+
+// A camera may offer a trigger it only sends once switched on in its own settings (cam-03's cell
+// motion: "Normal event" > Motion detection), so say so, with a link where the camera has a page.
+// Only http://host[:port]/ is linked: the value comes from the registry.
+function safeWebUrl(u) {
+  return typeof u === "string" && /^http:\/\/[A-Za-z0-9.-]+(:\d+)?\/$/.test(u) ? u : null;
+}
+function triggerNote(webUrl) {
+  const u = safeWebUrl(webUrl);
+  return "Some triggers fire only after they are switched on in the camera's own settings"
+    + (u ? `: <a href="${u}" target="_blank" rel="noopener">open ${u.replace(/^http:\/\/|\/$/g, "")}</a>.` : ".");
+}
+
+// The registry's detectionTests: {mode: {result: "seen"|"not-seen", at, events}}.
+function lastTestText(tests) {
+  if (!tests || !Object.keys(tests).length) return "Not tested yet.";
+  return "Last test: " + Object.keys(MODE_NAMES).filter(m => tests[m]).map(m => {
+    const t = tests[m], when = new Date(t.at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    return `${MODE_NAMES[m]} ${t.result === "seen" ? "✓ seen" : "✗ not seen"} (${when})`;
+  }).join(" · ");
+}
+
+// --- trigger test: POST starts it, GET is polled (local only, no AWS), DELETE stops it ---------
+const triggerPolls = {};
+
+async function toggleTriggerTest(id) {
+  const btn = document.getElementById(`trigTest-${id}`);
+  if (triggerPolls[id]) {                       // running: Stop
+    await api(`/api/cameras/${id}/detection/test`, { method: "DELETE" }).catch(() => {});
+    return;
+  }
+  try {
+    renderTriggerTest(id, await api(`/api/cameras/${id}/detection/test`, { method: "POST", body: "{}" }));
+  } catch (e) {
+    const st = document.getElementById(`trigStatus-${id}`);
+    st.textContent = e.message; st.className = "status error";
+    return;
+  }
+  btn.textContent = "Stop test";
+  triggerPolls[id] = setInterval(async () => {
+    let d;
+    try { d = await api(`/api/cameras/${id}/detection/test`); } catch (e) { return; }
+    renderTriggerTest(id, d);
+    if (d.state === "done" || d.state === "error") {
+      clearInterval(triggerPolls[id]); delete triggerPolls[id];
+      btn.textContent = "Test triggers";
+    }
+  }, 2000);
+}
+
+function renderTriggerTest(id, d) {
+  const st = document.getElementById(`trigStatus-${id}`);
+  st.className = "status";
+  const modes = Object.keys(MODE_NAMES).filter(m => d.modes && d.modes[m]);
+  if (d.state === "starting") { st.textContent = "connecting to the camera…"; return; }
+  if (d.state === "error") { st.textContent = `test failed: ${d.error}`; st.className = "status error"; return; }
+  if (d.state === "done" && !modes.length) {
+    st.textContent = "This camera offers no detection trigger over ONVIF: manual recording only."; return;
+  }
+  const parts = modes.map(m => {
+    const e = d.modes[m];
+    if (e.seen) return `${MODE_NAMES[m]} ✓ seen ${e.seen}× (first after ${e.firstAfterSec} s)`;
+    return `${MODE_NAMES[m]} ${d.state === "done" ? "✗ not seen" : "… waiting"}`;
+  });
+  if (d.state === "listening") {
+    st.textContent = `Walk in front of the camera now — ${d.secondsLeft} s left. ` + parts.join(" · ");
+    return;
+  }
+  const missed = modes.filter(m => !d.modes[m].seen);
+  const u = safeWebUrl((document.querySelector(`#trigNote-${id} a`) || {}).href);
+  st.innerHTML = esc(parts.join(" · ")) + (d.stopped ? " (stopped)" : "")
+    + (missed.length && !d.stopped
+       ? `. Not seen: switch ${missed.map(m => MODE_NAMES[m]).join(", ")} on in the camera's settings`
+         + (u ? ` (<a href="${u}" target="_blank" rel="noopener">open</a>)` : "") + ", then test again."
+       : ".");
+}
+
 async function loadAnalytics() {
   const id = document.getElementById("anCam").value;
   const box = document.getElementById("analytics");
@@ -583,20 +970,20 @@ async function loadAnalytics() {
     const d = await api(`/api/cameras/${id}/analytics`);
     const rows = Object.entries(d.rule.params)
       .filter(([k]) => k !== "ActiveCells")
-      .map(([k, v]) => `<tr><td>${k}</td><td><strong>${v}</strong></td></tr>`).join("");
+      .map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join("");
     const sens = Object.entries(d.module.params)
-      .map(([k, v]) => `<tr><td>${k}</td><td><strong>${v}</strong></td></tr>`).join("");
+      .map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join("");
     const ac = d.activeCells;
     box.innerHTML = `
-      <p class="status">config <code>${d.configName}</code> ·
-        engine <code>${d.module.type}</code> · rule <code>${d.rule.type}</code></p>
+      <p class="status">config <code>${esc(d.configName)}</code> ·
+        engine <code>${esc(d.module.type)}</code> · rule <code>${esc(d.rule.type)}</code></p>
       <table style="max-width:420px">${sens}${rows}</table>
-      ${ac ? `<p class="status">ActiveCells mask: <code>${ac.hex}</code>
-        (${ac.cellCount} cells) — grid geometry ${ac.gridGeometry}<br>
-        <code style="font-size:0.75rem">${ac.bits}</code></p>` : ""}
-      <p class="status error">${d.readOnlyReason}</p>`;
+      ${ac ? `<p class="status">ActiveCells mask: <code>${esc(ac.hex)}</code>
+        (${ac.cellCount} cells) — grid geometry ${esc(ac.gridGeometry)}<br>
+        <code style="font-size:0.75rem">${esc(ac.bits)}</code></p>` : ""}
+      <p class="status error">${esc(d.readOnlyReason)}</p>`;
   } catch (e) {
-    box.innerHTML = `<p class="error">${e.message}</p>`;
+    box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
   }
 }
 
@@ -612,12 +999,32 @@ async function streamAction(id, action) {
   }
 }
 
+async function unregisterCamera(id) {
+  if (!confirm(`Unregister ${camLabel(id)}?\n\nIt disappears from this page and the cloud page (in VMS too: ` +
+      `the registry is shared), its KVS push stops and the Pi stops pulling its video. Its KVS stream, ` +
+      `clips and settings are kept.\n\nTo bring it back: Scan LAN above, then Re-register on the matching device.`)) return;
+  const el = document.getElementById(`ctlStatus-${id}`);
+  el.textContent = "unregistering…";
+  try {
+    const r = await api(`/api/cameras/${id}/unregister`, { method: "POST", body: "{}" });
+    if (r.warning) alert(`${camLabel(id)} unregistered, with a warning: ${r.warning}`);
+    stopPreview(id);
+    loadCameras();
+  } catch (e) {
+    el.textContent = e.message;
+    el.className = "status error";
+  }
+}
+
+// What each IR mode does, in the status line: ONVIF's ON/OFF names the IR-cut *filter*, so ON
+// is day (colour, IR off) and OFF is night (FoundAndFixed.md #64).
+const IR_MODE_TEXT = { AUTO: "day/night auto", ON: "day (colour, IR off)", OFF: "night (B/W, IR on)" };
 async function setIr(id, mode) {
   const el = document.getElementById(`ctlStatus-${id}`);
   el.textContent = "...";
   try {
     await api(`/api/cameras/${id}/ir`, { method: "POST", body: JSON.stringify({ mode }) });
-    el.textContent = `IR: ${mode}`;
+    el.textContent = `sent: ${IR_MODE_TEXT[mode]}`;
   } catch (e) {
     el.textContent = e.message;
   }

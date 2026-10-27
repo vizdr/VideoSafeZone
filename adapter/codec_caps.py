@@ -38,7 +38,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import camera_control
 import mediamtx_api
-from onvif_media2 import Media2Client, Media2Error, profile_for_stream
+import onvif_media2
+from onvif_media2 import OnvifError
 
 VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CODECS = ("h264", "h265")
@@ -63,8 +64,12 @@ def default_codec(caps: dict, current: str | None = None) -> str | None:
 
 
 def probe(item: dict) -> dict:
-    """The FIELDS for one registry row (or a registration's row-to-be). Raises Media2Error
-    when an ONVIF camera cannot be asked; the caller decides what that means."""
+    """The FIELDS for one registry row (or a registration's row-to-be). Raises OnvifError
+    when an ONVIF camera cannot be asked; the caller decides what that means.
+
+    The default prefers what MediaMTX receives over what the camera claims: cam-03 claims
+    H264 while it sends H.265, and a default taken from the claim labelled it H.264 in the
+    cloud page (FoundAndFixed.md #69). The claim is used only while nothing arrives yet."""
     path = camera_control.mediamtx_path_name(item["cameraId"])
     on_wire = mediamtx_api.path_video_codec(path)
 
@@ -80,15 +85,15 @@ def probe(item: dict) -> dict:
         return {"videoCodecCaps": caps, "videoCodecDefault": default_codec(caps, on_wire),
                 "videoEncoderToken": None, "videoCodecProbe": "stream only (no ONVIF)"}
 
-    cam = Media2Client.for_camera(item)
-    prof = profile_for_stream(cam.profiles(), item.get("rtspUrl", ""))
-    if not prof or not prof["encoder_token"]:
-        raise Media2Error("registered stream URI matches no single Media2 profile")
-    offered = cam.encoder_options(prof["encoder_token"])
-    caps = {c: "camera" if c in offered else "none" for c in CODECS}
-    current = on_wire or prof["codec"]
+    cam = onvif_media2.for_camera(item)
+    prof = onvif_media2.stream_profile(cam, item.get("rtspUrl", ""))
+    token = prof["encoderToken"]
+    offered = cam.encoder_options(token)
+    caps = {c: "camera" if onvif_media2.ENCODING[c] in offered else "none" for c in CODECS}
+    claimed = onvif_media2.CODEC.get(onvif_media2.summarize(cam.encoder_config(token))["encoding"])
+    current = on_wire or claimed
     return {"videoCodecCaps": caps, "videoCodecDefault": default_codec(caps, current),
-            "videoEncoderToken": prof["encoder_token"], "videoCodecProbe": "media2"}
+            "videoEncoderToken": token, "videoCodecProbe": "media2"}
 
 
 NAMES = {"h264": "H.264", "h265": "H.265"}
@@ -135,7 +140,7 @@ def refresh_item(table, item: dict, write: bool = True) -> tuple:
     """
     try:
         fields, status = probe(item), "ok"
-    except (Media2Error, OSError, subprocess.SubprocessError) as e:
+    except (OnvifError, OSError, subprocess.SubprocessError) as e:
         if item.get("videoCodecCaps"):
             return {k: item.get(k) for k in FIELDS}, f"kept existing ({e})"
         fields, status = fallback(item, e), f"fallback ({e})"
@@ -151,7 +156,9 @@ def refresh_item(table, item: dict, write: bool = True) -> tuple:
 
 def refresh(table, camera_ids=None, write: bool = True, log=print) -> dict:
     """Refresh every registry row (or the given ones). Returns {cameraId: status}."""
-    items = table.scan()["Items"]
+    # Unregistered cameras are skipped: nothing on this Pi pulls them any more, and asking a
+    # camera that may be gone only costs timeouts (camera_control.is_unregistered).
+    items = [i for i in table.scan()["Items"] if not camera_control.is_unregistered(i)]
     done = {}
     for item in sorted(items, key=lambda i: i["cameraId"]):
         if camera_ids and item["cameraId"] not in camera_ids:

@@ -70,10 +70,11 @@ either GUI controls exactly that process.
 |---|---|
 | **Multi-camera** | USB (transcoded) and ONVIF/RTSP (passthrough) side by side. Cameras come from a DynamoDB registry, not a hardcoded list — adding one works everywhere immediately |
 | **Hardware encoding** | Pi 4's JPEG-decode, ISP-convert and H.264-encode blocks, ~2× CPU reduction vs software |
-| **Live view** | Cloud HLS via KVS, Cognito-authenticated, served over HTTPS through CloudFront |
-| **Evidence clips** | Manual recording, plus detection-triggered clips; browse (ten per page, newest first), play, re-tier (Standard / IA / Deep Archive) and delete from the browser |
-| **ONVIF detection** | Motion, cell-grid motion and human-shape detection drive automatic clip capture |
-| **ONVIF device control** | IR-cut filter (day/night) from either GUI; WS-Discovery + one-click camera registration from a local admin app |
+| **Live view** | Cloud HLS via KVS, Cognito-authenticated, served over HTTPS through CloudFront. **Live** is separate from recording: it shows the camera's sub stream while someone watches, and the Pi stops it by itself a few minutes after the page closes |
+| **Evidence clips** | Manual recording (while Start runs), plus detection-triggered clips; browse (ten per page, newest first), play, re-tier (Standard / IA / Deep Archive) and delete from the browser |
+| **ONVIF detection, per camera** | Motion, cell-grid motion and human detection, each offered only where the camera's own event list publishes it; **Test triggers** listens while you walk past and records what fired |
+| **ONVIF device control** | IR-cut filter (day/night) from either GUI; WS-Discovery and one-click registration — including cameras without a password — from a local admin app; which stream is recorded (main/sub) and at 10 or 15 fps; display names |
+| **Unregister / Re-register** | A camera can be hidden everywhere and stopped while its clips and settings are kept; Discover offers it back. A camera follows its WS-Discovery identity to a new IP address by itself |
 | **Optional audio** | Per-camera, off by default, for both cameras — [`AUDIO.md`](AUDIO.md) |
 | **H.264 or H.265, per camera** | Wherever the camera's own hardware encodes it; set on the camera from the local admin GUI, shown read-only in the cloud client. H.264 stays the default, and a viewer whose browser can't decode H.265 is told how to fix it — guide §21 |
 | **Durable outage buffering** | Records to a USB stick while AWS is unreachable and backfills on recovery — [`OUTAGE.md`](OUTAGE.md) |
@@ -107,7 +108,7 @@ The numbers this project exists to produce. Method and caveats in the linked doc
 | **Detection false positives** | Zero across 9.01 h of heartbeat-backed silence |
 
 Three bugs worth knowing about, because they were all silent and none was caught by
-"it ran without errors" — all 43 found so far are in [`FoundAndFixed.md`](FoundAndFixed.md):
+"it ran without errors" — all 83 found so far are in [`FoundAndFixed.md`](FoundAndFixed.md):
 
 - H.264 negotiated as **Baseline**: `ffmpeg` played it, browsers rendered black (#13).
 - The wrong audio sample rate silently loses half the audio, because `kvssink` shares one
@@ -127,7 +128,7 @@ open a browser; "no errors" proves nothing.
 | Raspberry Pi 4B | **4 GB** (what this was built on; 8 GB makes the SDK build easier) |
 | Storage | SD card for the OS, plus a **USB stick** if you want outage buffering (57 GB here) |
 | `cam-01` | AVerMedia PW310 USB webcam — MJPG at 720p (YUYV only at 8 fps), so it must be transcoded |
-| `cam-02` | Any ONVIF/RTSP camera that emits H.264 (tested: an OEM rebrand of mixed Hikvision/Dahua lineage, [`Camera-Features.md`](Camera-Features.md)) |
+| `cam-02`… | Any ONVIF/RTSP camera that emits H.264 or H.265. Tested: an OEM rebrand of mixed Hikvision/Dahua lineage ([`Camera-Features.md`](Camera-Features.md)), an H4-52POX-S, and a 5831-F-Q PTZ camera that has no password |
 | Network | Wired or Wi-Fi; **no router configuration at all** |
 | OS | Raspberry Pi OS (Debian trixie), 64-bit |
 
@@ -137,129 +138,39 @@ An AWS account is required. The demo runs well under $5/month; see [Cost](#cost)
 
 ## Install on a Raspberry Pi 4B (4 GB)
 
-Full detail is in [`LAUNCH.md`](LAUNCH.md) Part A and the guide's §1–§8. This is the
-shape of it, with the 4 GB-specific parts called out.
-
-### 1. Stability hardening — do this *before* building anything
-
-On 4 GB, the SDK build will OOM-kill the machine without this. It is not optional.
+A fresh SD card to a running adapter is scripted, in [`setup/`](setup/). Each script is
+idempotent (re-running it changes nothing that's already right), explains its steps in its
+comments, and ends with PASS/FAIL proofs. Detail and reasons: [`LAUNCH.md`](LAUNCH.md) Part A.
 
 ```bash
-sudo apt install -y earlyoom
-# prefer killing compiler processes over sshd/systemd
-sudo systemctl enable --now earlyoom
-
-sudo fallocate -l 3G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile
-sudo swapon -p 10 /swapfile
-echo "/swapfile none swap sw,pri=10 0 0" | sudo tee -a /etc/fstab
-echo "vm.swappiness=10" | sudo tee /etc/sysctl.d/99-low-swappiness.conf
+# Raspberry Pi OS (64-bit, Debian trixie), your user, Wi-Fi/SSH -- then:
+git clone https://github.com/vizdr/VideoSafeZone.git ~/Projects/VideoSafeZone
+bash ~/Projects/VideoSafeZone/setup/setup-all.sh      # as yourself: it asks for sudo once
+bash ~/Projects/VideoSafeZone/setup/setup-check.sh    # every line "ok"
 ```
 
-Exact `earlyoom` arguments: `LAUNCH.md` A1. **On Wi-Fi, also switch power save off**
-(`LAUNCH.md` A1) — with it on, the local admin GUI times out in the browser while the Pi
-itself reports everything healthy.
+| Script | What it does |
+|---|---|
+| `setup-system.sh` | **Stability first** — on 4 GB the SDK build kills the Pi without it: earlyoom tuned to kill compilers first, a 3 GB swapfile, a persistent journal, Wi-Fi power save off. Then the packages, `/etc/adapter/adapter.env`, the system units (installed, never enabled — they cost money), a narrow sudo rule, and the USB stick if one labelled `vms-buffer` is plugged in |
+| `setup-user.sh` | Python venv, the pinned MediaMTX binary, the AWS CLI (signature-checked), the user units |
+| `setup-sdk.sh` | The KVS Producer SDK with its five patches, built single-threaded in the background (**1.5–2.5 hours**) — or restored in seconds from the stick, where every finished build caches itself |
+| `setup-identity.sh` | The device certificate: restored from the stick's backup, or — the first time on an account — created with `aws login --remote` and `setup-identity.sh create`, then `backup` |
+| `setup-launch.sh` | Starts everything (from then on at every boot) and proves video flows |
 
-### 2. Environment
+The certificate is the only credential on the device and is **gitignored**; everything else
+is vended short-lived through an IoT role alias. The AWS resources themselves (KVS, IAM role
+and alias, IoT Thing and policy, DynamoDB, Cognito, Lambdas, API Gateway, S3 + CloudFront)
+are created once per account — commands in the guide's §3/§6/§8, policy documents in
+[`cloud/`](cloud/) — and the cloud code is deployed with `cloud/deploy.sh` (`LAUNCH.md` Part H).
 
-```bash
-export VMS_HOME=$HOME/Projects/VideoSafeZone   # wherever you cloned the repo
-export KVS_SDK=$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp
-export GST_PLUGIN_PATH=$KVS_SDK/build
-export LD_LIBRARY_PATH=$KVS_SDK/open-source/local/lib:$LD_LIBRARY_PATH
-export AWS_REGION=eu-central-1
-```
+**The USB stick** (optional, for outage recording; it also carries the SDK cache and the
+identity backup across fresh cards) is ext4 labelled `vms-buffer`. The scripts never format
+anything: a new stick is `sudo mkfs.ext4 -m 0 -L vms-buffer /dev/sdX1` by hand, after
+checking the name twice (`LAUNCH.md` A10).
 
-Persist to `~/.bashrc`. **Note that systemd units do not source `.bashrc`** — every unit
-sets the paths it needs explicitly, as literal absolute paths (`LAUNCH.md` A8). The
-adapter's own scripts and Python modules don't need `VMS_HOME` exported: they fall back
-to the repo root they live in.
-
-### 3. Build the KVS Producer SDK — budget 1.5–2.5 hours
-
-```bash
-sudo apt install -y cmake m4 git build-essential pkg-config \
-  libssl-dev libcurl4-openssl-dev liblog4cplus-dev \
-  gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly \
-  gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-  gstreamer1.0-rtsp v4l-utils       # rtspclientsink (cam-01 → MediaMTX), v4l2-ctl
-```
-
-> `gstreamer1.0-omx-generic`, which the upstream instructions ask for, **does not exist on
-> Debian trixie**.
-
-**Three upstream source patches are required**, and they go in at two different moments,
-so the build runs in two stages. The exact commands, with a proof for each stage, are in
-`LAUNCH.md` A3:
-
-1. **Before anything is built — patches 1 and 2.** They stop the nested OpenSSL build from
-   running one compiler per core, which `-j1` and `-DPARALLEL_BUILD=OFF` don't reach, and
-   from cloning OpenSSL's huge test submodules. Skip them and earlyoom kills the build
-   mid-OpenSSL (`FoundAndFixed.md` #2, #3).
-2. **Stage 1: `cmake` configure.** With `-DBUILD_DEPENDENCIES=ON` this compiles the
-   dependencies and downloads the kvspic source.
-3. **Patch 3** (GCC 14 compatibility). Its file only exists after stage 1.
-4. **Stage 2: `make -j1`.**
-
-On 4 GB, build **single-threaded and pinned** (`taskset -c 1,2`), as a `systemd-run
---user` unit with lingering enabled, so it survives a dropped SSH or VS Code session.
-
-**Checkpoint:** `gst-inspect-1.0 kvssink` prints element details, not "No such element."
-
-### 4. Python environment
-
-```bash
-python3 -m venv "$VMS_HOME/venv-adapter"
-"$VMS_HOME/venv-adapter/bin/pip" install boto3 awsiotsdk onvif-zeep-async WSDiscovery flask requests lxml
-```
-
-Proof that the venv works, and what each package is for: `LAUNCH.md` A4 (the list was once incomplete, `FoundAndFixed.md` #27).
-
-**MediaMTX** — download the pinned release binary into `$VMS_HOME/mediamtx/`, extracting
-*only* the binary: the tarball's default `mediamtx.yml` would overwrite this repo's own
-config (`LAUNCH.md` A5).
-
-### 5. AWS resources
-
-Created once per account, in this order — full commands in the guide's §3/§6/§8, every
-policy document in [`cloud/`](cloud/):
-
-KVS stream → IAM role `KVSAdapterRole` + role alias → IoT Thing + X.509 certificate +
-thing policy → DynamoDB tables `cameras` and `clips` → Cognito user pool → Lambdas →
-API Gateway → S3 + CloudFront for the client.
-
-The certificate lands in `$VMS_HOME/certs/` and is **gitignored**. It is the only
-credential on the device; everything else is vended short-lived through the role alias.
-A fresh clone therefore has no `certs/`: copy it from the previous Pi or create a new
-certificate for the existing Thing, then prove it against both AWS endpoints —
-`LAUNCH.md` A7. The AWS CLI (the operator's tool, used for that and for deploys) isn't
-in Raspberry Pi OS; install and credential it per `LAUNCH.md` A6.
-
-Which account, Thing and endpoints the adapter talks to is set in one file,
-`/etc/adapter/adapter.env`, installed from `config/adapter.env.example` (`LAUNCH.md` A7).
-
-### 6. Optional — USB buffer for outage recording
-
-An ext4 USB stick labelled `vms-buffer`, mounted at `/mnt/vms-buffer` by UUID with
-`nofail`, plus a sentinel file (`.vms-buffer-ok`) without which nothing arms — so an
-unplugged stick can never redirect recording onto the SD card. **A stick moved from
-another Pi is already formatted: don't `mkfs` it.** Step-by-step with proof: `LAUNCH.md`
-A10. Without the stick the outage units simply idle.
-
-### 7. Start it
-
-The unit files aren't in git — create them first with `LAUNCH.md` A8 (it writes the
-literal paths of *this* clone into each unit, since systemd doesn't expand `$VMS_HOME`).
-
-```bash
-systemctl --user enable --now kvs-camera-init kvs-mediamtx kvs-camera-publish \
-                              kvs-agent onvif-admin kvs-event-watcher \
-                              kvs-outage-buffer kvs-outage-uploader \
-                              kvs-camera-rematch.timer
-```
-
-**A partial launch fails silently, not obviously.** Verify with `LAUNCH.md` Part C — every
-unit can report `active` while the stream is dead.
+**A partial launch fails silently, not obviously** — every unit can report `active` while the
+stream is dead. That is why `setup-launch.sh` checks that video actually flows, and why
+`LAUNCH.md` Part C exists.
 
 ---
 
@@ -273,12 +184,16 @@ ffprobe -rtsp_transport tcp rtsp://127.0.0.1:8554/cam01
 ffprobe "$(aws kinesis-video-archived-media get-hls-streaming-session-url ... )"
 ```
 
-- **Browser client** — the CloudFront URL. Sign in, Start a camera, watch, record, browse
-  clips, set audio and outage buffering per camera.
-- **Local admin** — `http://<pi-ip>:8080`. Discover and register ONVIF cameras, IR
-  control, local preview, live `systemctl`-backed status.
-- **Stop when finished.** `sudo systemctl stop 'kvs-cam*'` — every producer, including
-  GUI-registered `kvs-cam@camNN` instances; these are what cost money.
+- **Browser client** — the CloudFront URL. Sign in. **Live** to watch a camera (it stops by
+  itself after you leave), **Start** to record it to the cloud, browse and play clips, set
+  audio, triggers and outage buffering per camera.
+- **Local admin** — `http://<pi-ip>:8080`. Discover, register, re-register and unregister
+  ONVIF cameras; codec, stream and frame rate; test triggers; IR control; local preview;
+  live `systemctl`-backed status.
+- **Stop when finished.** Stop in either GUI, or `sudo systemctl stop 'kvs-cam*'` — every
+  producer, including GUI-registered `kvs-cam@camNN` instances; these are what cost money.
+- **The Pi seems gone from SSH?** On a weak Wi-Fi link it can stall for up to 10 minutes and
+  then reconnect by itself (`FoundAndFixed.md` #79); wait before pulling the plug.
 
 Two systemd managers are in play and they cannot see each other: **system** units
 (`kvs-cam0N.service`, the paid producers, need `sudo`) and **user** units (everything
@@ -305,8 +220,9 @@ for a week, not a design error** — which is exactly why Start/Stop is an expli
 ## Repository map
 
 ```
+setup/              fresh-card setup: setup-all.sh and its five steps, setup-check.sh
 adapter/            on-device Python and pipelines
-  agent.py            MQTT control agent (start/stop/IR)
+  agent.py            MQTT control agent (start/stop/IR, live view)
   camera_control.py   shared camera logic; unit-name and path-name helpers live here
   config.py           deployment identity from /etc/adapter/adapter.env
   aws_device_creds.py short-lived AWS credentials from the device certificate
@@ -316,13 +232,16 @@ adapter/            on-device Python and pipelines
   mediamtx_api.py     MediaMTX control-API helper
   sync_mediamtx_paths.py  re-adds camera paths after every MediaMTX start
   rematch_cameras.py  follows ONVIF cameras to a new IP (timer)
-  onvif_discovery.py  WS-Discovery scan + ONVIF enrichment
-  onvif_media2.py     ONVIF Media2: read and switch a camera's video codec
+  onvif_discovery.py  WS-Discovery scan + ONVIF enrichment (microphone, streams, web page)
+  onvif_events.py     per-camera recording triggers, and ONVIF subscriptions that clean up
+  onvif_media2.py     ONVIF Media2: codec, stream and frame rate of a camera's encoders
+  live_view.py        the live view on the sub stream (path, registry field, KVS stream)
   codec_caps.py       which codecs each camera can deliver, and the default
   onvif-admin/        local Flask GUI
   bin/                GStreamer pipelines, detect-hw.sh, operator tools
 config/             templates for /etc/adapter/ (adapter.env, cameras/*.env)
 client/index.html   the cloud browser client (single file)
+cloud/deploy.sh     deploys the Lambdas and the page, with the shared-account checks
 cloud/lambda/       one file per Lambda
 cloud/iam/          one policy document per role
 cloud/iot/          IoT rules and thing policy
@@ -345,7 +264,8 @@ point — getting it wrong twice made Start/Stop silently do nothing (`FoundAndF
 |---|---|
 | [`Demo-AWS-Video-revCosts4.md`](Demo-AWS-Video-revCosts4.md) | **The canonical build guide.** A narrative log of the real build and the design decisions. When in doubt about *why* something is built a certain way, read this |
 | [`FoundAndFixed.md`](FoundAndFixed.md) | Every defect found so far — symptom, cause, fix — numbered; other docs cite them as `#N` |
-| [`LAUNCH.md`](LAUNCH.md) | Operational runbook — what to run, in order, and how to verify |
+| [`LAUNCH.md`](LAUNCH.md) | Operational runbook — fresh-card setup (scripted), launch, verification, deploys |
+| [`VMS-PORT-PLAN.md`](VMS-PORT-PLAN.md) | The round that ported the base project's fixes and features (unregister, triggers, stream/fps, live view), with its decisions and status |
 | [`COSTS-1.4.md`](COSTS-1.4.md) | The cost model. Authoritative for any bitrate or dollar figure |
 | [`Camera-Features.md`](Camera-Features.md) | What the ONVIF camera actually does, marked **verified** vs *advertised* |
 | [`CAM02-CAPABILITIES.md`](CAM02-CAPABILITIES.md) | The ONVIF camera's raw capability replies, service by service — what it *advertises* |

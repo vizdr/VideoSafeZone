@@ -16,9 +16,10 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-51 entries, from the first build (2026-08-20) through the move onto a second Pi
+83 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
-project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49).
+project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
+2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day.
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -73,6 +74,38 @@ project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49).
 | 49 | *(VMS only — feature not in this repository)* | — | 2026-09-27 | not applicable |
 | 50 | MediaMTX reported a path `ready` while no media flowed | verification | 2026-09-27 | fixed |
 | 51 | Clips older than the newest 50 could not be reached from the browser | Lambda / cloud client | 2026-09-28 | fixed (paging) |
+| 52 | The cam-01 publisher hung silently and stayed `active` (VMS #51) | publisher | 2026-10-25 (VMS 10-03) | ported; restart verified |
+| 53 | The FRITZ!Box drops the Pi's Wi-Fi after group-rekey bursts (VMS #52) | network | 2026-10-25 (VMS 10-03) | **open** — environmental |
+| 54 | H.265 detection clips listed as 45 s held 9 s (VMS #53) | clip Lambdas | 2026-10-25 | fixed, deployed 2026-10-25 |
+| 55 | The AWS block missed the IoT endpoint's new range (VMS #54) | test tooling | 2026-10-25 | fixed |
+| 56 | A DNS failure froze the admin page's status polls (VMS #55) | admin GUI | 2026-10-25 | fixed, verified |
+| 57 | *(hardware note, VMS #56)* USB 3 stick vs 2.4 GHz radio | hardware | — | not applicable |
+| 58 | kvssink dropped every H.265 keyframe: no DTS (VMS #57) | pipeline | 2026-10-25 | fixed, verified |
+| 59 | H.265 + audio: video clock 1000 h ahead (VMS #58) | pipeline | 2026-10-25 | fixed, verified |
+| 60 | GUI-registered cameras could never record audio (VMS #59) | discovery / producer | 2026-10-25 | fixed, verified |
+| 61 | Start lost during an MQTT drop; page said only "not available" (VMS #60) | control plane / page | 2026-10-25 | **open**; page message done |
+| 62 | cam-01 audio on: Start didn't restart the publisher (VMS #61) | producer | 2026-10-25 | fixed, verified |
+| 63 | Audio frames lost: ms tie in kvssink, invented DTS on cam-01 (VMS #62) | kvssink / producer | 2026-10-25 | fixed, verified |
+| 64 | IR buttons had ONVIF's ON/OFF backwards (VMS #63) | GUIs | 2026-10-25 | fixed in both pages |
+| 65 | Detection never fired on cam-03; watcher leaked subscriptions (VMS #64) | event watcher / GUIs | 2026-10-25 | ported; hygiene verified, a fired trigger pending |
+| 66 | The cloud player spun forever (VMS #65) | cloud page / Lambda | 2026-10-25 | fixed, deployed 2026-10-25 |
+| 67 | No-password camera couldn't register; microphone only in SDP (VMS #66) | registration / discovery | 2026-10-25 | fixed, verified |
+| 68 | cam-04's Motion never fired: event field ≠ declared (VMS #67) | event watcher | 2026-10-25 | ported; verification pending |
+| 69 | Camera already on H.265 labelled H.264 (VMS #68) | admin GUI / codec caps | 2026-10-25 | ported; verification pending |
+| 70 | Passthrough H.264 + audio lost audio frames (VMS #69) | kvssink | 2026-10-25 | fixed, verified |
+| 71 | cam-02's hard-coded A-law (VMS #70) | producer | 2026-10-25 | fixed, verified |
+| 72 | Connected producer feeding kvssink nothing looked healthy (VMS #71) | producer | 2026-10-25 | fixed, verified |
+| 73 | cam-02 lost 1 AAC frame in 6: paired RTP timestamps (VMS #72) | producer | 2026-10-25 | fixed, verified |
+| 74 | Discovery showed "G.711 8000 kHz" (VMS #73) | discovery | 2026-10-25 | fixed |
+| 75 | cam-01 publisher sent audio, no video, unnoticed (VMS #74) | publisher | 2026-10-25 | fixed, verified |
+| 76 | LAUNCH A3's patches 1–2 had nothing to patch on a fresh clone | docs / build | 2026-10-25 | fixed |
+| 77 | Patch 2 did nothing on CMake 3.31: 700 MB of OpenSSL submodules | build | 2026-10-25 | fixed (patch 2b) |
+| 78 | Two LAUNCH A3 proofs couldn't tell success from failure | docs | 2026-10-25 | fixed |
+| 79 | Wi-Fi uplink stalls while "connected", until the router's next rekey (≤10 min) | network / platform | 2026-10-25 | **open** — environmental (#53) |
+| 80 | Ported Unregister would fail silently under the narrow sudo rule | sudo / systemd | 2026-10-25 | fixed |
+| 81 | GUI-registered producers started at boot, pushing to KVS unattended | provisioning / cost | 2026-10-25 | fixed |
+| 82 | The new `list-cameras` answered 500: a Decimal it couldn't serialise | Lambda | 2026-10-25 | fixed before deploy |
+| 83 | Start Recording could run with nothing recording; it failed only at Stop Recording | cloud page | 2026-10-25 | fixed, page not yet deployed |
 
 ### What they have in common
 
@@ -1082,3 +1115,329 @@ authorizer), after deploying the page-number version:
 When checking this way with a value that holds a `+`, pass it decoded:
 `test-invoke-method` hands the query string to the Lambda without decoding it, unlike a
 real request.
+
+---
+
+## Ported from VMS (2026-10-25 round, `VMS-PORT-PLAN.md`)
+
+Entries #52–#75 are VMS's #51–#74, in the same order, so **this number = VMS's number + 1**.
+Each says what broke and what fixed it in one paragraph; VMS's `FoundAndFixed.md` has the
+full diagnosis. The code was ported on 2026-10-25 onto a freshly re-imaged card (#76);
+"verified here" names what was proven on this Pi, "pending" what still has to be.
+
+### #52 — The cam-01 publisher hung silently and stayed `active`, dead
+
+**Found in VMS as #51** (2026-10-03): `gst-launch` stopped producing without exiting, at
+boot and once after an hour, with no error and no EOS, so `kvs-camera-publish` stayed
+`active` while MediaMTX received nothing. `publish-cam01.sh` ran the pipeline under `exec`,
+so nothing watched it. **Fix:** `publish_run` — MediaMTX's `bytesReceived` for `cam01` is
+read every 10 s and the pipeline is SIGKILLed after 30 s without growth; any end of the
+pipeline exits 1 so `Restart=on-failure` brings it back. Only this function was ported, not
+VMS's `cam01.env`-driven pipeline (R2). **Verified here** (2026-10-25): a pipeline end exits 1 and systemd restarts the publisher (seen when #75's watchdog fired); the 30 s byte check itself has not fired yet.
+### #53 — The FRITZ!Box drops the Pi's Wi-Fi after bursts of group rekeying
+
+**Found in VMS as #52** (2026-10-03, counted 2026-10-17): after a burst of four group rekeys
+one second apart, the access point disconnects the Pi (`reason=2`) and every AWS client
+loses ~40 s to 3 min. Environmental: same router, same board. **Status:** open; Ethernet is
+the fix VMS recommends. See #79 for the related silent stall found on this card.
+
+### #54 — H.265 detection clips listed as 45 s held 9 s
+
+**Found in VMS as #53** (open there, in this repository's `clip-to-s3`): `durationSec` was
+the requested window, not what `GetClip` returned. **Reproduced here** from the evidence
+bucket: cam-02's clip of 2026-09-28 09:47 is listed 45 s and holds 9 s (ffprobe); a manual
+clip listed 37 s holds 32 s. **Fix:** `mp4_duration_sec()` in `clip_to_s3.py` and
+`record_clip.py` reads `moov/mvhd` (GetClip's MP4 is not fragmented); the window length is
+only the fallback for an unreadable file. Verified on three real clips: 9, 44 and 32 s, as
+ffprobe. `clip-to-s3` is still VMS's too; the change is additive (same field, truer value).
+**Deployed** 2026-10-25 (`clip-to-s3`, `record-clip`). Why cam-02 returned only 9 s is still open.
+
+### #55 — The AWS block missed the IoT endpoint's new address
+
+**Found in VMS as #54**: since 2026-10 the IoT data endpoint also resolves into
+`63.176.0.0/12`, which `awsblock.sh` didn't block, so a test outage "recovered" after 7 s.
+**Fix:** the range added to `awsblock.sh`; OUTAGE.md's rule: check the endpoint with
+`getent ahosts <IOT_DATA_ENDPOINT>` before believing an outage test. **Verified here:** pending.
+
+### #56 — A DNS failure froze the whole admin page
+
+**Found in VMS as #55**: every camera-status poll looked the camera up in DynamoDB; with DNS
+failing each lookup hung ~36 s, and six of them filled the browser's connection pool. **Fix:**
+`GET /api/cameras/<id>/status` checks the ID against the outage supervisor's local registry
+cache (DynamoDB only without one); the codec, stream and detection routes run once per table
+load on short timeouts, never from a poll. **Verified here** (2026-10-25): with DynamoDB pointed at an address that never answers, every status poll answered from the cache in ~50 ms (an unknown camera: 404 in 2 ms), while the old per-poll lookup was still hanging after 20 s.
+### #57 — *(hardware note)* A USB 3 stick next to a 2.4 GHz radio deafens it
+
+**Found in VMS as #56** with the Pico 2 W, which this repository doesn't have. Recorded so the
+numbers stay aligned; the stick is in a USB 3 port here too, and the Pi's own radio is on
+5 GHz, so it is not known to matter. Nothing to fix.
+
+### #58 — kvssink dropped every keyframe of an H.265 camera
+
+**Found in VMS as #57**: cam-03's H.265 leaves `h265parse` with `dts: none`; kvssink drops any
+HEADER buffer without a DTS, i.e. every keyframe, so no fragment ever starts and the unit stays
+`active`. **Fix:** `h265timestamper` at the end of the H.265 chain (`producer-lib.sh
+video_depay_chain`). **Verified here** (2026-10-25): cam-03 on H.265, fragments persisted every 4 s; the only drop was the stream's first (non-key) frame; live HLS `hvc1.1.6.L90`, 800×448, a clean frame from KVS.
+### #59 — H.265 with audio: video ran on a clock 1000 h ahead of the audio
+
+**Found in VMS as #58** (its diagnosis corrected by its #62): the timestamper shifts every
+timestamp by 1000 h, harmless alone; beside an audio track KVS refused audio frames in
+bursts (`0x30000005`). **Fix:** `identity single-segment=true` after the timestamper.
+**Verified here** (2026-10-25): cam-03 with audio, 4½ min: 63 fragments, zero rejected frames, AAC in the live HLS. (cam-03's own G.711 track is silent at the source, −91 dB, so its sound was proven on cam-02 and cam-04.)
+### #60 — A GUI-registered camera could never record audio
+
+**Found in VMS as #59**: registration wrote no `audioCapable`, and `stream-channel.sh` sent the
+audio track to a fakesink only. **Fix:** discovery reads the microphone from the profile
+(`onvif_discovery._audio`) or, where the profile names none, from the stream's SDP (#67);
+registration writes `audioCapable` (G.711 only); `stream-codec.py` prints `AUDIO_TRACK`
+(`pcma`/`pcmu` from MediaMTX's `muLaw`) and `stream-channel.sh` gained the G.711 → AAC 8 kHz
+branch, depayloader by law. **Verified here** (2026-10-25): discovery shows the microphone on all three ONVIF cameras; cam-02 (mu-law), cam-03 (mu-law) and cam-04 (A-law) recorded G.711 → AAC with zero rejects; cloud audio at room level (cam-02 −38…−43 dB, cam-04 −37 dB).
+### #61 — Start during an MQTT drop was lost, and the page only said "not available"
+
+**Found in VMS as #60.** **Status:** open (the command is fire-and-forget over the shared MQTT
+session). The page half is done: when no video arrives in the 45 s start window, Start and
+Live now say "The Pi didn't answer: it may be offline from AWS" instead of "not available".
+
+### #62 — cam-01 with audio on: Start never restarted the publisher
+
+**Found in VMS as #61**: the publisher reads `audioEnabled` once at its own start; Start
+restarts only the producer, so a flag switched since left the producer waiting on an audio
+pad that never came, and kvssink stalled the video too. **Fix:** `stream-cam01.sh` compares
+the flag with the tracks MediaMTX carries for `cam01` and restarts `kvs-camera-publish` when
+they disagree, both ways; still no microphone track: video only. **Verified here** (2026-10-25): both directions — audio off: Start restarted the publisher and MediaMTX dropped the LPCM track; on: restarted again and the microphone returned. First fragment ~40 s after Start when the publisher has to restart.
+### #63 — Audio cameras lost audio frames: a millisecond tie in kvssink, invented DTS on cam-01
+
+**Found in VMS as #62**: kvssink's track merge mishandled audio and video timestamps that tie
+within a millisecond, and cam-01's encoder frames had no DTS, so kvssink invented
+`last_dts + 40 ms`. **Fix:** SDK patch 4 (LAUNCH.md A3, whole-millisecond timestamps) and
+`h264timestamper ! identity single-segment=true` on cam-01's video in its audio branch.
+**Verified here** (2026-10-25): patch 4 built; cam-01 with audio, 3 min: 86 fragments, zero rejects.
+### #64 — IR buttons had ONVIF's ON/OFF backwards
+
+**Found in VMS as #63**: ONVIF's `IrCutFilter` ON means the filter is *in* (day, colour, IR
+off); both GUIs labelled ON "Force Night"/"IR On". **Fix:** both pages: Day = `ON`,
+Night = `OFF`, and the status line names the effect. cam-03 ignores the setting (VMS #63).
+
+### #65 — Detection never fired on cam-03, and the watcher leaked subscriptions
+
+**Found in VMS as #64**: modes mapped to cam-02's topic names, which cam-03 doesn't publish;
+`event_watcher.py` re-subscribed every ~100 s without renewing or unsubscribing, filled
+cam-03's 10 subscription slots, and then nothing could subscribe — VMS on the other card
+included, since the cameras are shared (VMS-PORT-PLAN.md D1). **Fix:** `onvif_events.py`
+(per-camera topics from `GetEventProperties`, `PullSubscription` renewing every 20 s and
+always unsubscribing); the watcher, both GUIs (unsupported modes greyed out, "Test
+triggers") and both mode routes (`set-camera-mode` now refuses them too, 409) use it.
+`replay-gate.py`: identical results before and after on both recorded logs. **Verified
+here:** live pending; `kvs-event-watcher` stays disabled until then (plan 0.5). **Verified here** (2026-10-25): three back-to-back trigger tests on cam-03 each subscribed, received the opening state and unsubscribed, with no error or leaked session; the watcher is enabled again and idles while no camera is in a detection mode. A test that *sees* a trigger needs someone walking past (pending).
+
+### #66 — The cloud player spun forever
+
+**Found in VMS as #65**: after a quick Stop → Start, `LIVE` built the session from the old
+run's last fragment; a failed playlist load was retried with `startLoad()`, which has no
+playlist to resume; nothing caught a frozen player; hls.js was `@latest`. **Fix:** `since`
+(LIVE_REPLAY from the button press) in `get-hls-url`, a stall watchdog (new session after
+20 s without progress, a message after three), playlist failures go straight to a new
+session, hls.js pinned to 1.7.3 (both pages). **Deployed** 2026-10-25 (`get-hls-url` and the page); the page passed a stubbed run in headless Firefox before the upload.
+
+### #67 — A camera with no password couldn't be registered; its microphone wasn't found
+
+**Found in VMS as #66** (cam-04: user `admin`, empty password): registration required a
+password, the CLI's `None` crashed the digest, the RTSP URI from GetStreamUri carried no login
+(every pull a 401, MediaMTX refuses an empty RTSP password), and its G.711 track appears only
+in the stream's SDP. **Fix:** empty passwords accepted and stored as `""`; `rtsp_login()`
+puts the login (placeholder `x` when empty) into the URI after one checking DESCRIBE;
+`stream_audio()` reads the SDP. **Verified here** (2026-10-25): `discover-onvif.py --user admin` with no password enriched all three cameras; cam-04 re-registered with an empty password (its stored `admin:x@` URI kept), producer provisioned.
+### #68 — cam-04's Motion could never fire: its events use another field than declared
+
+**Found in VMS as #67**: cam-04 declares `MotionAlarm` with `State` and sends `IsMotion`; its
+human detection never reaches ONVIF. **Fix:** `onvif_events.state_value()` — the declared
+field first, else the first known state field present; the trigger test counts a `Changed`
+message and keeps `Initialized` for the opening window, because cam-04 sends both for every
+detection. **Verified here:** pending (needs someone walking past cam-04).
+
+### #69 — A camera already sending H.265 at registration was labelled H.264
+
+**Found in VMS as #68**: the registry learnt the codec only from a switch, so `list-cameras`
+fell back. In this repository the same trap sat in `codec_caps.probe`: at registration the
+new MediaMTX path isn't flowing yet, so `videoCodecDefault` came from the camera's *claim*
+(cam-03 claims H264, sends H.265). **Fix:** `GET /api/cameras/<id>/codec` records the wire's
+codec when the registry differs (once), and registration waits up to 15 s for the new path's
+video before probing. **Verified here:** pending.
+
+### #70 — Passthrough H.264 with audio lost audio frames; `h264timestamper` made it worse
+
+**Found in VMS as #69**: kvssink invented `last_dts + 40 ms` for `h264parse`'s `dts: none`;
+`h264timestamper` assumed 4 reorder frames on cam-04 (no B-frames) and KVS refused the video.
+**Fix:** SDK patch 5 (a missing DTS becomes the PTS); the passthrough H.264 chain gets no
+timestamper. **Verified here** (2026-10-25): patch 5 built; cam-04 H.264 1080p with A-law audio, 5 min: 145 fragments, zero rejects (VMS saw 45 before the patch); cloud plays `avc1.4d0029,mp4a.40.2`.
+### #71 — cam-02's hard-coded A-law garbled mu-law speech, then stalled the stream
+
+**Found in VMS as #70**: `stream-cam02.sh` hard-coded `rtppcmadepay ! alawdec`; cam-02 sends
+mu-law since a change in its own audio page. **Fix:** the law from the wire (`AUDIO_TRACK`),
+in `stream-cam02.sh` and `stream-channel.sh`; no G.711 track: video only. **Verified here** (2026-10-25): cam-02's track reads `pcmu` from the wire and records with zero rejects; the old A-law constant would have stalled it.
+### #72 — A producer connected but feeding kvssink nothing looked healthy
+
+**Found in VMS as #71.** **Fix:** `producer_run`'s second watchdog — 45 s without kvssink's
+"client and stream metrics" line (logged per key frame put, so it continues through an AWS
+outage) kills the pipeline; enforced only once DEBUG lines are seen. **Verified here** with a
+fake `gst-launch-1.0` on `PATH`: a silent pipeline killed at the limit (exit 1), a steady one
+untouched; live pending. **Verified here** (2026-10-25) with a fake `gst-launch-1.0` on `PATH`: a silent pipeline killed at the limit (exit 1), a steady one untouched; no false kill in today's 3–5 min live runs.
+
+### #73 — cam-02 lost one AAC frame in six: paired RTP audio timestamps
+
+**Found in VMS as #72**: cam-02 sends its 40 ms audio packets in pairs with one timestamp;
+voaacenc resynced on each step back and flagged ~1 frame in 6 DISCONT, which kvssink drops.
+**Fix:** `AAC_ENC` in `producer-lib.sh` (`perfect-timestamp=true tolerance=100000000`), used by
+both passthrough producers. **Verified here** (2026-10-25): cam-02, 5 min with audio: **one** dropped AAC frame (the stream's first), not the ~300 of before.
+### #74 — Discovery showed "G.711 8000 kHz"
+
+**Found in VMS as #73**: cam-02 reports Media1 audio in Hz and bit/s. **Fix:**
+`onvif_discovery._per_kilo`. **Verified here:** cam-02 now shows 8.0 kHz.
+
+### #75 — cam-01's publisher sent audio, no video, for over an hour
+
+**Found in VMS as #74**: with audio on, the microphone's LPCM kept `bytesReceived` growing, so
+#52's byte check couldn't see the video stop. **Fix:** the video chain ends in
+`watchdog timeout=10000`: no video buffer for 10 s is a pipeline error. **Verified here** (2026-10-25): on the first start of this card's stack the PW310's video stopped ~5 s in while its audio kept flowing; the watchdog fired after 10 s and the restarted publisher has run since without a trigger (45 min). Exactly the failure it exists for.
+
+---
+
+## Found on this card (2026-10-25)
+
+### #76 — LAUNCH A3's patches 1–2 had nothing to patch on a fresh clone
+
+**Found:** 2026-10-25, setting up a re-imaged card (the plan assumed the September setup,
+VMS-PORT-PLAN.md D1). **Referenced from:** LAUNCH.md A3.
+
+A3 said to apply patches 1 and 2 "before anything is built", but the files they edit belong
+to `amazon-kinesis-video-streams-producer-c`, which the SDK only downloads *during* its
+configure step (`fetch_repo(kvscproducer)`); on a fresh clone both `sed`s fail with "No such
+file". The September card had them from an earlier attempt. Cloning that repository by hand
+doesn't work either: ExternalProject would wipe and re-clone it. **Fix:** A3 runs the fetch
+step alone first — exactly what `fetch_repo` does — then patches, then configures; `setup/setup-sdk.sh` does it that way.
+
+### #77 — Patch 2 did nothing on CMake 3.31: 700 MB of OpenSSL test submodules came down
+
+**Found:** 2026-10-25, while diagnosing why the network died during the SDK build.
+**Referenced from:** LAUNCH.md A3 (patch 2b), #3.
+
+`GIT_SUBMODULES ""` means "no submodules" only under policy CMP0097 (CMake 3.16+). The file it
+is in declares `cmake_minimum_required(VERSION 3.6.3)`, so CMake 3.31 applies the old
+behaviour — empty means *all* — and the configure cloned `boringssl`, `wycheproof` & co.:
+701 MB in `open-source/local/libopenssl`, the download #3 records crashing the Pi in August.
+Both lost sessions that afternoon happened during it (#79). **Fix:** patch 2b,
+`cmake_policy(SET CMP0097 NEW)` after that `cmake_minimum_required`. Verified: the
+re-configure fetched OpenSSL alone (161 MB, no `Submodule` line), and the build completed. `setup/setup-sdk.sh` applies 2b and warns if a `Submodule` line appears anyway.
+
+### #78 — Two LAUNCH A3 proofs that couldn't tell success from failure
+
+**Found:** 2026-10-25. **Referenced from:** LAUNCH.md A3.
+- "`grep -c 'sending SIGTERM'` must be 0" counted earlyoom's own startup banner
+  (`sending SIGTERM when mem avail <= 20.00% …`), so it was ≥1 on any day earlyoom started.
+  A kill reads `sending SIGTERM to process …`.
+- Patch 3's proof, `grep -A1 'UNIX AND NOT APPLE'`, matches two unrelated blocks the file
+  already has, so it "passes" unpatched. An idempotence guard built on the same string
+  skipped the patch here. The patch's own `-D_GNU_SOURCE` is the thing to look for.
+
+**Fix:** both proofs now grep for what only success can produce (LAUNCH.md A3, `setup/setup-sdk.sh`).
+
+### #79 — The Pi's Wi-Fi stops passing data while still "connected" — for up to 10 minutes
+
+**Found:** 2026-10-25, three times in one afternoon: VS Code lost the Pi and a power cycle
+"brought it back". **Status:** open — environmental; it is #53 (VMS #52), seen from the inside.
+**Referenced from:** LAUNCH.md A1.
+
+A watcher logging every 10 s with an fsync (`adapter/bin/netwatch.sh`, user unit `netwatch`)
+caught five stalls. In each, router, internet and DNS all became unreachable at once while the
+driver kept reporting the access point with fresh signal readings (−62 to −74 dBm), the SSH send
+queue grew unsent, and the user's PC got "destination host unreachable" for the Pi. Power save
+was off for the last three; memory, load and downloads made no difference (two hit an idle Pi).
+Neither `brcmfmac` nor wpa_supplicant logs anything *during* a stall.
+
+The two that weren't cut short by a restart show how one ends. 14:44:50 → 14:47:15: at 14:47:10–13
+four group rekeys one second apart, then `CTRL-EVENT-DISCONNECTED reason=2`, a reconnect, and
+traffic flows again — exactly VMS #52's sequence. So the Pi's *transmissions* stop reaching the
+router (an uplink failure: it still hears the router's beacons, hence "connected" and a signal
+reading), the router notices only at its next group rekey (every 10 min, here at `:x7:09`),
+kicks the Pi off, and the Pi reconnects within seconds. A stall therefore lasts **until the
+next rekey — up to 10 minutes**; the 14:31 one would have ended at 14:37:09, and the restart came
+a minute earlier. (The 15:05 one, 45 s, ended without any log line.) A weak 5 GHz link
+(−70 dBm, DFS channel 108) whose weak direction is the Pi's own transmit power fits all of it.
+
+Two things made it look worse than it was: Wi-Fi power save was still on at first (#47's setting,
+never applied on this card), and **journald writes info-level lines to disk only every
+5 minutes**, so every power cut erased exactly the minutes before the drop.
+
+**What to do when SSH drops:** wait up to 10 minutes before restarting; the Pi comes back by
+itself at the router's next rekey. **Options for the cause:** Ethernet (eth0 has no cable yet);
+the router's 2.4 GHz band (more range in the Pi's weak transmit direction); a shorter WPA
+group-key interval on the FRITZ!Box would shorten the stalls but not prevent them.
+
+### #80 — Ported Unregister would have failed silently: the sudo rule allowed only start/stop
+
+**Found:** 2026-10-25, porting VMS's Unregister. **Referenced from:** LAUNCH.md A8.
+
+VMS's `set_boot_start` runs `sudo systemctl enable|disable`, and its Re-register provisions
+producers; VMS's card grants broad sudo. This card's narrow rule (#34) allowed only
+`start|stop`, and `set_boot_start` runs with `check=False`: Unregister would have "worked"
+while leaving the producer enabled to start at boot. **Fix:** the rule allows
+`start|stop|enable|disable` on `kvs-cam…` units, `start|stop` on the new `kvs-live@` units,
+and `provision-camera.sh … no-start`; still nothing else.
+
+### #81 — Every GUI-registered camera's producer started at boot, pushing to KVS unattended
+
+**Found:** 2026-10-25, verifying Re-register (VMS-PORT-PLAN.md 2.4, which asked for "enabled,
+not started"). **Referenced from:** `adapter/bin/provision-camera.sh`, LAUNCH.md E3/E7.
+
+`provision-camera.sh` ran `systemctl enable --now kvs-cam@<path>`, so each camera registered
+in the admin GUI had its producer enabled: after every reboot it started by itself and pushed
+to KVS until someone pressed Stop — the one thing the cost rule forbids (guide §1.2), and what
+`kvs-cam01`/`kvs-cam02` were always kept from doing ("deliberately not enabled", LAUNCH.md
+Part B). The guide's methodology sketch had the same `enable --now`. Nothing showed it: the
+status column says `active` either way. **Fix:** provisioning starts (registration) or does
+nothing (Re-register's `no-start`), and never enables; Re-register no longer re-enables an
+unregistered camera. Unregister still disables, for instances provisioned before. cam-03's
+instance, enabled by this session's first Re-register, was disabled the same minute.
+
+### #82 — The new `list-cameras` answered 500 to every request: a Decimal it couldn't serialise
+
+**Found:** 2026-10-25, running the changed function locally against the real `cameras` table
+before deploying it. **Referenced from:** `cloud/lambda/list_cameras.py`, LAUNCH.md Part H.
+
+The VMS port made `GET /cameras` return `detectionTests`, whose `events` counts are numbers.
+DynamoDB returns every number as a `Decimal`, which `json.dumps` refuses, and the handler's
+catch-all turned that into a 500 — for the whole camera list, so the cloud page would have
+shown no cameras at all. The earlier fields never tripped it because `outageBufferSec` was
+converted with `int()` by hand. Nothing in the code review showed it; one local run did.
+**Fix:** `plain()` converts every value in the response, nested ones included. **The rule:**
+before deploying a changed Lambda, run its handler locally against the real table (the
+operator's AWS CLI credentials, `importlib` on the file) — the code a deploy can't take back
+is cheap to run first.
+
+### #83 — Start Recording could run with nothing recording; it failed only at Stop Recording
+
+**Found:** 2026-10-25, when the user asked whether Start had to be pressed before Start
+Recording, once Live had been added. **Referenced from:** `client/index.html`
+(`setArchiving`, `checkArchive`), guide §22.5.
+
+The cloud page's Start Recording sends no video. It notes the time, and Stop Recording asks
+`record-clip` to cut that span out of the camera's KVS archive, which has footage only while
+Start runs. The button was always enabled, so a recording made with the stream stopped ran
+its whole length and only then failed with "no footage found for that time range". Live made
+this easy to hit: with the picture on screen the camera looks as if it is recording, but Live
+pushes to its own stream, `<camera>-live`, which clips never read.
+
+**Fix:** the button is on only while KVS reports footage arriving on the recorded stream:
+`/hls` answers 200 (a fragment within the last 30 s) rather than 503. The page checks:
+- at sign-in;
+- every 30 s while the page is visible;
+- on returning to the tab;
+- every 5 s for 45 s after Start, counting from Start's moment (`since=`, #66).
+
+After this page's own Stop the button goes off at once, because KVS keeps calling the stream
+live for 30 s. A recording in progress always stays stoppable. A Stop pressed somewhere else
+can leave the button on for up to a minute; Stop Recording then saves whatever the span holds.
+
+**The rule:** a control that needs footage in the cloud is gated by what KVS reports, not by
+what the page last asked for. The producer may have been started from the admin GUI, or may
+never have started at all.

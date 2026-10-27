@@ -57,6 +57,43 @@ def mp4_video_codec(data):
     return None
 
 
+def _child(data, name):
+    """The payload of the first box called `name` at this level of an MP4, or None."""
+    i, n = 0, len(data or b"")
+    while i + 8 <= n:
+        size, box = int.from_bytes(data[i:i + 4], "big"), data[i + 4:i + 8]
+        hdr = 8
+        if size == 1:                        # 64-bit largesize
+            size, hdr = int.from_bytes(data[i + 8:i + 16], "big"), 16
+        elif size == 0:                      # box runs to end of file
+            size = n - i
+        if size < hdr:
+            return None                      # malformed; don't guess
+        if box == name:
+            return data[i + hdr:i + size]
+        i += size
+    return None
+
+
+def mp4_duration_sec(data):
+    """Whole seconds the clip actually holds, from its moov/mvhd, or None when unreadable.
+
+    GetClip returns whatever the archive has inside the window, which can be far less than was
+    asked: a cam-02 H.265 detection clip listed as 45 s held 9 s (FoundAndFixed.md #54). So the
+    duration shown in the clip list comes from the file, not from the request. GetClip's MP4 is
+    not fragmented: mvhd carries the real duration. Same function in record_clip.py and
+    clip_to_s3.py.
+    """
+    mvhd = _child(_child(data, b"moov"), b"mvhd")
+    if not mvhd or len(mvhd) < 32:
+        return None
+    if mvhd[0] == 1:                         # version 1: 64-bit times and duration
+        scale, dur = int.from_bytes(mvhd[20:24], "big"), int.from_bytes(mvhd[24:32], "big")
+    else:
+        scale, dur = int.from_bytes(mvhd[12:16], "big"), int.from_bytes(mvhd[16:20], "big")
+    return round(dur / scale) if scale else None
+
+
 def no_fragments(e):
     # By error code: GetClip errors come from the archived-media client, whose exception
     # classes are not the kinesisvideo client's (FoundAndFixed.md #45).
@@ -114,7 +151,7 @@ def lambda_handler(event, context):
                 "labels": event.get("labels", []) + (["codec-switch"] if split else []),
                 # int, not float -- DynamoDB's resource layer rejects native Python floats
                 # (needs Decimal), and sub-second precision isn't useful for a UI duration display
-                "durationSec": round((e - s).total_seconds()),
+                "durationSec": mp4_duration_sec(clip) or round((e - s).total_seconds()),
                 # shown after the duration in the clip list; absent only if unreadable
                 **({"videoCodec": c} if (c := mp4_video_codec(clip)) else {}),
             })

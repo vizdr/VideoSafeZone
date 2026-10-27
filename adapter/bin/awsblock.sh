@@ -4,7 +4,9 @@
 # outside every range below, so a developer session survives.
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
-V4="3.0.0.0/8 18.0.0.0/8 35.0.0.0/8 52.0.0.0/8 54.0.0.0/8 13.32.0.0/12 99.80.0.0/12"
+# 63.176.0.0/12: since 2026-10 the IoT data endpoint resolves there (63.179.34.254); without it
+# a test "outage" is declared recovered after seconds while KVS stays blocked (FoundAndFixed.md #55).
+V4="3.0.0.0/8 18.0.0.0/8 35.0.0.0/8 52.0.0.0/8 54.0.0.0/8 13.32.0.0/12 99.80.0.0/12 63.176.0.0/12"
 V6="2a05::/16 2600:1f00::/24 2a01:578::/32"
 case "$1" in
   on)

@@ -72,6 +72,8 @@
   .clip-duration { color: #888; font-size: 0.85rem; }
   .clip-codec-warn { color: #8a5a00; font-weight: 600; cursor: help; }
   .tier-apply-status { font-size: 0.8rem; color: #888; }
+  .trigger-note { color: #666; font-size: 0.8rem; margin: -0.4rem 0 0.8rem; }
+  .camera-panel h2 .cam-id { color: #888; font-size: 0.9rem; font-weight: normal; margin-left: 0.4rem; }
   .clips-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.6rem; }
   .clips-pager.hidden { display: none; }
   .clips-pager button { font-size: 0.8rem; padding: 0.3rem 0.7rem; margin-right: 0; }
@@ -136,7 +138,8 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<!-- Pinned: @latest can change under the page without a deploy (FoundAndFixed.md #66). -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.3"></script>
 <script>
 const API = "https://svfvg7xh9g.execute-api.eu-central-1.amazonaws.com/prod";
 const COGNITO_REGION = "eu-central-1";
@@ -218,6 +221,43 @@ function codecLabel(cam) {
   return `video ${name}${where ? ` (${where})` : ""}`;
 }
 
+// A camera's display name, set in the local admin page (displayName from GET /cameras). It is
+// the one free text a person types that this page shows, so it is escaped. The server allows only
+// letters, digits, space, - _ . anyway.
+const esc = v => String(v ?? "").replace(/[&<>"']/g,
+  ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+function camHeading(cam) {
+  return cam.displayName ? `${esc(cam.displayName)}<span class="cam-id">${esc(cam.id)}</span>` : esc(cam.id);
+}
+const camLabel = cam => cam.displayName ? `${cam.displayName} (${cam.id})` : cam.id;
+
+// Grey out the detection modes a camera's ONVIF event list doesn't support (FoundAndFixed.md
+// #65): choosing one would subscribe to events the camera never sends. `modes` null = not known.
+function limitModes(sel, modes) {
+  if (!sel || !Array.isArray(modes)) return;
+  for (const opt of sel.options) {
+    if (opt.value === "manual") continue;
+    const ok = modes.includes(opt.value);
+    opt.disabled = !ok;
+    opt.title = ok ? "" : "this camera doesn't publish the events for this mode";
+  }
+}
+
+// Detection triggers may need switching on in the camera's own settings (FoundAndFixed.md #65);
+// its page is a LAN address, so the link works only from home. Tests run from the local admin
+// page, and their outcome arrives here through GET /cameras (detectionTests).
+const MODE_NAMES = { motion: "Motion", cellMotion: "Cell grid", human: "Human" };
+function triggerNoteCloud(cam) {
+  const u = typeof cam.webUrl === "string" && /^http:\/\/[A-Za-z0-9.-]+(:\d+)?\/$/.test(cam.webUrl) ? cam.webUrl : null;
+  const tests = cam.detectionTests || {};
+  const done = Object.keys(MODE_NAMES).filter(m => tests[m]).map(m =>
+    `${MODE_NAMES[m]} ${tests[m].result === "seen" ? "✓" : "✗"} ${esc(new Date(tests[m].at).toLocaleDateString())}`);
+  return "Some triggers fire only after they are switched on in the camera's own settings"
+    + (u ? ` (<a href="${u}" target="_blank" rel="noopener">open</a>, home network only)` : "")
+    + ". Test them with \"Test triggers\" in the local admin page."
+    + (done.length ? ` Last test: ${done.join(" · ")}.` : "");
+}
+
 function showHevcHelp() {
   const n = document.getElementById("hevcNote");
   n.innerHTML = `<strong>This browser can't play H.265 video.</strong>${hevcHelpHtml()}`;
@@ -228,6 +268,8 @@ function teardownPlayer(camera) {
   const s = state[camera];
   clearTimeout(s.refreshTimer);
   s.refreshTimer = null;
+  clearInterval(s.stallTimer);
+  s.stallTimer = null;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = el(camera, "video");
   v.onvolumechange = null;        // or it fires during load() and rewrites s.listen
@@ -390,28 +432,38 @@ function renderCameraPanel(cam) {
   div.className = "camera-panel";
   const modeLabel = cam.mode === "passthrough" ? "ONVIF, passthrough" : "USB, transcoded";
   div.innerHTML = `
-    <h2>${cam.id}</h2>
+    <h2>${camHeading(cam)}</h2>
     <p class="camera-subtitle">${modeLabel} · <span title="Set on the camera, in the local admin GUI">${codecLabel(cam)}</span>${cam.hasIrControl ? " · IR control" : ""}</p>
     ${cam.videoCodec === "h265" && !hevcSupport().live
       ? `<p class="codec-warn">This browser can't play H.265 video — live view and clips of this camera won't show here. See the note at the top of the page.</p>`
       : ""}
+    ${cam.liveView === "sub" && cam.liveVideoCodec === "h265" && cam.videoCodec !== "h265" && !hevcSupport().live
+      ? `<p class="codec-warn">This camera's live view (its sub stream) is H.265, which this browser can't play — Live won't show here, recordings will. See the note at the top of the page.</p>`
+      : ""}
     <div class="video-wrap">
       <video id="video-${cam.id}" controls autoplay muted playsinline></video>
-      <div id="overlay-${cam.id}" class="overlay">Press Start to begin watching</div>
+      <div id="overlay-${cam.id}" class="overlay">Press Live to watch, or Start to record to the cloud</div>
     </div>
     <p>
-      <button onclick="cmd('${cam.id}','start')">Start</button>
-      <button onclick="cmd('${cam.id}','stop')">Stop</button>
-      <button onclick="load('${cam.id}')">Reload player</button>
+      <!-- Live = watch, Start = record (VMS-PORT-PLAN.md D3). Live costs only while this page
+           shows it, and the Pi ends it by itself a few minutes after the page stops asking. -->
+      <button id="liveBtn-${cam.id}" onclick="liveToggle('${cam.id}')"
+              title="Watch ${cam.liveView === "sub" ? "the camera's sub stream" : "the camera"} without recording. Stops by itself a few minutes after you leave.">&#9654; Live</button>
+      <button onclick="cmd('${cam.id}','start')" title="Push this camera to the cloud archive -- needed for clips. Costs while it runs: press Stop when done.">Start</button>
+      <button onclick="cmd('${cam.id}','stop')" title="Stop pushing to the cloud archive">Stop</button>
+      <button onclick="state['${cam.id}'].stallReloads = 0; load('${cam.id}')">Reload player</button>
     </p>
     <div id="status-${cam.id}" class="status"></div>
 
     ${cam.hasIrControl ? `
     <p>
       IR illumination:
+      <!-- ONVIF IrCutFilter: ON = the IR-cut filter is in (day: colour, IR LEDs off), OFF = it is
+           out (night: black-and-white, IR on). These labels had it the other way round
+           (FoundAndFixed.md #64). -->
       <button onclick="setIrMode('${cam.id}','AUTO')">Auto</button>
-      <button onclick="setIrMode('${cam.id}','OFF')">Force Day (IR off)</button>
-      <button onclick="setIrMode('${cam.id}','ON')">Force Night (IR on)</button>
+      <button onclick="setIrMode('${cam.id}','ON')">Force Day (colour, IR off)</button>
+      <button onclick="setIrMode('${cam.id}','OFF')">Force Night (B/W, IR on)</button>
       <span id="irStatus-${cam.id}" class="status"></span>
     </p>` : ""}
 
@@ -426,6 +478,7 @@ function renderCameraPanel(cam) {
       </select>
       <span id="recModeStatus-${cam.id}" class="status">${recModeHint(cam.recordingMode, cam.supportsDetection)}</span>
     </p>
+    ${cam.supportsDetection ? `<p class="trigger-note">${triggerNoteCloud(cam)}</p>` : ""}
 
     <div class="setting-section">
       <h3>Audio</h3>
@@ -466,7 +519,9 @@ function renderCameraPanel(cam) {
     </div>
 
     <p>
-      <button id="recordBtn-${cam.id}" onclick="toggleRecording('${cam.id}')">&#9679; Start Recording</button>
+      <!-- Off until footage is reaching the cloud archive: see setArchiving(). -->
+      <button id="recordBtn-${cam.id}" onclick="toggleRecording('${cam.id}')" disabled>&#9679; Start Recording</button>
+      <span id="recordHint-${cam.id}" class="status">Press Start first — the clip is cut from the cloud recording, which only exists while Start runs.</span>
       <span id="recordStatus-${cam.id}" class="status"></span>
     </p>
 
@@ -539,12 +594,20 @@ async function login() {
                         recordingTimer: null, refreshTimer: null, netRetries: 0,
                         clipsTimer: null, renderedLatest: null, listen: false,
                         page: 1, pages: 1, total: 0, pageLoading: false,
-                        outageBufferSec: cam.outageBufferSec || 0 };
+                        outageBufferSec: cam.outageBufferSec || 0,
+                        // what the player shows: "live" (Live), "recorded" (after Start) or null
+                        view: null, liveTimer: null, liveSentAt: 0, stallTimer: null,
+                        stallReloads: 0, startedAt: null, liveWaitUntil: 0,
+                        // whether footage is reaching the cloud archive (checkArchive)
+                        archiving: false, archiveTimer: null, archiveSeq: 0,
+                        archiveStartedAt: 0, archiveWaitUntil: 0, archiveStoppedAt: 0 };
       camerasDiv.appendChild(renderCameraPanel(cam));
+      checkArchive(cam.id);
       // The <select> is built via innerHTML, so the stored value has to be applied after
       // the node is in the DOM rather than as a `selected` attribute in the template.
       const sel = document.getElementById(`recMode-${cam.id}`);
       if (sel) sel.value = cam.recordingMode || "manual";
+      limitModes(sel, cam.detectionModes);
       const aud = document.getElementById(`audio-${cam.id}`);
       if (aud) aud.checked = !!cam.audioEnabled;
       const ob = document.getElementById(`outage-${cam.id}`);
@@ -564,9 +627,18 @@ async function load(camera) {
   setStatus(camera, "loading stream...");
   showOverlay(camera, "Loading stream…");
   try {
-    const r = await fetch(`${API}/hls?stream=${camera}`, { headers: { Authorization: idToken } });
-    const data = await r.json();
     const s0 = state[camera];
+    // view: Live plays the camera's live view, its own KVS stream "<camera>-live" that the Pi
+    // pushes while this page asks for it (liveToggle); after Start the player shows the recorded
+    // stream, as it always did. Within the start window, since=<seconds since the button> asks
+    // for footage from the new run only: a plain live session right after Stop -> Start is built
+    // from the old run's last fragment and then waits for the new one (FoundAndFixed.md #66).
+    // Measured on this page's own clock.
+    const view = s0.view === "live" ? "live" : "recorded";
+    const since = s0.startedAt && Date.now() < (s0.liveWaitUntil || 0)
+      ? `&since=${Math.max(1, (performance.now() - s0.startedAt) / 1000).toFixed(1)}` : "";
+    const r = await fetch(`${API}/hls?stream=${camera}&view=${view}${since}`, { headers: { Authorization: idToken } });
+    const data = await r.json();
     // Right after Start, "not live" (503) is expected, not an error: the producer needs a
     // few seconds to connect, and KVS has nothing until the camera's first keyframe
     // *closes* a fragment. cam-02 sends one every 3 s, so its first fragment lands ~10 s
@@ -574,12 +646,24 @@ async function load(camera) {
     // Keep asking until the Start window runs out; Stop clears the window.
     if (r.status === 503 && Date.now() < (s0.liveWaitUntil || 0)) {
       setStatus(camera, "waiting for first video...");
-      showOverlay(camera, "Starting stream…\nWaiting for the first video from the camera.");
+      showOverlay(camera, (view === "live" ? "Starting live view…" : "Starting stream…")
+                          + "\nWaiting for the first video from the camera.");
       clearTimeout(s0.refreshTimer);
       s0.refreshTimer = setTimeout(() => load(camera), 3000);
       return;
     }
+    const waited = !!s0.liveWaitUntil;
     s0.liveWaitUntil = 0;
+    s0.startedAt = null;
+    if (r.status === 503 && waited) {
+      // The whole start window passed without one fragment. The likeliest cause is the command
+      // never reaching the Pi -- its MQTT session to AWS was down (FoundAndFixed.md #61) -- so
+      // say that rather than a bare "not available".
+      setStatus(camera, "no video arrived within 45 s");
+      showOverlay(camera, "No video arrived within 45 s.\n\nThe Pi didn't answer: it may be offline " +
+                          "from AWS, or the camera unreachable. Try again in a minute.");
+      return;
+    }
     if (!r.ok) {
       setStatus(camera, "error: " + (data.error || r.status));
       showOverlay(camera, (data.error || "Could not load stream") + "\n\nPress Start to begin.");
@@ -591,6 +675,7 @@ async function load(camera) {
 
     if (s.hls) { s.hls.destroy(); s.hls = null; }
     clearTimeout(s.refreshTimer);
+    clearInterval(s.stallTimer);
     s.userStopped = false;
     s.netRetries = 0;
 
@@ -631,7 +716,10 @@ async function load(camera) {
             // for genuinely transient blips, then go get a whole new session. The
             // overlay matters too: without it the only feedback is the browser's own
             // spinner, which looks identical to "still buffering".
-            if (++s.netRetries <= 2) {
+            // A failed playlist load is different: startLoad() resumes fragment loading and has
+            // no playlist to resume, so the player would sit there spinning, never erroring
+            // again (FoundAndFixed.md #66). Those go straight to a new session.
+            if (!/^(manifest|level)/.test(data.details) && ++s.netRetries <= 2) {
               s.hls.startLoad();
             } else {
               s.netRetries = 0;
@@ -666,22 +754,162 @@ async function load(camera) {
       if (box && !box.disabled) { box.checked = !v.muted; s.listen = !v.muted; }
     };
     scheduleSessionRefresh(camera, data.expires_in);
-    setStatus(camera, "stream loaded");
+    watchStalls(camera);
+    const cam = CAMERAS.find(c => c.id === camera) || {};
+    setStatus(camera, view === "live"
+      ? `live view${cam.liveView === "sub" ? " · sub stream" : ""} · not recorded`
+      : "recorded stream loaded");
   } catch (e) {
     setStatus(camera, "error: " + e.message);
     showOverlay(camera, "Error loading stream.\n\nPress Reload player to retry.");
   }
 }
 
-async function cmd(camera, action) {
-  setStatus(camera, `sending ${action}...`);
+// A player that stops advancing must never spin forever (FoundAndFixed.md #66). If the
+// picture hasn't moved for STALL_SEC while the page is visible, get a new session: the stream
+// may have restarted, or the session may be stuck on an old run. load() then either plays or
+// says the stream isn't live. Three times in a row with no progress at all means the browser
+// gets the video but doesn't show it -- say so instead of reloading forever.
+const STALL_SEC = 20;
+function watchStalls(camera) {
   const s = state[camera];
-  if (action === "stop") {
+  const v = el(camera, "video");
+  clearInterval(s.stallTimer);
+  let lastT = -1, lastMove = Date.now();
+  s.stallTimer = setInterval(() => {
+    if (s.userStopped || !s.hls) return;
+    if (v.currentTime !== lastT) {
+      if (lastT >= 0) s.stallReloads = 0;
+      lastT = v.currentTime; lastMove = Date.now();
+      return;
+    }
+    // Hidden tabs may pause video on purpose; a paused player is the user's choice.
+    if (document.visibilityState !== "visible" || v.paused) { lastMove = Date.now(); return; }
+    if (Date.now() - lastMove < STALL_SEC * 1000) return;
+    clearInterval(s.stallTimer);
+    s.stallReloads = (s.stallReloads || 0) + 1;
+    if (s.stallReloads > 2) {
+      const cam = CAMERAS.find(c => c.id === camera) || {};
+      const codec = s.view === "live" ? cam.liveVideoCodec : cam.videoCodec;
+      setStatus(camera, "video arrives but doesn't play");
+      showOverlay(camera, "The video reaches this browser but doesn't play.\n\n" +
+        (codec === "h265" ? "This browser may not decode this camera's H.265 at this size. " : "") +
+        "Press Reload player to try again.");
+      return;
+    }
+    setStatus(camera, `no new video for ${STALL_SEC} s -- reconnecting`);
+    showOverlay(camera, "Reconnecting…");
+    load(camera);
+  }, 5000);
+}
+
+// --- Live: watch without recording (VMS-PORT-PLAN.md D2/D3) -------------------------------------
+// `live` asks the Pi to push the camera's live view (its sub stream when it records main) to the
+// KVS stream "<camera>-live" until a deadline five minutes out; every `live` moves the deadline.
+// So the page re-sends it every LIVE_RESEND_MS while it is visible, sends `live-stop` when the
+// viewer ends Live or leaves, and the deadline is what guarantees the stream stops even when the
+// laptop just closes. Nothing here records: clips come from Start.
+const LIVE_RESEND_MS = 120000;
+const LIVE_DEADLINE_MS = 300000;      // agent.py LIVE_DEADLINE_SEC
+
+async function sendCmd(camera, action, keepalive = false) {
+  const r = await fetch(`${API}/cmd`, {
+    method: "POST", keepalive,
+    headers: { Authorization: idToken, "Content-Type": "application/json" },
+    body: JSON.stringify({ action, camera }),
+  });
+  return { ok: r.ok, data: await r.json().catch(() => ({})) };
+}
+
+function liveButton(camera) {
+  const b = document.getElementById(`liveBtn-${camera}`);
+  if (b) b.innerHTML = state[camera].view === "live" ? "&#9632; End live" : "&#9654; Live";
+}
+
+async function liveToggle(camera) {
+  const s = state[camera];
+  s.stallReloads = 0;
+  clearInterval(s.liveTimer);
+  s.liveTimer = null;
+  if (s.view === "live") {                       // End live
+    s.view = null;
     s.userStopped = true;
     s.liveWaitUntil = 0;
     teardownPlayer(camera);
-    showOverlay(camera, "Stream stopped.\n\nPress Start to watch again.");
-  } else {
+    liveButton(camera);
+    showOverlay(camera, "Live view ended.\n\nPress Live to watch again, or Start to record to the cloud.");
+    sendCmd(camera, "live-stop").catch(() => {});   // best effort: the Pi's deadline is the guarantee
+    setStatus(camera, "live view ended");
+    return;
+  }
+  s.view = "live";
+  s.userStopped = false;
+  liveButton(camera);
+  teardownPlayer(camera);
+  setStatus(camera, "sending live...");
+  showOverlay(camera, "Starting live view…\nThe Pi starts sending this camera's picture; this takes 10–20 s.");
+  try {
+    const { ok, data } = await sendCmd(camera, "live");
+    if (!ok) {
+      s.view = null;
+      liveButton(camera);
+      setStatus(camera, "error: " + (data.error || "live refused"));
+      showOverlay(camera, "Could not start the live view: " + (data.error || "refused"));
+      return;
+    }
+  } catch (e) {
+    s.view = null;
+    liveButton(camera);
+    setStatus(camera, "error: " + e.message);
+    showOverlay(camera, "Network error starting the live view.\n\nPress Live to try again.");
+    return;
+  }
+  s.liveSentAt = Date.now();
+  s.startedAt = performance.now();
+  s.liveWaitUntil = Date.now() + 45000;
+  s.liveTimer = setInterval(() => {
+    if (s.view === "live" && document.visibilityState === "visible") {
+      sendCmd(camera, "live").then(() => { s.liveSentAt = Date.now(); }).catch(() => {});
+    }
+  }, LIVE_RESEND_MS);
+  clearTimeout(s.refreshTimer);
+  s.refreshTimer = setTimeout(() => load(camera), 5000);
+}
+
+// Back on a hidden tab: renew at once. After more than the deadline away, the Pi has stopped the
+// live view, so start it over; the player would only stall on the old session.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  for (const [camera, s] of Object.entries(state)) {
+    if (s.view !== "live") continue;
+    if (Date.now() - s.liveSentAt > LIVE_DEADLINE_MS - 15000) {
+      s.view = null;                       // liveToggle starts it again from "off"
+      liveToggle(camera);
+    } else {
+      sendCmd(camera, "live").then(() => { s.liveSentAt = Date.now(); }).catch(() => {});
+    }
+  }
+});
+
+// Leaving the page: tell the Pi, best effort (keepalive lets the request outlive the page).
+window.addEventListener("pagehide", () => {
+  for (const [camera, s] of Object.entries(state)) {
+    if (s.view === "live") sendCmd(camera, "live-stop", true).catch(() => {});
+  }
+});
+
+async function cmd(camera, action) {
+  setStatus(camera, `sending ${action}...`);
+  const s = state[camera];
+  s.stallReloads = 0;
+  const watchingLive = s.view === "live";      // Start/Stop record; they leave a Live view alone
+  if (action === "stop" && !watchingLive) {
+    s.userStopped = true;
+    s.liveWaitUntil = 0;
+    s.view = null;
+    teardownPlayer(camera);
+    showOverlay(camera, "Recording to the cloud stopped.\n\nPress Live to watch, or Start to record again.");
+  } else if (!watchingLive) {
     showOverlay(camera, "Starting stream…\nThis can take a few seconds.");
   }
   try {
@@ -693,9 +921,21 @@ async function cmd(camera, action) {
     const data = await r.json();
     setStatus(camera, r.ok ? `${action} sent` : "error: " + (data.error || r.status));
     if (!r.ok) { showOverlay(camera, "Could not send " + action + ": " + (data.error || r.status)); return; }
-    if (action === "start") {
+    if (action === "start") {                  // watching Live or not: Start records either way
+      s.archiveStoppedAt = 0;
+      s.archiveStartedAt = performance.now();
+      s.archiveWaitUntil = Date.now() + ARCHIVE_START_WINDOW_MS;
+      checkArchive(camera);
+    } else if (action === "stop") {
+      s.archiveStoppedAt = Date.now();
+      s.archiveWaitUntil = 0;
+      setArchiving(camera, false);
+    }
+    if (action === "start" && !watchingLive) {
       // 45 s covers a producer that dies on its first try and is restarted by systemd
       // (RestartSec=5) plus a 3 s GOP, with room to spare.
+      s.view = "recorded";
+      s.startedAt = performance.now();
       s.liveWaitUntil = Date.now() + 45000;
       clearTimeout(s.refreshTimer);
       s.refreshTimer = setTimeout(() => load(camera), 5000);
@@ -806,8 +1046,65 @@ async function setIrMode(camera, mode) {
   }
 }
 
+// --- Start Recording needs Start running (FoundAndFixed.md #83) ---------------------------------
+// Start Recording sends no video of its own: Stop Recording asks the cloud to cut that time span
+// out of the camera's archive (record_clip.py), which has footage only while Start runs. So the
+// button is on only while footage is reaching the archive, as KVS itself says: the recorded
+// stream's /hls answers 200 while it holds a fragment from the last 30 s, 503 when it doesn't --
+// the answer the player gets too. Asked at sign-in, every ARCHIVE_POLL_MS while the page is
+// visible (a Start or Stop from the admin GUI or another browser shows up that way), on coming
+// back to the tab, and every ARCHIVE_POLL_FAST_MS through the start window after this page's
+// Start -- with since=, as load() does, so the previous run's last fragment doesn't count
+// (FoundAndFixed.md #66). After this page's own Stop, KVS still calls the stream live for up to
+// 30 s, so the button goes off at once and a 200 is ignored for ARCHIVE_STOP_GRACE_MS. A
+// recording in progress can always be stopped: whatever footage its time span holds is saved.
+const ARCHIVE_POLL_MS = 30000;
+const ARCHIVE_POLL_FAST_MS = 5000;
+const ARCHIVE_START_WINDOW_MS = 45000;   // cmd()'s start window
+const ARCHIVE_STOP_GRACE_MS = 35000;     // KVS's 30 s "live" window, plus slack
+
+function setArchiving(camera, on) {
+  const s = state[camera];
+  s.archiving = on;
+  const off = !on && !s.recording;
+  el(camera, "recordBtn").disabled = off;
+  el(camera, "recordHint").style.display = off ? "" : "none";
+}
+
+// One loop per camera: each call takes over the timer, and an answer that a later call has
+// overtaken is dropped (archiveSeq), so a slow probe from before Start can't switch it back off.
+async function checkArchive(camera) {
+  const s = state[camera];
+  clearTimeout(s.archiveTimer);
+  const seq = ++s.archiveSeq;
+  if (document.visibilityState === "visible") {
+    const since = Date.now() < s.archiveWaitUntil
+      ? `&since=${Math.max(1, (performance.now() - s.archiveStartedAt) / 1000).toFixed(1)}` : "";
+    try {
+      const r = await fetch(`${API}/hls?stream=${camera}&view=recorded${since}`,
+                            { headers: { Authorization: idToken } });
+      if (seq !== s.archiveSeq) return;
+      // Anything else (an expired sign-in, a Lambda error) says nothing about the stream.
+      if (r.status === 200 || r.status === 503) {
+        setArchiving(camera, r.ok && Date.now() - s.archiveStoppedAt > ARCHIVE_STOP_GRACE_MS);
+      }
+    } catch (e) {
+      if (seq !== s.archiveSeq) return;        // transient; the next tick asks again
+    }
+  }
+  s.archiveTimer = setTimeout(() => checkArchive(camera),
+    Date.now() < s.archiveWaitUntil ? ARCHIVE_POLL_FAST_MS : ARCHIVE_POLL_MS);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  for (const camera of Object.keys(state)) checkArchive(camera);
+});
+
 function toggleRecording(camera) {
-  state[camera].recording ? stopRecording(camera) : startRecording(camera);
+  const s = state[camera];
+  if (s.recording) stopRecording(camera);
+  else if (s.archiving) startRecording(camera);
 }
 
 function startRecording(camera) {
@@ -836,6 +1133,7 @@ async function stopRecording(camera) {
   btn.textContent = "● Start Recording";
   btn.style.background = "";
   btn.style.color = "";
+  setArchiving(camera, s.archiving);   // off again if Start stopped during the recording
   statusEl.textContent = "Saving recording…";
 
   try {

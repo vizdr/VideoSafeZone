@@ -281,8 +281,16 @@ FritzBox 7583 ──(WLAN, trusted)── Pi wlan0   (AWS: MQTT, KVS — outboun
   already tolerates reconnects, and this incidentally gives more realistic data for the
   §10.2 reconnect-behavior measurements than a synthetic block alone (for which use
   `adapter/bin/awsblock.sh`, not §10.2's IPv4-only snippet, #18).
-- **Still the state on the second Pi (checked 2026-09-26):** the uplink is `wlan0` and
-  `eth0` has no carrier — the isolated segment is not built yet.
+- **Still the state on the second Pi (checked 2026-09-26, again 2026-10-25):** the uplink is
+  `wlan0` and `eth0` has no carrier — the isolated segment is not built yet.
+- **The Wi-Fi uplink is the weak point, measured (2026-10-25):** −70 dBm on 5 GHz DFS
+  channel 108. The Pi's own transmissions stall for up to 10 minutes while it still reports
+  itself connected, until the router's next group rekey disconnects and reconnects it
+  (FoundAndFixed.md #79, #53). Everything recovers by itself, but SSH, MQTT and the KVS
+  upload are all down meanwhile. A cable on `eth0` to the FritzBox is the fix — which would
+  then make `eth0` the uplink, and push the isolated camera segment above onto a USB
+  Ethernet adapter or a VLAN. `adapter/bin/netwatch.sh` (user unit `netwatch`) logs the link
+  every 10 s, fsync'd, for the next diagnosis.
 - **WS-Discovery interaction:** once this segment exists, bind the discovery probe to
   `eth0` explicitly (not the default route interface) — that's the interface actually
   attached to the camera's broadcast domain.

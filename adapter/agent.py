@@ -1,4 +1,4 @@
-import json, os, threading, time
+import json, os, subprocess, threading, time
 from datetime import datetime, timezone
 
 from awscrt import mqtt
@@ -32,6 +32,70 @@ STATE_T = f"{config.TOPIC_PREFIX}/state"
 def get_cameras_table():
     return get_session().resource("dynamodb").Table("cameras")
 
+# --- Live view, on demand (VMS-PORT-PLAN.md D2/D3) -----------------------------------------
+#
+# "Live" means "watch", independent of Start ("record to the cloud"): the cloud page's Live
+# control sends `live`, which starts kvs-live@<path>.service -- the camera's sub stream (or, with
+# none, its recorded stream) pushed to its own KVS stream "<camera>-live". The page re-sends
+# `live` every 2 minutes while the player is visible and `live-stop` when it closes. The
+# guarantee is the deadline, not live-stop: each `live` writes now + LIVE_DEADLINE_SEC to
+# LIVE_DIR/<path>, and the producer stops itself, exit 0, once that time has passed
+# (stream-channel.sh LIVE_OF, producer-lib.sh). So a closed laptop or a lost live-stop costs at
+# most LIVE_DEADLINE_SEC of live ingest -- the cost rule (guide §1.2) for a unit that runs
+# without anyone pressing Stop. Not RuntimeMaxSec=: systemd counts that timeout as a failure,
+# and Restart=on-failure would bring the producer straight back.
+LIVE_DEADLINE_SEC = 300
+LIVE_DIR = f"/run/user/{os.getuid()}/vms-live"
+
+
+def _sudo_systemctl(action, unit):
+    r = subprocess.run(["sudo", "systemctl", action, unit], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"agent: systemctl {action} {unit} failed: {(r.stderr or r.stdout).strip()}", flush=True)
+    return r.returncode == 0
+
+
+def set_live(camera, on):
+    """Start (or extend) or end the camera's live view. Returns the deadline (epoch s) or 0."""
+    path = camera_control.mediamtx_path_name(camera)
+    os.makedirs(LIVE_DIR, exist_ok=True)
+    deadline = int(time.time()) + LIVE_DEADLINE_SEC if on else 0
+    tmp = os.path.join(LIVE_DIR, f".{path}.tmp")
+    with open(tmp, "w") as f:
+        f.write(f"{deadline}\n")
+    os.replace(tmp, os.path.join(LIVE_DIR, path))
+    unit = camera_control.live_unit_name(camera)
+    if on:
+        _ensure_live_stream(camera)
+        _sudo_systemctl("start", unit)      # no-op when already running: the deadline moved
+    else:
+        _sudo_systemctl("stop", unit)
+    return deadline
+
+
+def _ensure_live_stream(camera):
+    """The camera's "-live" KVS stream. live_view.py creates it for a camera recording its main
+    stream; a camera with no sub stream gets it here, the first time someone watches it."""
+    name = camera_control.live_stream_name(camera)
+    kv = get_session().client("kinesisvideo")
+    try:
+        kv.describe_stream(StreamName=name)
+    except kv.exceptions.ResourceNotFoundException:
+        # 1 h: KVS serves HLS only from a stream that keeps data, and nothing else reads it.
+        kv.create_stream(StreamName=name, DataRetentionInHours=1, MediaType="video/h264")
+        print(f"agent: created KVS stream {name}", flush=True)
+
+
+def stop_all_live():
+    """At startup: no live producer outlives the agent that started it unattended."""
+    r = subprocess.run(["systemctl", "list-units", "kvs-live@*", "--plain", "--no-legend",
+                        "--state=active,activating"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        unit = line.split()[0] if line.split() else ""
+        if unit.startswith("kvs-live@"):
+            _sudo_systemctl("stop", unit)
+
+
 def on_message(topic, payload, **kwargs):
     msg = json.loads(payload)
     cmd = msg.get("action")
@@ -40,8 +104,31 @@ def on_message(topic, payload, **kwargs):
     cam_item = get_cameras_table().get_item(Key={"cameraId": camera}).get("Item")
     if not cam_item:
         return
+    # An unregistered camera is hidden from both GUIs, but an open page or a direct API call can
+    # still name it, and the MQTT session is shared with VMS: refuse everything but Stop.
+    if camera_control.is_unregistered(cam_item) and cmd not in ("stop", "live-stop"):
+        print(f"agent: ignoring {cmd!r} for unregistered {camera}", flush=True)
+        return
 
-    if cmd in ("start", "stop"):
+    if cmd == "start" and not camera_control.has_producer(camera):
+        # Registered from the VMS card: no unit here, and systemctl would report the missing
+        # unit as merely "inactive" (#37's trap). Say so instead of pretending to start.
+        print(f"agent: no producer for {camera} on this Pi -- Re-register it in the admin GUI",
+              flush=True)
+        conn.publish(topic=STATE_T,
+                     payload=json.dumps({"camera": camera, "streaming": False,
+                                         "error": "no producer on this Pi: Re-register it"}),
+                     qos=mqtt.QoS.AT_LEAST_ONCE)
+        return
+
+    if cmd in ("live", "live-stop"):
+        try:
+            deadline = set_live(camera, cmd == "live")
+            state = {"camera": camera, "live": cmd == "live", "liveUntil": deadline}
+        except Exception as e:  # noqa: BLE001 -- report, don't kill the agent
+            state = {"camera": camera, "live": False, "liveError": f"{type(e).__name__}: {e}"}
+        conn.publish(topic=STATE_T, payload=json.dumps(state), qos=mqtt.QoS.AT_LEAST_ONCE)
+    elif cmd in ("start", "stop"):
         camera_control.set_stream(camera, cmd == "start")
         conn.publish(topic=STATE_T,
                      payload=json.dumps({"camera": camera, "streaming": cmd == "start"}),
@@ -125,6 +212,7 @@ conn = mqtt_connection_builder.mtls_from_path(
     on_connection_interrupted=on_connection_interrupted,
     on_connection_resumed=on_connection_resumed,
 )
+stop_all_live()
 conn.connect().result()
 _publish_aws_state()
 threading.Thread(target=_heartbeat_loop, daemon=True).start()

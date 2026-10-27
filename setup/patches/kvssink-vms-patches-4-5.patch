@@ -1,0 +1,38 @@
+diff --git a/src/gstreamer/gstkvssink.cpp b/src/gstreamer/gstkvssink.cpp
+index 5e55c51..1051a09 100644
+--- a/src/gstreamer/gstkvssink.cpp
++++ b/src/gstreamer/gstkvssink.cpp
+@@ -1344,8 +1344,12 @@ gst_kvs_sink_handle_buffer (GstCollectPads * pads,
+                 buf->pts = buf->dts;
+             }
+         } else if (!GST_BUFFER_DTS_IS_VALID(buf)) {
+-            // Construct a monotonically increasing DTS if GStreamer doesn't provide one
+-            buf->dts = data->last_dts + DEFAULT_FRAME_DURATION_MS * HUNDREDS_OF_NANOS_IN_A_MILLISECOND * DEFAULT_TIME_UNIT_IN_NANOS;
++            // VMS patch 5 (LAUNCH.md A3): a missing DTS becomes the frame's PTS
++            if (GST_BUFFER_PTS_IS_VALID(buf)) {
++                buf->dts = buf->pts;
++            } else {
++                buf->dts = data->last_dts + DEFAULT_FRAME_DURATION_MS * HUNDREDS_OF_NANOS_IN_A_MILLISECOND * DEFAULT_TIME_UNIT_IN_NANOS;
++            }
+         }
+ 
+         data->last_dts = buf->dts;
+@@ -1390,6 +1394,18 @@ gst_kvs_sink_handle_buffer (GstCollectPads * pads,
+             }
+         }
+ 
++        // VMS patch 4 (LAUNCH.md A3): whole-millisecond timestamps, PTS-DTS offset kept
++        {
++            const uint64_t unit = (uint64_t) kvssink->timecode_scale_milliseconds * 1000000ULL;
++            if (unit > 0 && GST_BUFFER_DTS_IS_VALID(buf) && GST_BUFFER_PTS_IS_VALID(buf)) {
++                const int64_t offset = (int64_t) buf->pts - (int64_t) buf->dts;
++                const int64_t half = (int64_t) unit / 2;
++                const int64_t offset_units = (offset >= 0 ? offset + half : offset - half) / (int64_t) unit;
++                buf->dts -= buf->dts % unit;
++                buf->pts = (uint64_t) ((int64_t) buf->dts + offset_units * (int64_t) unit);
++            }
++        }
++
+         put_frame_status = put_frame(data, info.data, info.size,
+                                      std::chrono::nanoseconds(buf->pts),
+                                      std::chrono::nanoseconds(buf->dts), kinesis_video_flags, track_id, data->frame_count);

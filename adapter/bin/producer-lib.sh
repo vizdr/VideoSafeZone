@@ -14,6 +14,28 @@ PRODUCER_FATAL_PATTERNS=(
   "Got EOS from element"
 )
 
+# The second watchdog: frames must keep reaching kvssink. The SDK logs "Kinesis Video client
+# and stream metrics" on every key frame it *puts* into its buffer (KinesisVideoStream.cpp,
+# statusPutFrame), before and independent of any upload, so the lines keep coming through an
+# AWS outage, while kvssink buffers, and stop when the pipeline feeds it nothing. That is the
+# failure the EOS patterns can't see: the source stays connected, the unit stays `active`, and
+# nothing is uploaded. cam-02's audio branch couldn't take the camera's new G.711 law, and
+# kvssink, which collects across its pads, then held the video too, for 7 minutes, with no
+# metrics line at all (FoundAndFixed.md #71, #72). 45 s is ten of cam-02's 4 s keyframe
+# intervals and covers the start (connect, first keyframe).
+# The AAC encoder for a passthrough camera's G.711 audio (used unquoted, like VIDEO_CHAIN).
+# `perfect-timestamp`: timestamps from the encoder's own sample count, the camera's RTP
+# timestamps only checked for drift within `tolerance`. cam-02 sends its 40 ms packets in pairs
+# that carry the *same* RTP timestamp (the rate is right, the stamps are not): with the default,
+# voaacenc resynced on each backwards step and flagged ~1 AAC frame in 6 DISCONT, and kvssink
+# drops every frame flagged only DISCONT, about 60 a minute, 128 ms of sound each
+# (FoundAndFixed.md #73). 100 ms covers cam-02's 40 ms and keeps lip-sync within 0.1 s before a
+# resync; measured 29 -> 1 DISCONT in 30 s on cam-02, 1 -> 1 on cam-04 (the stream's first).
+AAC_ENC="voaacenc bitrate=32000 perfect-timestamp=true tolerance=100000000"
+
+PRODUCER_FLOW_PATTERN="Kinesis Video client and stream metrics"
+PRODUCER_STALL_SEC="${PRODUCER_STALL_SEC:-45}"
+
 # Depayload/parse chain for a passthrough producer's video track, chosen by the codec
 # MediaMTX is actually receiving (adapter/bin/stream-codec.py). cam-01 is H.264-only and
 # keeps its own chain (measurements/codec-phase0.md §6).
@@ -24,10 +46,31 @@ PRODUCER_FATAL_PATTERNS=(
 # ingest fine and never play back (MissingCodecPrivateData) -- the same ingest-vs-playback
 # trap as FoundAndFixed.md #16. The h264 chain is token for token what every producer ran
 # before H.265 existed.
+#
+# `h265timestamper` gives every frame a DTS. Some cameras' H.265 leaves h265parse with
+# `dts: none`, and kvssink silently drops any buffer flagged HEADER without a valid DTS
+# (gstkvssink.cpp, "Dropping frame with flag: 17920") -- that is every keyframe, so no
+# fragment ever starts and PutMedia starves with 599s while the unit stays active
+# (FoundAndFixed.md #58). The element computes DTS from PTS and the SPS reorder depth, so
+# it is also right for a stream that has B-frames.
+#
+# `identity single-segment=true` after it: the timestamper shifts every timestamp by 1000 h
+# (and its segment by the same, so running time is unchanged), and kvssink reads raw buffer
+# timestamps. Alone that is harmless; next to an audio track, which stays near zero, KVS gets
+# two clocks 1000 h apart and refuses audio frames in bursts (0x30000005, FoundAndFixed.md
+# #59). Re-stamping to running time puts video on the audio's clock, as H.264 always was.
+#
+# H.264 deliberately gets neither. h264parse leaves passthrough H.264 at `dts: none` too, and
+# h264timestamper is no cure: without a reorder count in the SPS it assumes the decoder's full
+# buffer (4 frames at 1080p) and puts DTS 267 ms before PTS on cam-04, a stream with no
+# B-frames, so KVS refused the *video* and no fragment completed. kvssink gives such a frame
+# DTS = PTS instead (SDK patch 5, LAUNCH.md A3, FoundAndFixed.md #70); before that patch it
+# invented `last_dts + 40 ms`, and beside audio KVS refused audio frames (0x30000005).
+# A passthrough H.264 camera *with* B-frames would need h264timestamper here; none has any yet.
 video_depay_chain() {
   case "$1" in
     h264) echo "rtph264depay ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au" ;;
-    h265) echo "rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au" ;;
+    h265) echo "rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au ! h265timestamper ! identity single-segment=true" ;;
     *)    echo "producer-lib: unsupported video codec '$1'" >&2; return 1 ;;
   esac
 }
@@ -43,9 +86,9 @@ video_depay_chain() {
 #
 # Turning that exit into a failure is necessary but not always sufficient: measured on
 # this hardware (FoundAndFixed.md #46), gst-launch sometimes does not exit at all.
-# kvssink takes the EOS, its PutMedia connection then starves ("Operation too slow. Less
-# than 30 bytes/sec"), the SDK logs "exited without triggering end-of-stream. Service
-# call result: 599" and the process stays alive
+#kvssink takes the EOS, its PutMedia connection
+# then starves ("Operation too slow. Less than 30 bytes/sec"), the SDK logs "exited
+# without triggering end-of-stream. Service call result: 599" and the process stays alive
 # indefinitely -- observed 4+ minutes, uploading nothing, unit `active (running)`, which
 # is worse than the original bug because the GUI reports it as streaming
 # (FoundAndFixed.md #46). So the fatal lines are watched for directly, and the pipeline is
@@ -53,6 +96,19 @@ video_depay_chain() {
 #
 # A real Stop never reaches the exit below: systemd signals the whole cgroup, which takes
 # the reader loop and gst-launch with it (verified -- no orphan process survives a Stop).
+#
+# A live-view producer (LIVE_DEADLINE_FILE set, stream-channel.sh LIVE_OF) has one more way
+# to end, and it is the only clean one: the file holds a deadline (epoch seconds) that the
+# agent moves forward on every `live` command, and once it has passed the pipeline is killed
+# and this exits 0 -- so Restart=on-failure leaves the unit stopped. Nobody presses Stop on a
+# live view; the deadline is what keeps it from running unattended (guide §1.2).
+live_deadline_passed() {
+  [ -n "${LIVE_DEADLINE_FILE:-}" ] || return 1
+  local dl
+  dl="$(head -c 20 "$LIVE_DEADLINE_FILE" 2>/dev/null | tr -cd 0-9)"
+  [ "$(date +%s)" -ge "${dl:-0}" ]
+}
+
 producer_run() {
   local label="$1"; shift
 
@@ -98,22 +154,53 @@ producer_run() {
   stdbuf -oL -eL gst-launch-1.0 "$@" > "$fifo" 2>&1 &
   local pid=$!
 
-  local line pat fatal=
-  while IFS= read -r line; do
-    printf '%s\n' "$line"
-    for pat in "${PRODUCER_FATAL_PATTERNS[@]}"; do
+  local line pat fatal= carry= flow=$SECONDS debug= expired=
+  while :; do
+    # `read -t` so the stall check runs while the pipeline is silent too. A timeout can
+    # return half a line: keep it and prepend it to the rest, so no line is split.
+    if IFS= read -r -t 5 line; then
+      line="${carry}${line}"; carry=
+    elif [ $? -gt 128 ]; then
+      carry="${carry}${line}"; line=
+    else
+      line="${carry}${line}"; carry=
+      [ -n "$line" ] && printf '%s\n' "$line"
+      break                                   # EOF: the pipeline is gone
+    fi
+
+    if [ -n "$line" ]; then
+      printf '%s\n' "$line"
       case "$line" in
-        *"$pat"*)
-          echo "${label}: '${pat}' -- the source closed the session; killing the pipeline" >&2
-          # SIGKILL, not SIGTERM: the SDK is already wedged inside the teardown that a
-          # clean shutdown would have to finish. The fragment in flight is lost either
-          # way, and systemd brings the producer back on the live source 5 s later.
-          kill -9 "$pid" 2>/dev/null
-          fatal=1
-          break
-          ;;
+        *"$PRODUCER_FLOW_PATTERN"*) flow=$SECONDS ;;
       esac
-    done
+      # The flow lines are the SDK's DEBUG output. Without it (a changed log level) the
+      # stall check would kill healthy producers, so it only runs once DEBUG lines are seen.
+      case "$line" in *"DEBUG -"*) debug=1 ;; esac
+      for pat in "${PRODUCER_FATAL_PATTERNS[@]}"; do
+        case "$line" in
+          *"$pat"*)
+            echo "${label}: '${pat}' -- the source closed the session; killing the pipeline" >&2
+            # SIGKILL, not SIGTERM: the SDK is already wedged inside the teardown that a
+            # clean shutdown would have to finish. The fragment in flight is lost either
+            # way, and systemd brings the producer back on the live source 5 s later.
+            kill -9 "$pid" 2>/dev/null
+            fatal=1
+            break
+            ;;
+        esac
+      done
+    fi
+
+    if [ -z "$fatal" ] && live_deadline_passed; then
+      echo "${label}: live-view deadline passed -- stopping (exit 0, no restart)" >&2
+      kill -9 "$pid" 2>/dev/null
+      fatal=1 expired=1
+    fi
+    if [ -z "$fatal" ] && [ -n "$debug" ] && [ $((SECONDS - flow)) -ge "$PRODUCER_STALL_SEC" ]; then
+      echo "${label}: no frame reached kvssink for $((SECONDS - flow)) s -- killing the pipeline" >&2
+      kill -9 "$pid" 2>/dev/null
+      fatal=1
+    fi
     # Stop reading now rather than waiting for the pipe to reach EOF. EOF needs *every*
     # writer to close, so anything the pipeline left behind still holding that descriptor
     # would keep this loop -- and therefore the restart -- blocked indefinitely, which is
@@ -123,6 +210,7 @@ producer_run() {
 
   local rc=0
   wait "$pid" 2>/dev/null || rc=$?
+  [ -n "$expired" ] && exit 0
   echo "${label}: pipeline ended (status ${rc}${fatal:+, killed by the watchdog}) -- exiting non-zero so systemd restarts it" >&2
   exit 1
 }

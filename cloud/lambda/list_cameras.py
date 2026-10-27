@@ -1,4 +1,5 @@
 import boto3, os, json
+from decimal import Decimal
 
 REGION = os.environ["AWS_REGION"]
 CORS = {"Access-Control-Allow-Origin": "*"}
@@ -11,12 +12,37 @@ def video_codec(item):
     return item.get("videoCodec") or item.get("videoCodecDefault") or "h264"
 
 
+def plain(v):
+    """A registry value as JSON can carry it: DynamoDB returns every number as a Decimal, which
+    json.dumps refuses -- one Decimal anywhere in the response turns the whole camera list into
+    a 500 (detectionTests' `events` counts are the first nested numbers this route returns)."""
+    if isinstance(v, Decimal):
+        return int(v) if v == v.to_integral_value() else float(v)
+    if isinstance(v, dict):
+        return {k: plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [plain(x) for x in v]
+    return v
+
+
 def lambda_handler(event, context):
     try:
         table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
         # Scan, not Query -- this table has no sort key and is expected to stay small
         # (a handful of cameras on one adapter), so a full scan is the right tool here.
-        items = table.scan()["Items"]
+        # Unregistered cameras are left out entirely, which is all the page needs to hide them
+        # (VMS-PORT-PLAN.md D4). Their clips stay in S3 and the clips table, reachable again
+        # once the camera is re-registered. VMS's page reads its own copy (pir-list-cameras),
+        # so this filter can't affect it. Scanned page by page: the table is small, but a
+        # single Scan stops at 1 MB.
+        items, kw = [], {}
+        while True:
+            page = table.scan(**kw)
+            items += page["Items"]
+            if "LastEvaluatedKey" not in page:
+                break
+            kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+        items = [i for i in items if not i.get("unregisteredAt")]
         cameras = sorted(
             (
                 {
@@ -57,11 +83,28 @@ def lambda_handler(event, context):
                     # What the cloud stream last carried (set by the producer at start);
                     # differs from videoCodec only until the producer next starts.
                     "videoCodecActive": i.get("videoCodecActive"),
+                    # Everything below is additive (the registry contract: add, never redefine)
+                    # and never carries a credential -- no rtspUrl, no liveRtspUrl.
+                    # A name to show beside the ID; set in the admin GUI only.
+                    "displayName": i.get("displayName"),
+                    # The recording triggers the camera's own ONVIF event list offers, the last
+                    # "Test triggers" result per mode, and its settings page (LAN only), so the
+                    # page can grey out modes it doesn't publish and say where to switch one on.
+                    "detectionModes": i.get("detectionModes"),
+                    "detectionTests": i.get("detectionTests"),
+                    "webUrl": i.get("webUrl"),
+                    # What the Live player shows: the camera's sub stream while its main stream
+                    # is recorded, otherwise the recorded stream itself; and the live push's
+                    # codec as the Pi last saw it (stream-codec.py --live), for the page's
+                    # H.265 warning on the Live player.
+                    "liveView": "sub" if i.get("liveRtspUrl") else "recorded",
+                    "liveVideoCodec": i.get("liveVideoCodecActive")
+                                      or (None if i.get("liveRtspUrl") else video_codec(i)),
                 }
                 for i in items
             ),
             key=lambda c: c["id"],
         )
-        return {"statusCode": 200, "headers": CORS, "body": json.dumps({"cameras": cameras})}
+        return {"statusCode": 200, "headers": CORS, "body": json.dumps({"cameras": plain(cameras)})}
     except Exception as e:
         return {"statusCode": 500, "headers": CORS, "body": json.dumps({"error": str(e)})}

@@ -25,7 +25,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--timeout", type=int, default=4, help="WS-Discovery probe timeout in seconds (default 4)")
     ap.add_argument("--user", help="ONVIF username -- enables the enrichment stage (device info + stream URI)")
-    ap.add_argument("--password", help="ONVIF password -- required if --user is given")
+    # "" by default: a camera may have no password (FoundAndFixed.md #67), and None crashed the
+    # WS-Security digest.
+    ap.add_argument("--password", default="",
+                    help="ONVIF password -- leave out for a camera without one")
     args = ap.parse_args()
 
     print(f"Probing 239.255.255.250:3702 for NetworkVideoTransmitter devices ({args.timeout}s)...")
@@ -49,6 +52,13 @@ def main():
             try:
                 details = onvif_discovery.enrich_sync(xaddrs[0], args.user, args.password)
                 print(f"  Device:  {details['manufacturer']} {details['model']} (fw {details['firmware']})")
+                a = details.get("audio")
+                print(f"  Audio:   {a['encoding']} {a['sampleRateKHz']} kHz{'' if a['supported'] else ' (not supported by the producer)'}" if a else "  Audio:   none")
+                for st in details.get("streams", []):
+                    # Only 10 and 15 fps exist in this project (VMS-PORT-PLAN.md D5).
+                    rate = f" @{st['fps']:g} fps" if st.get("fps") in (10, 15) else ""
+                    print(f"  Stream {st['name']}: {st['encoding']} {st['width']}x{st['height']}{rate}, "
+                          f"offers {st['fpsChoices'] or 'neither 10 nor 15 fps'} -- {st['uri']}")
                 print(f"  Profile: {details['profile']}")
                 print(f"  Stream:  {details['stream_uri']}")
                 print(f"  IR ctl:  {details['has_ir_control']}")

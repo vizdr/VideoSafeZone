@@ -6,6 +6,16 @@ CORS = {"Access-Control-Allow-Origin": "*"}
 cameras_table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
 
 
+def unregistered_response(camera_id, item):
+    """409 for a camera unregistered in an admin GUI, else None. The registry is shared with VMS:
+    list-cameras no longer shows such a camera, but an open page or a direct API call can still
+    name it (VMS-PORT-PLAN.md D4). Same check in every Lambda that acts on a camera."""
+    if item and item.get("unregisteredAt"):
+        return {"statusCode": 409, "headers": CORS, "body": json.dumps(
+            {"error": f"'{camera_id}' is unregistered: re-register it in the admin GUI first"})}
+    return None
+
+
 def lambda_handler(event, context):
     try:
         body = json.loads(event.get("body") or "{}")
@@ -20,6 +30,8 @@ def lambda_handler(event, context):
         if not item:
             return {"statusCode": 400, "headers": CORS,
                     "body": json.dumps({"error": f"unknown camera '{camera_id}'"})}
+        if r := unregistered_response(camera_id, item):
+            return r
 
         # Same reasoning as set_camera_mode's ONVIF check: the API is reachable
         # independently of the page, so refuse here rather than relying on the UI hiding

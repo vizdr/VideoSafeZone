@@ -665,6 +665,10 @@ The feature's whole point is a measurement, so verification *is* the deliverable
 
    **Confirm both families are genuinely blocked before believing any outage result**, by
    curling an AWS endpoint and checking it fails, not by trusting that the rule was added.
+   And check the outage detector's own endpoint against the blocked ranges first:
+   `getent ahosts <IOT_DATA_ENDPOINT>` (from `/etc/adapter/adapter.env`). Since 2026-10 it
+   also resolves into `63.176.0.0/12`, which the block once missed, so a test outage was
+   declared "recovered" after 7 s while KVS stayed blocked (FoundAndFixed.md #55).
 5. **§10.4 fragment continuity, before and after** — the "gap-fill percentage" §16.3c asks
    for, and the number worth publishing. Sum `list-fragments` durations against wall-clock
    across the outage window, counting the S3-backfilled span. Record in

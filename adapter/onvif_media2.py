@@ -1,26 +1,30 @@
-"""ONVIF Media2 (ver20) -- just enough of it to read and switch a camera's video codec.
+"""ONVIF Media2 (ver20/media), over raw SOAP: just enough to read and switch the video codec of
+the encoder behind a camera's registered RTSP stream.
 
-Why this is not the onvif library: H.265 is invisible to Media1 (ver10), whose encoding
-enum stops at JPEG/MPEG4/H264, and the WSDL set bundled with python-onvif-zeep-async has
-no ver20 media service at all. cam-02 advertises H265 only through Media2
-(measurements/codec-phase0.md §2). Rather than vendoring the ver20 WSDL tree -- it imports
-the ver10 schema by relative path -- this speaks the handful of SOAP calls needed directly,
-with the same WS-Security UsernameToken digest the library uses.
+Raw SOAP, not the `onvif` library, because that library ships Media1 WSDLs only, and Media1's
+encoding enum stops at H.264: a camera's H.265 capability is invisible through it (guide §21.4,
+measurements/codec-phase0.md §2). cam-03 shows the gap exactly -- Media1 lists both of its
+encoders as H264, Media2 offers H264 and H265 on both.
 
-Every write is verified by reading it back: this camera family has accepted ONVIF writes and
-silently ignored them before (Camera-Features.md §4). Credentials never appear in return
-values or exception text, and stream URIs are returned redacted.
+What a camera *reports* about its encoder is not proof of what it sends. cam-03 read back
+H264 2880x1620 @25 while MediaMTX received H.265 2560x1440 @20 from the same profile's URI. So
+the admin GUI treats a switch as done only when MediaMTX receives the new codec
+(mediamtx_api.path_video_codec), and this module never claims more than "the camera accepted
+the setting".
+
+Credentials never appear in return values or exception text (redact_uri).
 """
 import base64
+import copy
 import datetime as dt
 import hashlib
 import os
 import re
-import xml.etree.ElementTree as ET
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 from xml.sax.saxutils import escape
 
 import requests
+from lxml import etree
 
 NS = {
     "s": "http://www.w3.org/2003/05/soap-envelope",
@@ -28,242 +32,369 @@ NS = {
     "tr2": "http://www.onvif.org/ver20/media/wsdl",
     "tt": "http://www.onvif.org/ver10/schema",
 }
-for _prefix, _uri in NS.items():
-    ET.register_namespace(_prefix, _uri)
+MEDIA2_NS = NS["tr2"]
+TIMEOUT = 8
 
-WSSE = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
-WSU = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
-DIGEST = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest"
-B64 = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
+# ONVIF's encoding names (tt:VideoEncodingMimeNames) <-> this project's codec names, the ones
+# stream-codec.py, the registry and the clips table use.
+ENCODING = {"h264": "H264", "h265": "H265"}
+CODEC = {v: k for k, v in ENCODING.items()}
 
-# Project codec names <-> ONVIF Media2 encoding names.
-TO_ONVIF = {"h264": "H264", "h265": "H265"}
-FROM_ONVIF = {v: k for k, v in TO_ONVIF.items()}
-H264_PROFILES = {"Baseline", "Main", "Extended", "High"}
+# Preferred profile when the current one isn't valid for the target codec. H.264 High first:
+# Baseline once played in ffmpeg and stayed black in browsers (guide §16.1). Main for H.265,
+# because browsers decode Main and not reliably Main10.
+PROFILE_PREFERENCE = {"H264": ["High", "Main", "Baseline"], "H265": ["Main", "Main10"]}
+
+# Frame rates the admin GUI offers, each only where the stream's encoder accepts it, and no
+# other rate is ever shown (VMS-PORT-PLAN.md D5; VMS also offers 20 and 25). 10 is what the
+# registration form preselects; a camera already registered keeps its rate until someone
+# chooses one. Both satisfy guide §18.3 with 8 kHz AAC (128 ms frames vs 100 / 67 ms).
+FPS_CHOICES = (10, 15)
+DEFAULT_FPS = 10
 
 
-class Media2Error(RuntimeError):
+class OnvifError(RuntimeError):
     pass
 
 
 def redact_uri(uri: str) -> str:
     """Strip credentials from a stream URI: userinfo, and the ?username=&password= query
-    this camera appends (with an unsalted MD5 of the password)."""
+    cam-02 appends (with an unsalted MD5 of the password)."""
     uri = re.sub(r"//[^@/]*@", "//", uri or "")
-    return re.sub(r"(password=)[^&]*", r"\1<redacted>", uri)
+    return re.sub(r"(?i)((?:pass|pwd)[^=&]*=)[^&]*", r"\1<redacted>", uri)
 
 
-def stream_key(uri: str) -> tuple:
-    """(port, path) -- how a registered rtspUrl is matched to a profile's stream URI.
-    Host is left out on purpose: rematch_cameras.py follows a camera to a new address, and
-    the query string carries credentials that differ between what was stored and what the
-    camera reports."""
-    u = urlparse(uri or "")
-    return (u.port or 554, u.path.rstrip("/"))
+def _q(tag):
+    prefix, name = tag.split(":")
+    return f"{{{NS[prefix]}}}{name}"
 
 
-def profile_for_stream(profiles: list, rtsp_url: str) -> dict | None:
-    """The one profile whose stream URI is `rtsp_url`, or None -- never a guess when zero
-    or several match."""
-    key = stream_key(rtsp_url)
-    hits = [p for p in profiles if stream_key(p.get("stream_uri_raw", "")) == key]
-    return hits[0] if len(hits) == 1 else None
+class Media2:
+    """One camera's device + Media2 services. Credentials come from the registry row."""
 
-
-def _text(el, path):
-    x = el.find(path, NS) if el is not None else None
-    return x.text if x is not None else None
-
-
-def encoder_summary(cfg) -> dict:
-    """Flat view of a tr2:Configurations (VideoEncoder) element."""
-    rc = cfg.find("tt:RateControl", NS)
-    enc = _text(cfg, "tt:Encoding")
-    return {
-        "token": cfg.get("token"),
-        "codec": FROM_ONVIF.get(enc, enc),
-        "profile": cfg.get("Profile"),
-        "gov": cfg.get("GovLength"),
-        "width": int(_text(cfg, "tt:Resolution/tt:Width") or 0),
-        "height": int(_text(cfg, "tt:Resolution/tt:Height") or 0),
-        "fps": _text(cfg, "tt:RateControl/tt:FrameRateLimit"),
-        "kbps": int(_text(cfg, "tt:RateControl/tt:BitrateLimit") or 0),
-        "cbr": rc.get("ConstantBitRate") if rc is not None else None,
-    }
-
-
-class Media2Client:
-    def __init__(self, host: str, port: int, user: str, password: str, timeout: int = 10):
-        self._device_url = f"http://{host}:{int(port)}/onvif/device_service"
-        self._user, self._password, self._timeout = user, password, timeout
-        self._offset = None          # camera clock minus ours, for the digest's Created
+    def __init__(self, host, port, user, password, timeout=TIMEOUT):
+        self.host, self.port = host, int(port or 80)
+        self.user, self.password = user, password
+        self.timeout = timeout
+        self.device_url = f"http://{self.host}:{self.port}/onvif/device_service"
+        self._offset = None        # camera clock minus ours, for the digest's Created
         self._media2_url = None
 
-    @classmethod
-    def for_camera(cls, item: dict, timeout: int = 10) -> "Media2Client":
-        """From a `cameras` registry row."""
-        return cls(item["onvifHost"], int(item.get("onvifPort", 80)),
-                   item["onvifUser"], item["onvifPassword"], timeout)
+    # --- transport -----------------------------------------------------------------------
 
-    # -- transport ------------------------------------------------------------------------
-
-    def _security_header(self) -> str:
+    def _security(self):
         nonce = os.urandom(16)
-        created = (dt.datetime.now(dt.timezone.utc) + (self._offset or dt.timedelta(0))
-                   ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        created = (dt.datetime.now(dt.timezone.utc) + (self._offset or dt.timedelta())
+                   ).strftime("%Y-%m-%dT%H:%M:%SZ")
         digest = base64.b64encode(hashlib.sha1(
-            nonce + created.encode() + self._password.encode()).digest()).decode()
-        return (f'<Security s:mustUnderstand="1" xmlns="{WSSE}"><UsernameToken>'
-                f"<Username>{escape(self._user)}</Username>"
-                f'<Password Type="{DIGEST}">{digest}</Password>'
-                f'<Nonce EncodingType="{B64}">{base64.b64encode(nonce).decode()}</Nonce>'
-                f'<Created xmlns="{WSU}">{created}</Created>'
-                "</UsernameToken></Security>")
+            nonce + created.encode() + self.password.encode()).digest()).decode()
+        return (
+            '<wsse:Security s:mustUnderstand="1" '
+            'xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" '
+            'xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">'
+            f'<wsse:UsernameToken><wsse:Username>{escape(self.user)}</wsse:Username>'
+            '<wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/'
+            f'oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{digest}</wsse:Password>'
+            '<wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/'
+            f'oasis-200401-soap-message-security-1.0#Base64Binary">{base64.b64encode(nonce).decode()}'
+            f'</wsse:Nonce><wsu:Created>{created}</wsu:Created></wsse:UsernameToken></wsse:Security>')
 
-    def _call(self, url: str, body: str, auth: bool = True):
-        header = f"<s:Header>{self._security_header()}</s:Header>" if auth else ""
-        env = (f'<s:Envelope xmlns:s="{NS["s"]}" xmlns:tds="{NS["tds"]}" '
-               f'xmlns:tr2="{NS["tr2"]}" xmlns:tt="{NS["tt"]}">'
-               f"{header}<s:Body>{body}</s:Body></s:Envelope>")
+    def _call(self, url, body, auth=True):
+        """POST one SOAP 1.2 request; return the parsed Body's first child. Faults raise."""
+        env = (f'<s:Envelope xmlns:s="{NS["s"]}" xmlns:tds="{NS["tds"]}" xmlns:tr2="{NS["tr2"]}" '
+               f'xmlns:tt="{NS["tt"]}"><s:Header>{self._security() if auth else ""}</s:Header>'
+               f'<s:Body>{body}</s:Body></s:Envelope>')
         try:
-            r = requests.post(url, data=env.encode(), timeout=self._timeout,
+            r = requests.post(url, data=env.encode(), timeout=self.timeout,
                               headers={"Content-Type": "application/soap+xml; charset=utf-8"})
         except requests.RequestException as e:
-            raise Media2Error(f"camera unreachable: {type(e).__name__}") from None
+            raise OnvifError(f"{self.host} unreachable ({type(e).__name__})") from e
         try:
-            root = ET.fromstring(r.content)
-        except ET.ParseError:
-            raise Media2Error(f"non-SOAP reply (HTTP {r.status_code})") from None
+            root = etree.fromstring(r.content)
+        except etree.XMLSyntaxError as e:
+            raise OnvifError(f"HTTP {r.status_code}, not a SOAP reply") from e
         fault = root.find(".//s:Fault", NS)
         if fault is not None:
-            reason = " | ".join(t.strip() for t in fault.itertext() if t.strip())
-            raise Media2Error(f"SOAP fault (HTTP {r.status_code}): {reason[:200]}")
+            reason = " ".join(t.strip() for t in fault.itertext() if t.strip())
+            raise OnvifError(f"camera refused: {reason[:300]}")
         body_el = root.find("s:Body", NS)
-        if body_el is None or len(body_el) == 0:
-            raise Media2Error(f"empty SOAP body (HTTP {r.status_code})")
+        if body_el is None or not len(body_el):
+            raise OnvifError(f"HTTP {r.status_code}, empty SOAP body")
         return body_el[0]
 
     def _sync_clock(self):
-        """WS-Security digests are time-stamped and cameras reject a skewed Created, so
-        measure the camera's clock once (GetSystemDateAndTime needs no auth)."""
+        """Digest auth carries a timestamp, and cameras refuse one far off their own clock --
+        their clocks drift and many never see NTP. GetSystemDateAndTime needs no auth."""
         if self._offset is not None:
             return
+        self._offset = dt.timedelta()
         try:
-            resp = self._call(self._device_url, "<tds:GetSystemDateAndTime/>", auth=False)
+            resp = self._call(self.device_url, "<tds:GetSystemDateAndTime/>", auth=False)
             u = resp.find(".//tt:UTCDateTime", NS)
-            cam = dt.datetime(int(_text(u, "tt:Date/tt:Year")), int(_text(u, "tt:Date/tt:Month")),
-                              int(_text(u, "tt:Date/tt:Day")), int(_text(u, "tt:Time/tt:Hour")),
-                              int(_text(u, "tt:Time/tt:Minute")), int(_text(u, "tt:Time/tt:Second")),
-                              tzinfo=dt.timezone.utc)
-            self._offset = cam - dt.datetime.now(dt.timezone.utc)
-        except (Media2Error, TypeError, ValueError, AttributeError):
-            self._offset = dt.timedelta(0)   # no usable clock: send ours and let auth decide
+            parts = [int(u.findtext(p, namespaces=NS)) for p in
+                     ("tt:Date/tt:Year", "tt:Date/tt:Month", "tt:Date/tt:Day",
+                      "tt:Time/tt:Hour", "tt:Time/tt:Minute", "tt:Time/tt:Second")]
+            self._offset = dt.datetime(*parts, tzinfo=dt.timezone.utc) - dt.datetime.now(dt.timezone.utc)
+        except Exception:  # noqa: BLE001 -- no clock reported: sign with ours and see
+            pass
 
-    @property
-    def media2_url(self) -> str:
+    def media2_url(self):
+        """The Media2 service address, or None when the camera has no Media2 (then H.265 can't
+        be discovered or selected over ONVIF at all)."""
         if self._media2_url is None:
             self._sync_clock()
-            resp = self._call(self._device_url, "<tds:GetServices><tds:IncludeCapability>"
-                                                "false</tds:IncludeCapability></tds:GetServices>")
-            for svc in resp.findall("tds:Service", NS):
-                if _text(svc, "tds:Namespace") == NS["tr2"]:
-                    self._media2_url = _text(svc, "tds:XAddr")
-                    break
-            else:
-                raise Media2Error("camera advertises no Media2 service (ver20/media)")
-        return self._media2_url
+            resp = self._call(self.device_url, "<tds:GetServices><tds:IncludeCapability>false"
+                                               "</tds:IncludeCapability></tds:GetServices>")
+            self._media2_url = ""
+            for svc in resp.iterfind("tds:Service", NS):
+                if svc.findtext("tds:Namespace", namespaces=NS) == MEDIA2_NS:
+                    self._media2_url = svc.findtext("tds:XAddr", namespaces=NS) or ""
+        return self._media2_url or None
 
-    # -- reads ----------------------------------------------------------------------------
+    def _media2(self, body):
+        url = self.media2_url()
+        if not url:
+            raise OnvifError("the camera has no ONVIF Media2 service")
+        return self._call(url, body)
 
-    def profiles(self) -> list:
-        """[{token, name, encoder_token, codec, stream_uri (redacted), stream_uri_raw}].
-        stream_uri_raw carries credentials: match with it, never return or log it."""
-        url = self.media2_url
-        resp = self._call(url, "<tr2:GetProfiles><tr2:Type>All</tr2:Type></tr2:GetProfiles>")
+    # --- queries -------------------------------------------------------------------------
+
+    def profiles(self):
+        """[{token, name, encoderToken, streamUri}] for every profile with a video encoder."""
+        resp = self._media2("<tr2:GetProfiles><tr2:Type>VideoEncoder</tr2:Type></tr2:GetProfiles>")
         out = []
-        for p in resp.findall("tr2:Profiles", NS):
+        for p in resp.iterfind("tr2:Profiles", NS):
             ve = p.find("tr2:Configurations/tr2:VideoEncoder", NS)
-            uri = self._call(url, "<tr2:GetStreamUri><tr2:Protocol>RtspUnicast</tr2:Protocol>"
-                                  f"<tr2:ProfileToken>{escape(p.get('token') or '')}</tr2:ProfileToken>"
-                                  "</tr2:GetStreamUri>")
-            raw = _text(uri, "tr2:Uri") or ""
-            enc = _text(ve, "tt:Encoding")
-            out.append({"token": p.get("token"), "name": _text(p, "tr2:Name"),
-                        "encoder_token": ve.get("token") if ve is not None else None,
-                        "codec": FROM_ONVIF.get(enc, enc),
-                        "stream_uri": redact_uri(raw), "stream_uri_raw": raw})
+            if ve is None:
+                continue
+            uri = self._media2(
+                "<tr2:GetStreamUri><tr2:Protocol>RTSP</tr2:Protocol>"
+                f"<tr2:ProfileToken>{escape(p.get('token'))}</tr2:ProfileToken></tr2:GetStreamUri>"
+            ).findtext("tr2:Uri", namespaces=NS)
+            out.append({"token": p.get("token"), "name": p.findtext("tr2:Name", namespaces=NS),
+                        "encoderToken": ve.get("token"), "streamUri": uri})
         return out
 
-    def encoder_config(self, token: str):
-        resp = self._call(self.media2_url,
-                          "<tr2:GetVideoEncoderConfigurations><tr2:ConfigurationToken>"
-                          f"{escape(token)}</tr2:ConfigurationToken></tr2:GetVideoEncoderConfigurations>")
+    def encoder_config(self, token):
+        """The encoder configuration as the camera reports it (an lxml element)."""
+        resp = self._media2("<tr2:GetVideoEncoderConfigurations><tr2:ConfigurationToken>"
+                            f"{escape(token)}</tr2:ConfigurationToken></tr2:GetVideoEncoderConfigurations>")
         cfg = resp.find("tr2:Configurations", NS)
         if cfg is None:
-            raise Media2Error(f"no encoder configuration '{token}'")
+            raise OnvifError(f"no encoder configuration '{token}'")
         return cfg
 
-    def encoder_options(self, token: str) -> dict:
-        """{codec: {"resolutions": ["640x360", ...], "kbps": (min, max)}} for the codecs this
-        project handles; anything else the camera offers (JPEG, ...) is left out."""
-        resp = self._call(self.media2_url,
-                          "<tr2:GetVideoEncoderConfigurationOptions><tr2:ConfigurationToken>"
-                          f"{escape(token)}</tr2:ConfigurationToken></tr2:GetVideoEncoderConfigurationOptions>")
+    def encoder_options(self, token):
+        """{"H264": {...}, "H265": {...}, ...}: what the encoder accepts, per encoding."""
+        resp = self._media2("<tr2:GetVideoEncoderConfigurationOptions><tr2:ConfigurationToken>"
+                            f"{escape(token)}</tr2:ConfigurationToken>"
+                            "</tr2:GetVideoEncoderConfigurationOptions>")
         out = {}
-        for o in resp.findall("tr2:Options", NS):
-            codec = FROM_ONVIF.get(_text(o, "tt:Encoding"))
-            if not codec:
-                continue
-            out[codec] = {
-                "resolutions": [f'{_text(r, "tt:Width")}x{_text(r, "tt:Height")}'
-                                for r in o.findall("tt:ResolutionsAvailable", NS)],
-                "kbps": (int(_text(o, "tt:BitrateRange/tt:Min") or 0),
-                         int(_text(o, "tt:BitrateRange/tt:Max") or 0)),
+        for o in resp.iterfind("tr2:Options", NS):
+            enc = o.findtext("tt:Encoding", namespaces=NS)
+            res = []
+            for a in o.iterfind("tt:ResolutionsAvailable", NS):
+                res.append({"width": int(a.findtext("tt:Width", namespaces=NS)),
+                            "height": int(a.findtext("tt:Height", namespaces=NS)),
+                            "frameRate": _range(a.find("tt:FrameRateRange", NS)),
+                            "bitrate": _range(a.find("tt:BitrateRange", NS))})
+            out[enc] = {
+                "profiles": (o.get("ProfilesSupported") or "").split(),
+                "govLength": [int(x) for x in (o.get("GovLengthRange") or "").split()],
+                "frameRates": [float(x) for x in (o.get("FrameRatesSupported") or "").split()],
+                "resolutions": res,
+                "bitrate": _range(o.find("tt:BitrateRange", NS)),
             }
         return out
 
-    # -- write ----------------------------------------------------------------------------
+    def set_encoder_config(self, cfg):
+        """SetVideoEncoderConfiguration with a full configuration element."""
+        el = copy.deepcopy(cfg)
+        el.tag = _q("tr2:Configuration")
+        etree.cleanup_namespaces(el)
+        self._media2("<tr2:SetVideoEncoderConfiguration>"
+                     f"{etree.tostring(el).decode()}</tr2:SetVideoEncoderConfiguration>")
 
-    def set_codec(self, token: str, codec: str) -> dict:
-        """Switch encoder configuration `token` to `codec`, keeping resolution, frame rate,
-        bitrate and GOP. Returns the read-back summary; raises Media2Error if the camera
-        does not offer the codec at the current settings, or accepts the write but does not
-        apply it.
 
-        Verified on cam-02: the change sticks, the RTSP URI is unchanged, and MediaMTX's
-        source reconnects by itself within ~7-10 s with the new track (codec-phase0.md §2).
-        """
-        if codec not in TO_ONVIF:
-            raise Media2Error(f"unsupported codec '{codec}'")
-        cfg = self.encoder_config(token)
-        before = encoder_summary(cfg)
-        if before["codec"] == codec:
-            return before
-        opts = self.encoder_options(token).get(codec)
-        if not opts:
-            raise Media2Error(f"encoder '{token}' does not offer {TO_ONVIF[codec]}")
-        res = f"{before['width']}x{before['height']}"
-        if res not in opts["resolutions"]:
-            raise Media2Error(f"{TO_ONVIF[codec]} is not available at {res} "
-                              f"(offered: {', '.join(opts['resolutions'])})")
-        lo, hi = opts["kbps"]
-        if hi and not lo <= before["kbps"] <= hi:
-            raise Media2Error(f"{TO_ONVIF[codec]} bitrate range {lo}-{hi} kbps excludes "
-                              f"the current {before['kbps']} kbps")
+def for_camera(item):
+    """A client for a `cameras` registry row."""
+    return Media2(item["onvifHost"], item.get("onvifPort", 80), item["onvifUser"],
+                  item["onvifPassword"])
 
-        cfg.find("tt:Encoding", NS).text = TO_ONVIF[codec]
-        if "Profile" in cfg.attrib:
-            # H.265 -> Main. Back to H.264 -> keep the H.264 profile the camera still reports
-            # (cam-02 keeps saying "High" even while encoding H.265), else High.
-            cfg.set("Profile", "Main" if codec == "h265"
-                    else before["profile"] if before["profile"] in H264_PROFILES else "High")
-        body = ET.tostring(cfg, encoding="unicode")
-        body = body.replace("tr2:Configurations", "tr2:Configuration")   # Get -> Set element name
-        self._call(self.media2_url,
-                   f"<tr2:SetVideoEncoderConfiguration>{body}</tr2:SetVideoEncoderConfiguration>")
 
-        after = encoder_summary(self.encoder_config(token))
-        if after["codec"] != codec:
-            raise Media2Error(f"camera accepted the change but still reports "
-                              f"{TO_ONVIF.get(after['codec'], after['codec'])} -- write ignored")
-        return after
+def stream_profile(client, rtsp_url):
+    """The profile whose stream is the one this system pulls -- the registered rtspUrl. The
+    encoder behind it is the only one whose codec reaches MediaMTX; a camera has one per
+    stream (cam-03: MAIN and SUB), and switching the other would change nothing we see."""
+    profiles = client.profiles()
+    hits = [p for p in profiles if same_stream(p["streamUri"], rtsp_url)]
+    # Several profiles can share one stream (a PTZ and a plain profile on the same encoder).
+    # That is the same encoder, so any of them will do; different encoders behind one URI would
+    # be a guess, and a switch must never guess which encoder it changes.
+    if hits and len({p["encoderToken"] for p in hits}) == 1:
+        return hits[0]
+    if hits:
+        raise OnvifError(f"{len(hits)} profiles with different encoders stream "
+                         f"{urlsplit(rtsp_url or '').path} -- not guessing which one to change")
+    raise OnvifError(f"none of the camera's {len(profiles)} profiles streams "
+                     f"{urlsplit(rtsp_url or '').path or '(no rtspUrl)'} -- re-register the camera")
+
+
+def _range(el):
+    if el is None:
+        return None
+    return [float(el.findtext("tt:Min", namespaces=NS)), float(el.findtext("tt:Max", namespaces=NS))]
+
+
+def summarize(cfg):
+    """The parts of an encoder configuration a person needs to see."""
+    def num(path):
+        v = cfg.findtext(path, namespaces=NS)
+        return float(v) if v else None
+    return {"encoding": cfg.findtext("tt:Encoding", namespaces=NS), "profile": cfg.get("Profile"),
+            "width": int(num("tt:Resolution/tt:Width") or 0),
+            "height": int(num("tt:Resolution/tt:Height") or 0),
+            "frameRate": num("tt:RateControl/tt:FrameRateLimit"),
+            "bitrateKbps": num("tt:RateControl/tt:BitrateLimit"),
+            "govLength": int(cfg.get("GovLength")) if cfg.get("GovLength") else None}
+
+
+def same_stream(a, b):
+    """Whether two RTSP URIs name the same stream. Path and query only: the registered URI may
+    carry credentials, an explicit :554, or a different host spelling than the camera reports.
+    Credentials in the query (cam-02's ?username=..&password=..) are ignored too."""
+    def key(u):
+        s = urlsplit(u or "")
+        q = "&".join(sorted(p for p in s.query.split("&")
+                            if p and not p.lower().startswith(("user", "pass", "pwd"))))
+        return (s.path.rstrip("/") or "/", q)
+    return key(a) == key(b)
+
+
+def plan_config(cfg, opts, encoding, prefer_resolution=None):
+    """A copy of `cfg` switched to `encoding`, every other field kept where the target
+    encoding allows it and moved to the nearest allowed value where it doesn't.
+
+    `prefer_resolution` is the (width, height) MediaMTX actually receives. It wins over the
+    configuration's own when the target allows it, because the configuration can be stale
+    (cam-03, module docstring): a codec switch should not also change the picture size.
+    Pure function: no I/O, so the choices can be checked without a camera.
+    """
+    o = opts[encoding]
+    new = copy.deepcopy(cfg)
+    new.find("tt:Encoding", NS).text = encoding
+
+    profiles = o["profiles"]
+    if profiles:
+        if new.get("Profile") not in profiles:
+            pref = [p for p in PROFILE_PREFERENCE.get(encoding, []) if p in profiles]
+            new.set("Profile", (pref or profiles)[0])
+    elif "Profile" in new.attrib:
+        del new.attrib["Profile"]
+
+    cur = (int(cfg.findtext("tt:Resolution/tt:Width", namespaces=NS)),
+           int(cfg.findtext("tt:Resolution/tt:Height", namespaces=NS)))
+    allowed = {(r["width"], r["height"]): r for r in o["resolutions"]}
+    if allowed:
+        if prefer_resolution and tuple(prefer_resolution) in allowed:
+            res = tuple(prefer_resolution)
+        elif cur in allowed:
+            res = cur
+        else:
+            # The largest size not above the current one, else the smallest there is.
+            area = lambda r: r[0] * r[1]  # noqa: E731
+            fits = [r for r in allowed if area(r) <= area(cur)]
+            res = max(fits, key=area) if fits else min(allowed, key=area)
+        new.find("tt:Resolution/tt:Width", NS).text = str(res[0])
+        new.find("tt:Resolution/tt:Height", NS).text = str(res[1])
+        per_res = allowed[res]
+    else:
+        per_res = {}
+
+    if o["govLength"] and new.get("GovLength"):
+        lo, hi = o["govLength"][0], o["govLength"][-1]
+        new.set("GovLength", str(min(max(int(new.get("GovLength")), lo), hi)))
+
+    rc = new.find("tt:RateControl", NS)
+    if rc is not None:
+        fr_el = rc.find("tt:FrameRateLimit", NS)
+        if fr_el is not None and fr_el.text:
+            fr = float(fr_el.text)
+            if o["frameRates"] and fr not in o["frameRates"]:
+                lower = [f for f in o["frameRates"] if f <= fr]
+                fr = max(lower) if lower else min(o["frameRates"])
+            if per_res.get("frameRate"):
+                fr = min(max(fr, per_res["frameRate"][0]), per_res["frameRate"][1])
+            fr_el.text = f"{fr:g}"
+        br_el = rc.find("tt:BitrateLimit", NS)
+        rng = per_res.get("bitrate") or o["bitrate"]
+        if br_el is not None and br_el.text and rng:
+            br_el.text = str(int(min(max(float(br_el.text), rng[0]), rng[1])))
+    return new
+
+
+def streams(client):
+    """The camera's video streams, biggest picture first: [{"name": "main"|"sub"|"sub2"...,
+    token, encoderToken, streamUri, encoding, width, height, fps, govLength, fpsChoices}].
+
+    "main" is the largest picture rather than the first profile, because profile order and names
+    are the vendor's (cam-02: MainStream/SubStream; cam-03: PROFILE_000/001). The sizes are the
+    camera's claim, which can be stale (module docstring); a switch is proved on the wire.
+    """
+    out = []
+    for p in client.profiles():
+        s = summarize(client.encoder_config(p["encoderToken"]))
+        opts = client.encoder_options(p["encoderToken"]).get(s["encoding"]) or {}
+        out.append({**p, "encoding": s["encoding"], "width": s["width"], "height": s["height"],
+                    "fps": s["frameRate"], "govLength": s["govLength"],
+                    "fpsChoices": fps_choices(opts, (s["width"], s["height"]))})
+    out.sort(key=lambda x: x["width"] * x["height"], reverse=True)
+    for i, x in enumerate(out):
+        x["name"] = "main" if i == 0 else ("sub" if i == 1 else f"sub{i}")
+    return out
+
+
+def fps_choices(opts, resolution=None):
+    """The FPS_CHOICES this encoder accepts: in its supported list when it gives one, and inside
+    the per-resolution frame-rate range when that is given too."""
+    rates = opts.get("frameRates") or []
+    rng = next((r["frameRate"] for r in opts.get("resolutions") or []
+                if resolution and (r["width"], r["height"]) == tuple(resolution) and r["frameRate"]),
+               None)
+    return [f for f in FPS_CHOICES
+            if (not rates or float(f) in rates) and (not rng or rng[0] <= f <= rng[1])]
+
+
+def fps_config(cfg, opts, fps):
+    """A copy of `cfg` at `fps`, with the keyframe interval kept in *seconds*: GovLength counts
+    frames, so 100 frames at 20 fps (5 s) would become 10 s at 10 fps -- and a KVS fragment is
+    one keyframe interval, so live HLS latency and clip granularity would double with it.
+    Pure function, like plan_config."""
+    new = copy.deepcopy(cfg)
+    fr_el = new.find("tt:RateControl/tt:FrameRateLimit", NS)
+    if fr_el is None:
+        raise OnvifError("the encoder configuration has no frame-rate limit to set")
+    old = float(fr_el.text or 0) or float(fps)
+    fr_el.text = f"{fps:g}"
+    if new.get("GovLength"):
+        gov = max(1, round(int(new.get("GovLength")) * fps / old))
+        if opts.get("govLength"):
+            gov = min(max(gov, opts["govLength"][0]), opts["govLength"][-1])
+        new.set("GovLength", str(gov))
+    return new
+
+
+def with_credentials(uri, registered):
+    """`uri` (as the camera reports it) carrying the credentials of `registered`, the URI this
+    system pulls today: userinfo, and user/password query parameters (cam-02's ?username=..&
+    password=..). A camera's GetStreamUri usually omits them, and switching to another stream of
+    the same camera must not lose them."""
+    new, old = urlsplit(uri or ""), urlsplit(registered or "")
+    netloc = new.netloc
+    if "@" not in netloc and "@" in old.netloc:
+        netloc = old.netloc.rsplit("@", 1)[0] + "@" + netloc
+    have = {q.split("=", 1)[0].lower() for q in new.query.split("&") if q}
+    extra = [q for q in old.query.split("&")
+             if q and q.lower().startswith(("user", "pass", "pwd")) and q.split("=", 1)[0].lower() not in have]
+    query = "&".join([q for q in new.query.split("&") if q] + extra)
+    return urlunsplit((new.scheme, netloc, new.path, query, new.fragment))

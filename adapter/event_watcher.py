@@ -39,24 +39,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config
+
 from aws_device_creds import get_session
+from camera_control import is_unregistered
 
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
 VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WSDL = os.path.join(VMS_HOME, "venv-adapter", "lib",
     f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages", "onvif", "wsdl")
-PULL_NS = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
 EVENT_TOPIC = f"{config.TOPIC_PREFIX}/event"
 REGION = config.AWS_REGION
 
-# recordingMode -> the ONVIF topic that drives it. All three were confirmed firing and
-# latching in Phase 0; they differ only in what they classify, so one mapping covers
-# Phase 2 (motion) and Phase 3 (human) alike.
-MODE_TOPICS = {
-    "motion":     "tns1:VideoSource/MotionAlarm",
-    "cellMotion": "tns1:RuleEngine/CellMotionDetector/Motion",
-    "human":      "tns1:UserAlarm/IVA/HumanShapeDetect",
-}
+# recordingMode -> the ONVIF topic that drives it (onvif_events.py). All three were confirmed
+# firing and latching on cam-02 in Phase 0; another camera may advertise only some of them.
+from onvif_events import (MODE_TOPICS, PullSubscription, camera_detection,  # noqa: E402
+                          is_on, parse_notification, state_value)
+
+# Subscription hygiene (renewal, short pulls, unsubscribing) lives in onvif_events.PullSubscription,
+# shared with the admin GUI's trigger test (FoundAndFixed.md #65).
+TOPIC_RECHECK_SEC = 300
 COOLDOWN_SEC = 60          # Phase 0: 60 s -> ~1.6 clips/h overall, 0.22/h overnight
 # clip_to_s3 cuts ts+33s, and KVS only returns already-ingested footage, so the publish
 # has to wait for that window to actually elapse. Measured: publishing immediately gave
@@ -102,11 +103,11 @@ class ClipGate:
 
 
 def load_cameras():
-    """Registry rows for cameras whose recordingMode is a detection mode."""
+    """Registry rows for cameras whose recordingMode is a detection mode, unless unregistered."""
     items = get_session(REGION).resource("dynamodb").Table("cameras").scan()["Items"]
     return {
         i["cameraId"]: i for i in items
-        if i.get("recordingMode") in MODE_TOPICS and i.get("onvifHost")
+        if i.get("recordingMode") in MODE_TOPICS and i.get("onvifHost") and not is_unregistered(i)
     }
 
 
@@ -146,57 +147,72 @@ async def watch_camera(item, dry_run, stop_event):
 
     cam_id = item["cameraId"]
     mode = item["recordingMode"]
-    topic = MODE_TOPICS[mode]
     gate = ClipGate()
+    warned_topic = False
 
     while not stop_event.is_set():
+        cam = None
         try:
             cam = ONVIFCamera(item["onvifHost"], int(item.get("onvifPort", 80)),
                               item["onvifUser"], item["onvifPassword"], wsdl_dir=WSDL)
             await cam.update_xaddrs()
-            ev = await cam.create_events_service()
-            sub = await ev.CreatePullPointSubscription()
-            cam.xaddrs[PULL_NS] = sub.SubscriptionReference.Address._value_1
-            pull = await cam.create_pullpoint_service()
-            log(f"[{cam_id}] subscribed, mode={mode}, topic={topic}")
 
-            while not stop_event.is_set():
-                msgs = await pull.PullMessages({"Timeout": "PT10S", "MessageLimit": 50})
-                for m in (getattr(msgs, "NotificationMessage", None) or []):
-                    try:
-                        if str(m.Topic._value_1) != topic:
+            # The camera's own topic and on/off field for this mode (onvif_events.detection_map):
+            # vendors name the same detection differently. None means the camera can't serve the
+            # mode, so nothing could ever fire and the GUIs offered it by mistake.
+            dmap, topics = await camera_detection(cam)
+            if mode not in dmap:
+                if not warned_topic:
+                    log(f"[{cam_id}] mode={mode}: this camera publishes no topic for it "
+                        f"(it offers: {', '.join(sorted(topics)) or 'nothing'}) -- not subscribing")
+                    warned_topic = True
+                await _close(cam)
+                await asyncio.sleep(TOPIC_RECHECK_SEC)
+                continue
+
+            topic, field = dmap[mode]["topic"], dmap[mode]["field"]
+            async with PullSubscription(cam) as sub:
+                log(f"[{cam_id}] subscribed, mode={mode}, topic={topic} ({field}, "
+                    f"{dmap[mode]['match']} name)")
+                while not stop_event.is_set():
+                    for note in await sub.pull():
+                        n_topic, _op, data = parse_notification(note)
+                        value = state_value(data, field) if n_topic == topic else None
+                        if value is None:
                             continue
-                    except Exception:
-                        continue
-
-                    state = None
-                    try:
-                        for si in m.Message._value_1.Data.SimpleItem:
-                            name = getattr(si, "Name", None) or si.get("Name")
-                            val = getattr(si, "Value", None) or si.get("Value")
-                            if name in ("State", "IsMotion"):
-                                state = str(val).lower() == "true"
-                    except Exception:
-                        pass
-                    if state is None:
-                        continue
-
-                    fire, reason = gate.update(state, asyncio.get_event_loop().time())
-                    if fire:
-                        detected_at = datetime.now(timezone.utc)
-                        log(f"[{cam_id}] detection at {detected_at.isoformat()} -> clip "
-                            f"(publishing in {PUBLISH_DELAY_SEC}s, after post-roll)")
-                        # background task: the pull loop must keep draining events during
-                        # the post-roll wait, or the latch clear would be missed
-                        asyncio.create_task(
-                            publish_event(cam_id, mode, detected_at, dry_run))
-                    elif reason.startswith("cooldown"):
-                        log(f"[{cam_id}] detection suppressed: {reason}")
+                        fire, reason = gate.update(is_on(value), asyncio.get_event_loop().time())
+                        if fire:
+                            detected_at = datetime.now(timezone.utc)
+                            log(f"[{cam_id}] detection at {detected_at.isoformat()} -> clip "
+                                f"(publishing in {PUBLISH_DELAY_SEC}s, after post-roll)")
+                            # background task: the pull loop must keep draining events during
+                            # the post-roll wait, or the latch clear would be missed
+                            asyncio.create_task(
+                                publish_event(cam_id, mode, detected_at, dry_run))
+                        elif reason.startswith("cooldown"):
+                            log(f"[{cam_id}] detection suppressed: {reason}")
+        except asyncio.CancelledError:
+            await _close(cam)
+            raise
         except Exception as e:
             # Subscriptions expire, cameras reboot, the LAN blips. Log it so a gap is
-            # explainable, then rebuild rather than dying.
+            # explainable, then rebuild rather than dying (the subscription was given back on
+            # the way out of its block).
             log(f"[{cam_id}] subscription lost ({type(e).__name__}: {str(e)[:120]}), retrying in 10s")
+            await _close(cam)
             await asyncio.sleep(10)
+        else:
+            await _close(cam)
+
+
+async def _close(cam):
+    """Close the camera's HTTP session, best effort: an unclosed session is a leaked socket (the
+    "Unclosed client session" lines this loop used to log)."""
+    if cam is not None:
+        try:
+            await cam.close()
+        except Exception:
+            pass
 
 
 async def main(dry_run):

@@ -45,9 +45,59 @@ def unit_name(camera_id: str) -> str:
     return f"kvs-{path}.service"
 
 
+def live_path_name(camera_id: str) -> str:
+    # The live view's own MediaMTX path, which pulls the camera's sub stream when the stream
+    # being recorded is the main one (adapter/live_view.py): "cam-03" -> "cam03_live".
+    return f"{mediamtx_path_name(camera_id)}_live"
+
+
+def live_stream_name(camera_id: str) -> str:
+    # Its KVS stream: "cam-03" -> "cam-03-live". Inside the producer role's stream/cam-*/*
+    # wildcard, so it needs no IAM change.
+    return f"{camera_id}-live"
+
+
+def live_unit_name(camera_id: str) -> str:
+    # Its producer: an instance of the kvs-live@ template, started by the cloud page's Live
+    # control (agent.py `live`), independent of the recording producer, and stopped by its own
+    # deadline (stream-channel.sh LIVE=1) when nobody renews it.
+    return f"kvs-live@{mediamtx_path_name(camera_id)}.service"
+
+
+def is_unregistered(row: dict) -> bool:
+    # A camera unregistered in the admin GUI keeps its registry row, KVS stream and clips, so
+    # Re-register can bring it back as it was; `unregisteredAt` (when) is the only mark. Every
+    # reader that acts on cameras skips such a row: both GUIs, list-cameras, the outage
+    # supervisor, the event watcher, the MediaMTX path sync, rematch_cameras.py, codec_caps.py,
+    # and agent.py (everything but stop).
+    return bool(row.get("unregisteredAt"))
+
+
+def has_producer(camera_id: str) -> bool:
+    # Whether this Pi has a producer unit for the camera at all. The registry is shared with
+    # the VMS card (same board, other SD card), so a camera registered there has a row and a
+    # MediaMTX path here but no kvs-cam@ instance -- unit_name() then names kvs-cam03.service,
+    # which doesn't exist, and systemctl reports it as merely "inactive" (#37's trap). LoadState
+    # is "not-found" for a unit with no file; a template instance loads only once its
+    # EnvironmentFile exists, which unit_name() already requires.
+    r = subprocess.run(["systemctl", "show", "-p", "LoadState", "--value", unit_name(camera_id)],
+                       capture_output=True, text=True)
+    return r.stdout.strip() == "loaded"
+
+
 def set_stream(camera_id: str, on: bool):
     action = "start" if on else "stop"
     subprocess.run(["sudo", "systemctl", action, unit_name(camera_id)], check=False)
+
+
+def set_boot_start(camera_id: str, on: bool):
+    # enable/disable without --now: whether the producer runs right now is set_stream's job.
+    # Nothing enables a producer any more (FoundAndFixed.md #81); Unregister still disables,
+    # for instances provisioned before that, so an unregistered camera's producer can't start
+    # at boot and loop against the MediaMTX path that no longer exists.
+    action = "enable" if on else "disable"
+    subprocess.run(["sudo", "systemctl", action, unit_name(camera_id)],
+                   check=False, capture_output=True)
 
 
 def get_stream_status(camera_id: str) -> str:

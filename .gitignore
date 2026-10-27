@@ -4,6 +4,9 @@ certs/
 *.key
 
 # Reproducible / built locally
+# Lambda packages: built fresh by cloud/deploy.sh at deploy time, never kept in git
+cloud/lambda/*.zip
+*.pyc
 venv-adapter/
 vendor/amazon-kinesis-video-streams-producer-sdk-cpp/
 mediamtx/mediamtx

@@ -2354,7 +2354,9 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-systemctl enable --now kvs-cam@cam01 kvs-cam@cam02 kvs-cam@cam03   # instance = MediaMTX path name, not cameraId
+systemctl start kvs-cam@cam03   # instance = MediaMTX path name, not cameraId
+# start, never enable: an enabled producer starts at every boot and pushes to KVS unattended
+# (§1.2's rule; FoundAndFixed.md #81)
 systemd-cgtop -1        # per-channel CPU and memory, via cgroups, for free
 ```
 
@@ -3755,10 +3757,27 @@ must still start with AWS unreachable, and producers ask MediaMTX instead (§21.
 ### 21.3 Set on the camera, and only in the admin GUI
 
 `POST /api/cameras/<id>/codec` (`adapter/onvif-admin/app.py`) accepts only a codec the
-hardware can produce. It switches the camera's encoder, keeping resolution, frame rate,
-bitrate and GOP, and **reads the change back** before writing `videoCodec`. This camera
-family has accepted ONVIF writes and ignored them before (`Camera-Features.md` §4), so a
-write that isn't reflected on read-back is reported as refused.
+camera's encoder offers. **It counts as done only when MediaMTX receives the new codec, with
+video flowing** (45 s budget) — not when the camera says yes. The first version wrote
+`videoCodec` after a matching *read-back*, and cam-03 showed why that is the wrong test: it
+read back H264 2880×1620 while it sent H.265 2560×1440 from the same profile (VMS, ported in
+the 2026-10 round, `VMS-PORT-PLAN.md` Phase 4). The read-back is still reported, as
+information. Three more rules came with it:
+
+- **The encoder is found per request**, from the Media2 profile whose stream URI is the
+  registered `rtspUrl` (path and query compared, credentials ignored). A stored token goes
+  stale as soon as the recorded stream changes (§22.4); `videoEncoderToken` is updated after
+  every switch instead of trusted.
+- **Only the encoding changes** (`onvif_media2.plan_config`): every other field is kept where
+  the new codec allows it and moved to the nearest allowed value where it doesn't, and the
+  picture size comes from the wire, not from the possibly stale configuration.
+- **No camera call when the wire already carries the codec** — no reason to cost ~8 s of video.
+
+The registry learns the codec from the wire too: a camera registered while already sending
+H.265, or switched in its own web page, is recorded when the admin page next reads its codec
+(FoundAndFixed.md #69). Measured on cam-03, 2026-10-25: done in 7.9 s each way; a producer
+that was running lost its session, was restarted by its watchdog and persisted on the new
+chain ~10 s later; a repeated request returned in 0.2 s without touching the camera.
 
 Two consequences follow from switching the camera rather than a copy of its stream:
 
@@ -3904,3 +3923,139 @@ aws kinesisvideo describe-stream --stream-name cam-02 --query StreamInfo.MediaTy
 # frame -> a browser. The cloud path is the check that catches a missing codec_data
 # (FoundAndFixed.md #16's lesson); ffprobe on the local RTSP proves nothing about it.
 ```
+
+## 22. Appendix E — A camera over its lifetime: registration, triggers, streams, live view
+
+The 2026-10 round ported these from the base project VMS (`VMS-PORT-PLAN.md`), adapted to this
+repository's structure, and verified them on cam-01…cam-04 on 2026-10-25. The registry they
+write is shared with VMS: rows change field by field, new fields are additive, and
+`recordingMode` keeps its four values (CLAUDE.md).
+
+### 22.1 Registration, and cameras that don't fit the defaults
+
+- **No password.** cam-04 has user `admin` and an empty password. ONVIF accepts the username
+  with an empty password's digest, so `""` is stored as given. Its RTSP, though, answers 401
+  without a login, and MediaMTX refuses a URI with an empty password. `rtsp_login()` therefore
+  puts the login the camera demands into the URI MediaMTX pulls — with a placeholder `x` for
+  an empty password, which works where the camera ignores the password — after one checking
+  `DESCRIBE`; a refused login is an error before anything is created (FoundAndFixed.md #67).
+- **A microphone ONVIF doesn't list.** cam-04's profiles name no audio encoder, yet both
+  streams carry G.711 once "audio & video" is set in its web page. Discovery then reads the
+  stream's own SDP with one RTSP `DESCRIBE` — no `SETUP`, so no session and no media — and
+  registration writes `audioCapable` from either source (#60, #67). Media1 audio units are
+  normalised: cam-02 reports Hz where the spec says kHz (#74).
+- **Which law.** G.711 is A-law or mu-law, ONVIF can't say which, and a camera's own audio page
+  can change it; the producers take the law from what MediaMTX receives (`AUDIO_TRACK`), never
+  from a constant (#71).
+- **Cameras registered on the other SD card** have a registry row and a MediaMTX path here
+  (the path sync reads the registry) but no producer. Re-register — or `setup-launch.sh` on a
+  fresh card — provisions their `kvs-cam@` instance, **not started and never enabled**: an
+  enabled producer starts at every boot and pushes to KVS unattended, which §1.2 forbids
+  (#81). Until then the status column says "no producer on this Pi", and Start is refused
+  rather than silently doing nothing (#37's trap).
+
+### 22.2 Unregister
+
+A soft mark: `unregisteredAt` on the row. The row, the KVS stream, the clips and every setting
+stay, which is what lets **Re-register** (Discover, then the button on the device labelled
+"Unregistered: was cam-03") bring the camera back as it was. Unregister also stops and
+disables the producer and deletes the MediaMTX paths. Every reader that acts on cameras skips
+a marked row:
+
+| Reader | What it does with an unregistered camera |
+|---|---|
+| both GUIs, `list-cameras` | leave it out (the admin GUI offers it only in Discover) |
+| `publish-cmd`, `get-hls-url`, `record-clip`, the three settings Lambdas, the admin routes | answer 409 — an open page or a direct call can still name it |
+| `agent.py` | refuses everything but stop |
+| outage supervisor (its registry cache), status poll | forget it |
+| `sync_mediamtx_paths.py`, `rematch_cameras.py` | no path, not in the offline cache, not followed to a new address |
+| `event_watcher.py`, `codec_caps.py` | skip it |
+
+The consequence to accept: clips are listed per camera, so an unregistered camera's clips
+leave the cloud page until it is re-registered. They stay in S3 and the clips table, and
+tiering and expiry carry on. Because the registry is shared, unregistering here hides the
+camera in VMS's GUIs too.
+
+### 22.3 Recording triggers, per camera
+
+Vendors name the same detection differently: cam-02's human detection is
+`UserAlarm/IVA/HumanShapeDetect`, cam-03 publishes only `RuleEngine/CellMotionDetector/Motion`.
+`adapter/onvif_events.py` builds each camera's map from its own `GetEventProperties` — known
+topic names first, then the topic's wording, keeping only topics whose payload has an on/off
+field — and registration records it as `detectionModes`/`detectionTopics`. Both GUIs grey out
+a mode the camera doesn't publish, and both mode routes refuse it (409), because a camera set
+to such a mode would silently never record (FoundAndFixed.md #65).
+
+**Subscriptions are a scarce resource on the camera.** cam-03 has 10 slots; the first watcher
+re-subscribed every ~100 s without renewing or unsubscribing, filled them, and then nothing
+could subscribe — including VMS on the other card, since the cameras are shared.
+`PullSubscription` gives every subscription a lifetime, renews it every 20 s, pulls with a
+short timeout and its own deadline (cam-03 held long pulls open indefinitely), and always
+unsubscribes on the way out. The watcher and the trigger test both use it.
+
+**Offered is not working.** A camera's event list says what it *has*, not what is switched on:
+cam-03's cell motion fired only after motion detection was ticked in its own web page, and
+its human alarm never reaches ONVIF at all. **Test triggers** (admin GUI) listens to every
+offered trigger at once for up to a minute while someone walks past, ignores the
+subscription's opening report, and records `detectionTests` (mode → seen / not seen, when, how
+many) for both GUIs to show next to a link to the camera's settings page (`webUrl`, offered
+only where a page answers). One more vendor difference: cam-04 declares `MotionAlarm` with a
+`State` field and sends `IsMotion` — the state is read through `state_value()`, the declared
+field first and then the known ones (#68).
+
+### 22.4 Which stream is recorded, and at what frame rate
+
+`GET/POST /api/cameras/<id>/stream` (admin GUI). **"Main" is the largest picture**, not the
+first profile — profile names are the vendor's. A stream switch writes `rtspUrl` first (a
+MediaMTX restart rebuilds the path from the registry), points the MediaMTX path at the other
+profile's URI with the registered credentials carried over, and counts as done when MediaMTX
+reconnects with video; `videoCodec` and the encoder token are then taken from the new stream
+(cam-03's sub stream claims H.264 and sends H.265).
+
+**Frame rates: 10 and 15 only** (`onvif_media2.FPS_CHOICES`; VMS also offers 20 and 25). Each
+is offered only where the stream's encoder accepts it; a camera at another rate shows "choose
+10 or 15", never its own rate, and nothing changes until someone chooses. Registration
+preselects 10. **The keyframe interval is kept in seconds**, not frames: a KVS fragment is one
+keyframe interval, so a GOP of 60 frames at 15 fps (4 s) becomes 40 at 10 fps. A change counts
+as done when the frames counted on the wire (4 s of packet timestamps) match. Both rates satisfy
+§18.3's audio rule with 8 kHz AAC (128 ms frames against 100 or 67 ms).
+
+### 22.5 Live view: the sub stream, on demand, ending by itself
+
+"Live" means watch, "Start" means record (`VMS-PORT-PLAN.md` D3), so Live needs no Start and
+costs only while someone watches.
+
+- **Locally:** a camera recording its main stream gets a second MediaMTX path, `<path>_live`,
+  on its sub stream, pulled continuously (local, free; the live producer needs its tracks
+  before anyone reads it, so not on demand). Its URI is the registry's `liveRtspUrl`, present
+  only when live ≠ recorded stream (`adapter/live_view.py`); the path sync and the rematch
+  timer follow it, Unregister deletes it, and the outage buffer never arms it. The admin
+  GUI's preview plays it.
+- **In the cloud:** the page's **Live** button sends `live`; `agent.py` writes a deadline (now
+  + 5 min) to `/run/user/<uid>/vms-live/<path>` and starts `kvs-live@<path>`, which pushes the
+  `_live` path — or, for a camera with no sub stream, the recorded path — to the KVS stream
+  `<camera>-live` (1 h retention: HLS needs some). The page re-sends `live` every 2 minutes
+  while it is visible and `live-stop` when it closes; `get-hls-url?view=live` reads the live
+  stream. Clips always come from the recorded stream.
+- **So Start Recording needs Start, not Live.** The page enables it only while KVS reports
+  footage arriving on the recorded stream (`/hls` 200, not 503), checked every 30 s, and every
+  5 s after Start; after its own Stop it goes off at once (FoundAndFixed.md #83).
+- **The deadline is the cost guarantee.** The producer checks it on every pass of its loop and
+  exits **0** once it has passed, so `Restart=on-failure` leaves it stopped. A lost
+  `live-stop`, a closed laptop, a crashed browser — each costs at most five minutes of live
+  ingest. Not `RuntimeMaxSec=`: systemd counts that timeout as a failure and would restart it.
+- **The codec switch changes the recorded stream only.** cam-04 recorded H.264 on main while
+  its live view stayed H.265; the live producer records its codec in `liveVideoCodecActive`,
+  which the cloud page uses for the Live player's H.265 warning.
+
+### 22.6 Measured, 2026-10-25
+
+| What | Result |
+|---|---|
+| H.265 to KVS (cam-03, `h265timestamper`, #58) | fragments every 4 s; only the stream's first non-key frame dropped |
+| Audio, zero rejected frames (#59, #63, #70, #71, #73) | cam-01 3 min, cam-02 5 min (1 dropped AAC frame, was ~300), cam-03 4½ min, cam-04 H.264 + A-law 5 min |
+| Codec switch, done on the wire (cam-03) | 7.9 s each way; a running producer persisting on the new chain ~10 s later |
+| Stream switch (cam-03) | sub → main 4.6 s (2560×1440), main → sub 4.1 s |
+| Frame rate (cam-03) | 15 → 10 fps: 9.9 fps counted, GOP 60 → 40 frames, in 4.9 s |
+| Live (cam-03, recording on main) | `cam-03` 2560×1440 and `cam-03-live` 800×448 side by side; deadline stop exit 0, result `success`, no restart |
+| Status poll with DynamoDB unreachable (#56) | ~50 ms from the local cache; the old lookup still hanging after 20 s |

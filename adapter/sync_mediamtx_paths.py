@@ -15,8 +15,9 @@ URLs carry camera credentials, and used when AWS is unreachable -- cameras must 
 without the cloud; recording through an outage is what the outage buffer exists for.
 
 It never removes a path. A path the registry doesn't list (cam01, which its own publisher
-feeds; anything added by hand) is left alone. It adds missing paths and fixes a source that
-changed. An unchanged path is not touched at all, because patching `source` makes MediaMTX
+feeds; anything added by hand) is left alone; an unregistered camera's path is removed by the
+admin GUI's Unregister, and this then leaves it out. It adds missing paths and fixes a source
+that changed. An unchanged path is not touched at all, because patching `source` makes MediaMTX
 recreate the path and disconnect its readers, a running KVS producer included.
 
 Usage:  sync_mediamtx_paths.py [--dry-run]
@@ -58,9 +59,12 @@ def fetch_registry():
     from aws_device_creds import get_session   # also loads /etc/adapter/adapter.env
     cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
     items = get_session().resource("dynamodb", config=cfg).Table("cameras").scan()["Items"]
-    keep = ("mode", "rtspUrl", "onvifHost", "onvifPort", "onvifEndpointRef")  # the last three: rematch_cameras.py
+    keep = ("mode", "rtspUrl", "liveRtspUrl",                 # liveRtspUrl: live_view.py
+            "onvifHost", "onvifPort", "onvifEndpointRef")     # the last three: rematch_cameras.py
+    # An unregistered camera gets no path, and stays out of the cache, so an offline start
+    # doesn't bring it back either.
     return [{"cameraId": i["cameraId"], **{k: (int(i[k]) if k == "onvifPort" else i[k]) for k in keep if k in i}}
-            for i in items]
+            for i in items if not camera_control.is_unregistered(i)]
 
 
 def save_cache(cameras):
@@ -112,19 +116,26 @@ def sync(cameras, dry_run=False):
             log(f"{camera_id}: passthrough but no rtspUrl in the registry -- "
                 f"Re-register it in the admin GUI (LAUNCH.md E3)")
             continue
-        path = camera_control.mediamtx_path_name(camera_id)
-        want = {"source": cam["rtspUrl"], "rtspTransport": "tcp"}
-        conf = mediamtx_api.get_path_conf(path)
-        if conf is None:
-            action = "add"
-        elif conf.get("source") == want["source"] and conf.get("rtspTransport") == "tcp":
-            log(f"{camera_id}: {path} up to date")
-            continue
-        else:
-            action = "patch"              # reconnects this path's readers -- the source really moved
-        log(f"{camera_id}: {action} {path} <- {redact(want['source'])}{' (dry run)' if dry_run else ''}")
-        if not dry_run:
-            (mediamtx_api.add_path if action == "add" else mediamtx_api.patch_path)(path, want)
+        sync_path(camera_id, camera_control.mediamtx_path_name(camera_id), cam["rtspUrl"], dry_run)
+        # A camera recording its main stream also has a live-view path on its sub stream
+        # (live_view.py). The admin GUI removes it when that stops being true.
+        if cam.get("liveRtspUrl"):
+            sync_path(camera_id, camera_control.live_path_name(camera_id), cam["liveRtspUrl"], dry_run)
+
+
+def sync_path(camera_id, path, source, dry_run):
+    want = {"source": source, "rtspTransport": "tcp"}
+    conf = mediamtx_api.get_path_conf(path)
+    if conf is None:
+        action = "add"
+    elif conf.get("source") == want["source"] and conf.get("rtspTransport") == "tcp":
+        log(f"{camera_id}: {path} up to date")
+        return
+    else:
+        action = "patch"              # reconnects this path's readers -- the source really moved
+    log(f"{camera_id}: {action} {path} <- {redact(want['source'])}{' (dry run)' if dry_run else ''}")
+    if not dry_run:
+        (mediamtx_api.add_path if action == "add" else mediamtx_api.patch_path)(path, want)
 
 
 def main():

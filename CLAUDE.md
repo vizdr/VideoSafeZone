@@ -21,10 +21,11 @@ of the real build and its design decisions, updated continuously as the system e
 diagnosis, fix — as permanently numbered entries; the other docs keep only the rule a bug
 left behind plus a `FoundAndFixed.md #N` reference. `LAUNCH.md` is the short operational runbook (what to
 actually run, in order, assuming the guide has already been followed once) — check it
-first for "how do I start/stop/verify this." Its Part A is also the fresh-Pi setup
-checklist (SDK build with its patches, venv, MediaMTX binary, AWS CLI, device
-certificate, systemd unit files, optional USB outage-buffer stick), each step with a command
-that proves it worked. `AUDIO.md` records how optional per-camera audio was designed and built (guide §18 is the
+first for "how do I start/stop/verify this." Its Part A is the fresh-SD-card setup, which
+is scripted: `setup/setup-all.sh` runs `setup/setup-{system,user,sdk,identity,launch}.sh`
+(each idempotent, each ending in PASS/FAIL proofs, the reasons in their comments), and
+`setup/setup-check.sh` says what is missing. Its Part H is deploying the cloud side with
+`cloud/deploy.sh`. `AUDIO.md` records how optional per-camera audio was designed and built (guide §18 is the
 canonical reference; `AUDIO.md` keeps the reasoning, the rules its two silent bugs left
 (FoundAndFixed.md #15, #16), and the claims that were withdrawn). `OUTAGE.md` is the working record for durable outage
 buffering (guide §16.3c) — design, measurements and open questions — and folds into
@@ -35,7 +36,10 @@ buffering (guide §16.3c) — design, measurements and open questions — and fo
 built, the still-open camera-segment isolation option, and a summary of the codec choice),
 reviewed against the system 2026-09-26. `measurements/codec-phase0.md` is the evidence
 behind per-camera H.264/H.265 selection (guide §21): hardware, camera, KVS and browser
-measurements, and the decisions they led to. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
+measurements, and the decisions they led to. `VMS-PORT-PLAN.md` is the plan for porting VMS's
+fixes and features (written in VMS as `SUCCESSOR-PLAN.md`): its decisions D1–D5, phases and
+the VMS→successor bug-number mapping (this repository's #52–#75 = VMS's #51–#74); its
+"Applicability" section says how far the round got. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
 may be stale relative to the current guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
 demo is modeled on. **When in doubt about current architecture or "why is it done this
 way," read `Demo-AWS-Video-revCosts4.md` (or grep it for the relevant §-number) before
@@ -77,35 +81,37 @@ python3 adapter/observe_state.py
 ### Deploying a Lambda
 
 **The AWS account (596633517506) is shared with the base project, `VMS`
-(github.com/vizdr/VMS).** Both repositories deploy the same function names and the same
-client object, and neither deploy command names a repository, so a deploy from here
-silently replaces whatever `VMS` last deployed — and the reverse (FoundAndFixed.md #48).
-Before deploying, look at what is live and where it came from:
-`aws lambda get-function-configuration --function-name <fn> --query LastModified`, and
-compare the live code with this tree (`aws lambda get-function --function-name <fn>
---query Code.Location` gives a download link). Coordinate when the other side is newer.
-
-Every function in `cloud/lambda/` is deployed the same way — zip the single file, push it:
+(github.com/vizdr/VMS).** Since October this repository owns the unprefixed Lambdas,
+`kvs-demo-api`, the client bucket and its distribution; VMS deploys only `pir-*` copies and
+never these — and this repository **never deploys a `pir-*` resource**. Two exceptions to
+keep in mind: `clip-to-s3` is still used by VMS for its ONVIF detection clips, so a change
+there must stay backward compatible; and other projects (`pico2w-*`) share the account. The
+older rule still holds: before deploying, look at what is live and where it came from
+(FoundAndFixed.md #48). **Deploy with `cloud/deploy.sh`** (LAUNCH.md Part H), which does that
+check itself:
 ```bash
-cd cloud/lambda && zip -q <name>.zip <name>.py && \
-  aws lambda update-function-code --function-name <name> --zip-file fileb://<name>.zip
+bash cloud/deploy.sh status                       # live = this tree? = git HEAD? = neither?
+bash cloud/deploy.sh lambda get-hls-url --dry-run # then without --dry-run
+bash cloud/deploy.sh lambdas                      # every function whose live code differs
 ```
-Function names use hyphens (`get-hls-url`), files use underscores (`get_hls_url.py`).
-IAM policy documents for each function's role live in `cloud/iam/`.
+It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
+HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
+file fresh in a temporary directory — the zips are build output, not in git — and verifies
+the live code afterwards. Function names use hyphens (`get-hls-url`), files use underscores
+(`get_hls_url.py`). IAM policy documents for each function's role live in `cloud/iam/`.
+The deploy changes a shared production account: run it when the user asks for a deploy.
 
 ### Deploying the browser client
 
 Same shared account as the Lambdas (above), and **the client bucket keeps no versions**:
-an overwritten `index.html` can only be redeployed from a working tree. Check first:
-`aws s3api head-object --bucket vms-demo-client-596633517506 --key index.html --query
-LastModified`, and diff the live copy (`curl` it from CloudFront) against this tree.
+an overwritten `index.html` comes back only from a working tree or from `deploy.sh`'s backup
+of the live copy, taken before each upload.
 
 ```bash
-aws s3 cp client/index.html s3://vms-demo-client-596633517506/index.html \
-  --content-type text/html --cache-control "no-cache, must-revalidate"
+bash cloud/deploy.sh page        # checks the live page, backs it up, uploads, verifies via CloudFront
 ```
 Served at **https://dugyd3kkt36pw.cloudfront.net** (CloudFront + OAC, guide §8.5.1). The
-`--cache-control` flag is required and now does double duty: it prevents stale clients
+`--cache-control` header (`deploy.sh` sets it) is required and does double duty: it prevents stale clients
 after a deploy (FoundAndFixed.md #11), and it makes CloudFront revalidate rather than
 serve a cached copy, so an upload is live immediately (`x-cache: RefreshHit`). Drop the
 header and you also need `aws cloudfront create-invalidation --distribution-id
@@ -118,11 +124,13 @@ bucket policy → Block Public Access → `delete-bucket-website`).
 
 **System units** (root, `/etc/systemd/system/`, need `sudo systemctl`): `kvs-cam01.service`,
 `kvs-cam02.service`, `kvs-cam@.service` (template for GUI-provisioned cameras, §16.6) — the
-actual KVS producers that cost money while running.
+actual KVS producers that cost money while running — and `kvs-live@.service`, the on-demand
+live view (below), never enabled.
 
 **User units** (`~/.config/systemd/user/`, `systemctl --user`, no sudo): `kvs-mediamtx`,
 `kvs-camera-init`, `kvs-camera-publish`, `kvs-agent`, `onvif-admin`,
-`kvs-event-watcher` (ONVIF detection → clips), `kvs-outage-buffer` +
+`kvs-event-watcher` (ONVIF detection → clips), `netwatch` (logs the network every 10 s,
+FoundAndFixed.md #79), `kvs-outage-buffer` +
 `kvs-outage-uploader` (durable outage buffering, `OUTAGE.md`), and the
 `kvs-camera-rematch.timer` oneshot (follows ONVIF cameras to a new IP).
 
@@ -130,11 +138,16 @@ A unit in one manager **cannot** `Requires=`/`After=` a unit in the other — th
 independent systemd instances; a cross-manager `Requires=` fails with "Unit not found"
 (FoundAndFixed.md #12).
 
-Unit files are **not in git**. `LAUNCH.md` A8 generates all of them, writing this clone's
-literal absolute paths into `ExecStart=`/`WorkingDirectory=`/`Environment=`. systemd
-never reads `.bashrc` and doesn't expand `$VMS_HOME` or `~`. When the clone moves, re-run A8.
+Unit files are **not in git**. `setup/setup-system.sh` (system units, the sudo rule) and
+`setup/setup-user.sh` (user units) are their authoritative source (LAUNCH.md A8), writing this
+clone's literal absolute paths into `ExecStart=`/`WorkingDirectory=`/`Environment=`. systemd
+never reads `.bashrc` and doesn't expand `$VMS_HOME` or `~`. When the clone moves, re-run
+both. A producer unit is **never enabled** — an enabled one pushes to KVS after every reboot,
+unattended (FoundAndFixed.md #81). A change to a unit file belongs in those scripts, not on
+the Pi alone.
 
-One-time launch (enables everything to start at boot), order and startup gotchas: `LAUNCH.md` Part B; after a reboot just verify, Part C.
+One-time launch (enables everything to start at boot): `bash setup/setup-launch.sh` (LAUNCH.md
+Part B); after a reboot just verify, Part C.
 
 ### Paths: never hardcode the clone location
 
@@ -280,6 +293,21 @@ control** — toggling it does not affect MediaMTX or the camera's own feed, whi
 running regardless. This is a common point of confusion: the "local preview" (MediaMTX
 HLS) and the "KVS push" (cloud) are independent signals.
 
+### Live view: on the sub stream, on demand, ending by itself
+
+A camera recording its main stream gets a second MediaMTX path, `<path>_live` (e.g.
+`cam03_live`), pulling its sub stream continuously (local, free): the admin GUI's preview plays
+it. `adapter/live_view.py` keeps it in step with the registry field `liveRtspUrl` (present only
+when live ≠ recorded stream; `sync_mediamtx_paths.py` and `rematch_cameras.py` follow it). The
+cloud page's **Live** button is separate from Start/Stop ("Live" = watch, "Start" = record):
+it sends `live`, agent.py writes a deadline (now + 5 min) to `/run/user/<uid>/vms-live/<path>`
+and starts `kvs-live@<path>.service`, which pushes `_live` (or, with no sub stream, the recorded
+path) to the KVS stream `<camera>-live`. The page re-sends `live` every 2 min while visible.
+**The deadline is the cost guarantee:** the producer checks it on every loop pass and exits 0
+once it has passed, so `Restart=on-failure` leaves it stopped. Never use `RuntimeMaxSec=`
+for this — systemd counts that as a failure and restarts it. `get-hls-url?view=live` reads
+`<camera>-live`; clips and Start's player always use the recorded stream.
+
 ### The camera registry is the single source of truth — not a hardcoded list
 
 A DynamoDB table `cameras` (PK `cameraId`, e.g. `"cam-01"`) holds each camera's mode
@@ -292,6 +320,31 @@ MQTT control, all API routes) immediately, with no code change. IAM for
 camera-ARN-scoped actions (`kinesisvideo:*`, per-Lambda) uses a `stream/cam-*/*` wildcard
 rather than enumerated ARNs specifically so this stays true without an IAM edit per
 camera — a deliberate least-privilege tradeoff, not an oversight.
+
+**The table is shared with VMS** (same AWS account, and the same board via an SD-card swap,
+`VMS-PORT-PLAN.md` D1). The data contract: rows are updated **field by field**, never
+overwritten whole; new fields are fine, new values in an existing enum are not
+(`recordingMode` keeps exactly `manual`, `motion`, `cellMotion`, `human`); every clip row
+carries `cameraId`, `startTs`, `s3Key`, `labels`, `durationSec`, `videoCodec`; `list-cameras`
+never returns `rtspUrl` or `liveRtspUrl` (credentials). A camera registered from the other card
+has a row and a MediaMTX path here but no producer until it is re-registered here
+(`camera_control.has_producer`, status "no producer on this Pi").
+
+**Unregister** (admin GUI, ONVIF cameras only) is a soft mark, `unregisteredAt`
+(`camera_control.is_unregistered`): the row, KVS stream, clips and settings stay, so
+Re-register brings it back as it was. Every reader that acts on cameras must skip such a
+row — both GUIs, `list-cameras`, the agent (all but stop/live-stop), the outage supervisor
+(through its registry cache), the event watcher, `sync_mediamtx_paths.py` (no path, not in
+its cache), `rematch_cameras.py`, `codec_caps.py` — and every route or Lambda that changes a
+camera answers 409 for one. Unregister needs `systemctl disable`, which the sudo rule allows
+since #80. A new reader of the table must skip it too.
+
+**Recording triggers are per camera** (`adapter/onvif_events.py`): which ONVIF topic and
+on/off field serve each mode comes from the camera's own `GetEventProperties`, recorded as
+`detectionModes`/`detectionTopics`; a mode the camera doesn't publish is refused by both
+mode routes. Every ONVIF event subscription goes through `PullSubscription`, which renews
+and always unsubscribes — cameras have few slots (cam-03: 10), and a leaked subscription
+blocks VMS's card too (FoundAndFixed.md #65).
 
 Credential storage in that table is phased: currently a plain `onvifPassword` attribute
 (Phase 1); a planned Phase 2 moves it to an SSM Parameter Store `SecureString` referenced
