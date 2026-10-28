@@ -1,0 +1,86 @@
+<tev:GetEventPropertiesResponse xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:tns1="http://www.onvif.org/ver10/topics" xmlns:tnshik="http://www.hikvision.com/2011/event/topics" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2" xmlns:wstop="http://docs.oasis-open.org/wsn/t-1">
+  <tev:TopicNamespaceLocation>http://www.onvif.org/onvif/ver10/topics/topicns.xml</tev:TopicNamespaceLocation>
+  <wsnt:FixedTopicSet>true</wsnt:FixedTopicSet>
+  <wstop:TopicSet>
+    <tns1:RuleEngine>
+      <CellMotionDetector>
+        <Motion wstop:topic="true">
+          <tt:MessageDescription IsProperty="true">
+            <tt:Source>
+              <tt:SimpleItemDescription Name="VideoSourceConfigurationToken" Type="tt:ReferenceToken" />
+              <tt:SimpleItemDescription Name="VideoAnalyticsConfigurationToken" Type="tt:ReferenceToken" />
+              <tt:SimpleItemDescription Name="Rule" Type="xs:string" />
+            </tt:Source>
+            <tt:Data>
+              <tt:SimpleItemDescription Name="IsMotion" Type="xs:boolean" />
+            </tt:Data>
+          </tt:MessageDescription>
+        </Motion>
+      </CellMotionDetector>
+    </tns1:RuleEngine>
+    <tns1:VideoSource>
+      <MotionAlarm wstop:topic="true">
+        <tt:MessageDescription IsProperty="true">
+          <tt:Source>
+            <tt:SimpleItemDescription Name="Source" Type="tt:ReferenceToken" />
+          </tt:Source>
+          <tt:Data>
+            <tt:SimpleItemDescription Name="State" Type="xs:boolean" />
+          </tt:Data>
+        </tt:MessageDescription>
+      </MotionAlarm>
+    </tns1:VideoSource>
+    <tns1:Device>
+      <Trigger>
+        <tnshik:AlarmIn wstop:topic="true">
+          <tt:MessageDescription IsProperty="true">
+            <tt:Source>
+              <tt:SimpleItemDescription Name="AlarmInToken" Type="tt:ReferenceToken" />
+            </tt:Source>
+            <tt:Data>
+              <tt:SimpleItemDescription Name="State" Type="xs:boolean" />
+            </tt:Data>
+          </tt:MessageDescription>
+        </tnshik:AlarmIn>
+        <DigitalInput wstop:topic="true">
+          <tt:MessageDescription IsProperty="true">
+            <tt:Source>
+              <tt:SimpleItemDescription Name="InputToken" Type="tt:ReferenceToken" />
+            </tt:Source>
+            <tt:Data>
+              <tt:SimpleItemDescription Name="LogicalState" Type="xs:boolean" />
+            </tt:Data>
+          </tt:MessageDescription>
+        </DigitalInput>
+        <Relay wstop:topic="true">
+          <tt:MessageDescription IsProperty="true">
+            <tt:Source>
+              <tt:SimpleItemDescription Name="RelayToken" Type="tt:ReferenceToken" />
+            </tt:Source>
+            <tt:Data>
+              <tt:SimpleItemDescription Name="LogicalState" Type="tt:RelayLogicalState" />
+            </tt:Data>
+          </tt:MessageDescription>
+        </Relay>
+      </Trigger>
+    </tns1:Device>
+    <tns1:UserAlarm>
+      <tns1:IVA>
+        <tns1:HumanShapeDetect wstop:topic="true">
+          <tt:MessageDescription IsProperty="false">
+            <tt:Source>
+              <tt:SimpleItemDescription Name="VideoSourceConfigurationToken" Type="tt:ReferenceToken" />
+            </tt:Source>
+            <tt:Data>
+              <tt:SimpleItemDescription Name="State" Type="xsd:boolean" />
+            </tt:Data>
+          </tt:MessageDescription>
+        </tns1:HumanShapeDetect>
+      </tns1:IVA>
+    </tns1:UserAlarm>
+  </wstop:TopicSet>
+  <wsnt:TopicExpressionDialect>http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet</wsnt:TopicExpressionDialect>
+  <wsnt:TopicExpressionDialect>http://docs.oasis-open.org/wsn/t-1/TopicExpression/Concrete</wsnt:TopicExpressionDialect>
+  <tev:MessageContentFilterDialect>http://www.onvif.org/ver10/tev/messageContentFilter/ItemFilter</tev:MessageContentFilterDialect>
+  <tev:MessageContentSchemaLocation>http://www.onvif.org/ver10/schema/onvif.xsd</tev:MessageContentSchemaLocation>
+</tev:GetEventPropertiesResponse>
