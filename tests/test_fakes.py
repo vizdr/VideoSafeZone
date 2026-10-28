@@ -75,9 +75,55 @@ def test_conditions(condition, holds):
 def test_what_the_fake_table_does_not_model_fails_loudly():
     t = FakeTable([{"cameraId": "cam-02"}])
     with pytest.raises(NotImplementedError):
-        t.update_item(Key={"cameraId": "cam-02"}, UpdateExpression="REMOVE x")
+        t.update_item(Key={"cameraId": "cam-02"}, UpdateExpression="ADD n :one",
+                      ExpressionAttributeValues={":one": 1})
     with pytest.raises(NotImplementedError):
         t.scan(FilterExpression="x")
+
+
+@pytest.mark.parametrize("expression, row", [
+    ("SET a = :a REMOVE b, c", {"cameraId": "k", "a": 2, "d": 4}),
+    ("REMOVE b", {"cameraId": "k", "a": 1, "c": 3, "d": 4}),
+    ("SET a = :a REMOVE nothere", {"cameraId": "k", "a": 2, "b": 2, "c": 3, "d": 4}),  # a no-op
+])
+def test_set_and_remove(expression, row):
+    t = FakeTable([{"cameraId": "k", "a": 1, "b": 2, "c": 3, "d": 4}])
+    t.update_item(Key={"cameraId": "k"}, UpdateExpression=expression, ExpressionAttributeValues={":a": 2})
+    assert t.row("k") == row
+
+
+def test_scan_projection():
+    t = FakeTable([{"cameraId": "k", "displayName": "Hall", "onvifPassword": "x"}])
+    assert t.scan(ProjectionExpression="cameraId, displayName")["Items"] == [
+        {"cameraId": "k", "displayName": "Hall"}]
+
+
+def test_mediamtx_flowing_paths_grow_and_others_stall():
+    from fakes import path_state
+    m = FakeMediaMTX(state={"a": path_state(), "b": path_state()}, flowing={"a"})
+    first, second = (
+        {i["name"]: i["bytesReceived"] for i in m.get("http://127.0.0.1:9997/v3/paths/list").json()["items"]}
+        for _ in range(2))
+    assert second["a"] > first["a"] and second["b"] == first["b"]
+
+
+def test_mediamtx_on_write_sees_each_write():
+    seen = []
+    m = FakeMediaMTX(on_write=lambda *w: seen.append(w))
+    m.post("http://127.0.0.1:9997/v3/config/paths/add/x", json={"source": "s"})
+    m.patch("http://127.0.0.1:9997/v3/config/paths/patch/x", json={"source": "t"})
+    m.post("http://127.0.0.1:9997/v3/config/paths/add/x", json={})          # refused: not a write
+    assert seen == [("POST", "x", {"source": "s"}), ("PATCH", "x", {"source": "t"})]
+
+
+def test_fake_media2_applies_a_new_configuration():
+    from fakes import FakeMedia2, encoder_options, encoder_xml
+    import onvif_media2
+    cam = FakeMedia2("192.0.2.13", [("P0", "E0", "/main", encoder_xml())], {"E0": encoder_options("H264", "H265")})
+    cfg = onvif_media2.plan_config(cam.encoder_config("E0"), cam.encoder_options("E0"), "H265")
+    cam.set_encoder_config(cfg)
+    assert onvif_media2.summarize(cam.encoder_config("E0"))["encoding"] == "H265"
+    assert onvif_media2.stream_profile(cam, "rtsp://admin:pw@192.0.2.13/main")["encoderToken"] == "E0"
 
 
 def test_mediamtx_routes():

@@ -41,3 +41,8 @@ def load_lambda(name: str):
 def load_script(name: str):
     """adapter/bin/<name>.py, e.g. load_script("gap-fill")."""
     return _load(ROOT / "adapter" / "bin" / f"{name}.py", "script_" + name.replace("-", "_"))
+
+
+def load_admin():
+    """adapter/onvif-admin/app.py, the local admin GUI (Flask)."""
+    return _load(ROOT / "adapter" / "onvif-admin" / "app.py", "admin_app")

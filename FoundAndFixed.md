@@ -16,11 +16,11 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-84 entries, from the first build (2026-08-20) through the move onto a second Pi
+85 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
-2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 was found
-writing the first pytest suite (2026-10-28).
+2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
+found writing the pytest suite (2026-10-28).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -108,6 +108,7 @@ writing the first pytest suite (2026-10-28).
 | 82 | The new `list-cameras` answered 500: a Decimal it couldn't serialise | Lambda | 2026-10-25 | fixed before deploy |
 | 83 | Start Recording could run with nothing recording; it failed only at Stop Recording | cloud page | 2026-10-25 | fixed, page not yet deployed |
 | 84 | MediaMTX's duration parser reads `500ms` as 500 minutes | outage buffer | 2026-10-28 | fixed 2026-10-28 (latent; no live decision changed) |
+| 85 | An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud | admin GUI | 2026-10-28 | **open** — pinned by an `xfail` test |
 
 ### What they have in common
 
@@ -1482,3 +1483,25 @@ Anything else is None.
 
 **The rule:** parse a duration by unit token, the way the program that wrote it does, and
 check it against the values that program actually reports.
+
+### #85 — An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud
+
+**Found:** 2026-10-28, writing the admin GUI's tests (`PYTEST.md`, Phase 3), by comparing the
+GUI's routes with the Lambdas they mirror. **Referenced from:**
+`tests/admin/test_admin_routes.py` (`test_ff85_an_unknown_ir_mode_is_a_400`).
+
+`POST /api/cameras/<id>/ir` passes the mode straight to `camera_control.set_ir_mode()`. That
+function refuses anything but `AUTO`, `ON` and `OFF` with a `ValueError`, before any camera
+call. The route's catch-all then answers **500** with the message, so a bad request is reported
+as a server failure. The cloud's `publish-cmd` checks the mode itself and answers **400**
+("mode must be 'AUTO', 'ON', or 'OFF'").
+
+**Why it is minor:** both pages send only the three valid modes, and the camera is never
+touched; a test pins that too (`test_an_unknown_ir_mode_never_reaches_the_camera`). Only a
+direct API call sees the wrong status.
+
+**Status:** open, pinned by a strict `xfail` test, which turns the run red once the route
+answers 400.
+
+**The rule:** a route that mirrors a Lambda validates its input the same way, and answers a bad
+request with a 4xx, never through a catch-all 500.

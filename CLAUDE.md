@@ -206,8 +206,9 @@ outbound network use and every command but ctypes' read-only probes (`systemctl`
 `ffmpeg`…). It also moves the modules' absolute paths into `tmp_path`. A test that tries to
 escape fails, even when the code under test swallowed the error. Fake what a test needs with
 `tests/fakes.py` and its fixtures — `fake_run` (commands), `registry` (the `cameras` table on
-the Pi), `aws` (a Lambda's boto3: fake tables, Stubber-checked clients), `FakeMediaMTX` — and
-call API Lambdas through `invoke()`, which checks CORS (#8); never loosen a guard. The tests
+the Pi), `aws` (a Lambda's boto3: fake tables, Stubber-checked clients), `FakeMediaMTX`,
+`FakeMedia2` — call API Lambdas through `invoke()`, which checks CORS (#8), and admin GUI routes
+through the `gui` fixture (`tests/admin/`); never loosen a guard. The tests
 run on the live Pi, where
 MediaMTX answers on `127.0.0.1:9997` and `sudo systemctl start` costs money. Lambdas and
 the hyphen-named `adapter/bin/*.py` scripts are imported with `tests/loaders.py`.

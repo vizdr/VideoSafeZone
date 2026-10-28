@@ -208,7 +208,7 @@ class FakeRun:
         assert fake.calls == [["systemctl", "is-active", "kvs-cam01.service"]]
 
     A key is a prefix of the argv; the longest matching key wins; no match answers "" with
-    returncode 0.
+    returncode 0. An answer is stdout, or (stdout, returncode), or (stdout, returncode, stderr).
     """
 
     def __init__(self, answers):
@@ -220,26 +220,28 @@ class FakeRun:
         self.calls.append(argv)
         best = max((k for k in self.answers if tuple(argv[:len(k)]) == k), key=len, default=None)
         answer = self.answers.get(best, "")
-        returncode = 0
+        returncode, stderr = 0, ""
         if isinstance(answer, tuple):
-            answer, returncode = answer
+            answer, returncode, stderr = (answer + ("",))[:3]
         if kwargs.get("check") and returncode:
-            raise subprocess.CalledProcessError(returncode, argv, answer)
-        return subprocess.CompletedProcess(argv, returncode, stdout=answer, stderr="")
+            raise subprocess.CalledProcessError(returncode, argv, answer, stderr)
+        return subprocess.CompletedProcess(argv, returncode, stdout=answer, stderr=stderr)
 
 
 @pytest.fixture
 def fake_run(monkeypatch):
-    """fake_run(module, answers) -> FakeRun, replacing `module.subprocess.run` for one test.
-    For a module that imports subprocess at module level; one that imports it inside a function
-    (outage_buffer._systemd_active_state) is faked by patching that function instead."""
+    """fake_run(module, answers) -> FakeRun, replacing `module.subprocess.run` for one test;
+    `module` may be a tuple of modules sharing one FakeRun, so `calls` shows their commands in
+    order. For modules that import subprocess at module level; one that imports it inside a
+    function (outage_buffer._systemd_active_state) is faked by patching that function instead."""
     # The module's own `subprocess` name is replaced, not subprocess.run, so the fake stays out
     # of every other module, pytest's included; CompletedProcess, PIPE... stay real.
     from fakes import ModuleShim
 
-    def install(module, answers=None):
+    def install(modules, answers=None):
         fake = FakeRun(answers)
-        monkeypatch.setattr(module, "subprocess", ModuleShim(subprocess, run=fake))
+        for module in modules if isinstance(modules, tuple) else (modules,):
+            monkeypatch.setattr(module, "subprocess", ModuleShim(subprocess, run=fake))
         return fake
     return install
 
@@ -249,14 +251,48 @@ def registry(monkeypatch):
     """registry(rows, *modules, page_size=None) -> FakeTable: the `cameras` table as
     aws_device_creds.get_session() serves it (PYTEST.md, Phase 2). Covers every module that
     imports get_session inside a function; a module that bound its own name at import
-    (event_watcher, app.py) is passed in `modules` and patched too."""
+    (event_watcher, app.py) is passed in `modules` and patched too.
+
+    The session is a FakeBoto3, at `table.session`: queue AWS client answers on
+    table.session.stub("kinesisvideo"); one left unused fails the test afterwards."""
     import aws_device_creds
-    from fakes import FakeSession, FakeTable
+    from fakes import FakeBoto3, FakeTable
+    sessions = []
 
     def install(rows=(), *modules, page_size=None):
         table = FakeTable(rows, page_size=page_size)
-        session = FakeSession(cameras=table)
+        table.session = FakeBoto3(cameras=table)
+        sessions.append(table.session)
         for module in (aws_device_creds, *modules):
-            monkeypatch.setattr(module, "get_session", lambda *a, **k: session)
+            monkeypatch.setattr(module, "get_session", lambda *a, **k: table.session)
         return table
-    return install
+    yield install
+    for session in sessions:
+        session.verify()
+
+
+@pytest.fixture
+def aws(monkeypatch):
+    """aws(lambda_module, cameras=[...], clips=[...], page_size=None) -> FakeBoto3: the fake AWS a
+    Lambda handler runs against (PYTEST.md, Phase 2). Here rather than in tests/cloud, because the
+    admin GUI's tests compare its routes with the Lambdas they mirror.
+
+    Replaces the module's `boto3` and its module-level `cameras_table`. Queue client answers with
+    fake.stub("s3").add_response(...); a queued answer left unused fails the test afterwards, so
+    a call the handler should have made and didn't is caught too.
+    """
+    made = []
+
+    def install(lam, cameras=(), clips=(), page_size=None):
+        from fakes import FakeBoto3, FakeTable
+        fake = FakeBoto3(cameras=FakeTable(cameras, page_size=page_size),
+                         clips=FakeTable(clips, range_key="startTs", page_size=page_size))
+        monkeypatch.setattr(lam, "boto3", fake)
+        if hasattr(lam, "cameras_table"):
+            monkeypatch.setattr(lam, "cameras_table", fake.tables["cameras"])
+        made.append(fake)
+        return fake
+
+    yield install
+    for fake in made:
+        fake.verify()

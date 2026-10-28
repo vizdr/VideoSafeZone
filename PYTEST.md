@@ -5,11 +5,14 @@ what the tests cover, and the phases still to come. Like `VMS-PORT-PLAN.md`, it 
 record. Bugs the tests find go to `FoundAndFixed.md` as usual, and this file cites them as
 `#N`.
 
-**Status (2026-10-28):** Phases 1 and 2 are done, and the one bug they found (#84) is fixed.
-The suite has 614 tests, all passing, in about 10 s on the Pi; GitHub Actions runs it on every
-push. Phase 1 (steps 1–8) set the suite up and tested the pure logic. Phase 2 (its own section,
-below) tests behaviour against fakes of AWS, MediaMTX, systemd and the network. Phases 3–4 are
-under "Next phases".
+**Status (2026-10-28):** Phases 1–3 are done. The suite has 847 tests: 846 pass and 1 is an
+expected failure (#85, open). It runs in about 13 s on the Pi, and GitHub Actions runs it on
+every push.
+- **Phase 1** (steps 1–8) set the suite up and tested the pure logic. It found #84, since fixed.
+- **Phase 2** tests behaviour against fakes of AWS, MediaMTX, systemd and the network.
+- **Phase 3** tests the local admin GUI's routes, and found #85.
+
+Phase 4 is under "Next phases".
 
 ```bash
 venv-adapter/bin/python -m pytest                 # everything
@@ -221,7 +224,7 @@ installed on the one module under test, never globally.
 | `ModuleShim` | a module as one module sees it (`time`, `socket`, `os`, `subprocess`) | Only the named attributes change; everything else is the real module, and nothing outside the module under test is touched (pytest's own `time` included) |
 | `FakeClock` | `time.monotonic()` | Moves only when told to, so a 60 s grace period takes no time |
 | `FakeTable` | a DynamoDB table | Pages scans and queries (with `page_size`, as the 1 MB limit does) and orders queries by the range key. `SET` updates, conditions (`=`, `attribute_[not_]exists`, `AND`) and `ConditionalCheckFailedException` are modelled; anything else raises `NotImplementedError` instead of answering |
-| `FakeSession` | `aws_device_creds.get_session()` | Serves the fake `cameras` table to code that reads the registry from the Pi |
+| `FakeSession` (since Phase 3: `FakeBoto3`) | `aws_device_creds.get_session()` | Serves the fake `cameras` table to code that reads the registry from the Pi; as a `FakeBoto3`, it can also create stubbed clients (the admin GUI creates KVS streams) |
 | `FakeBoto3` | the `boto3` a Lambda imports | Tables are `FakeTable`s. **Clients are real botocore clients with botocore's own `Stubber`**: every call is checked against the AWS service model and against the parameters the test expects, and is answered from a queue, never sent. A client is built with the Lambda's own arguments (`endpoint_url`), so a presigned URL's host is the Lambda's choice, not the fake's. An answer left unused fails the test |
 | `FakeMediaMTX` | MediaMTX's control API, as the `requests` module a module sees | Path configs, runtime state and successive `/v3/paths/list` snapshots. POST on the delete route answers 404, as MediaMTX does (#36). `down=True` refuses every connection |
 | `invoke()` | API Gateway calling a Lambda | **Asserts the CORS header on every answer**, errors included. Without it the browser can't read the response, and `fetch()` throws a bare `NetworkError` (#8) |
@@ -236,7 +239,7 @@ checked conditions wrongly would let the tests built on it pass for the wrong re
 - **`registry(rows, *modules)`** (in `tests/conftest.py`) serves a `FakeTable` through
   `get_session()`. A module that bound its own `get_session` at import, like `event_watcher`, is
   passed in `modules`.
-- **`aws(lambda_module, cameras=…, clips=…)`** (in `tests/cloud/conftest.py`) installs `FakeBoto3`
+- **`aws(lambda_module, cameras=…, clips=…)`** (in `tests/conftest.py` since Phase 3, which compares GUI routes with Lambdas) installs `FakeBoto3`
   on a Lambda, replaces its module-level `cameras_table`, and checks after the test that every
   queued AWS answer was used.
 
@@ -294,9 +297,93 @@ boolean check, because it equals 1, which isn't a valid limit. `false` equals 0,
     makes a 4 s window. That behaviour is now pinned by a test.
 - **CI rehearsal** (as in step 7, fresh venv and stripped copy): 614 passed.
 
-## Found while writing the tests, and fixed
+## Phase 3 — the admin GUI
 
-**#84: `mediamtx_api._dur_secs("500ms")` returned 30 000 s.** It parsed one character at a
+`adapter/onvif-admin/app.py` is the largest file (1,380 lines) and the one that touches
+everything at once: one registration adds a MediaMTX path, provisions a systemd unit, asks the
+camera, creates a KVS stream and writes the registry, in an order that matters and with
+rollbacks. Phase 3 runs the real Flask app, through its test client, with everything around it
+faked.
+
+### P3.1 — the `gui` fixture (`tests/admin/conftest.py`, `tests/gui_world.py`)
+
+`gui(rows=…, producers=…, active=…, mtx=…, camera=…, detection=…, rtsp=…, run=…)` sets up the
+world around the app and returns handles:
+
+| Handle | What it is |
+|---|---|
+| `client`, `get`, `post`, `delete` | Flask's test client; `get`/`post`/`delete` return (status, JSON body). `app.testing` is on, so an unhandled exception fails the test instead of turning into a 500 |
+| `table` | the `cameras` FakeTable, from the `registry` fixture; `table.session.stub("kinesisvideo")` queues KVS answers |
+| `mtx` | a `FakeMediaMTX` |
+| `system` | **one** FakeRun behind `app`, `camera_control` and `live_view`: every `sudo`, `systemctl` and `ffprobe` command, in the order they ran. A stopped unit reads `inactive`, as from systemctl |
+| `clock` | a FakeClock behind `app`'s and `mediamtx_api`'s `time`: the GUI's waits (15 s for video at registration, 45 s for a codec switch, 30 s for a frame rate) cost no real time |
+| `camera` | what `onvif_media2.for_camera()` and `Media2()` return: a `FakeMedia2` (`media2(host, …)`: a main stream on encoder E0 and a sub stream on E1), or by default a camera that doesn't answer |
+
+The camera's RTSP DESCRIBE (`onvif_discovery._describe`) and its event list (`app._read_detection`)
+are faked at their single call sites. `tests/gui_world.py` holds the registry the tests start
+from (cam-01 USB, cam-02, cam-03 recording main with live view on sub, cam-05 unregistered) and
+the camera builder. It is a plain module because a conftest can't be imported by name.
+
+The fakes grew for this phase, each with a test in `test_fakes.py` (now 23):
+- `FakeTable`: `SET … REMOVE …` updates, and scans with a projection.
+- `FakeMediaMTX`: `flowing` paths whose byte counters keep growing, and an `on_write` hook that
+  lets a test play MediaMTX reconnecting to a new source.
+- `FakeMedia2` and `encoder_xml`/`encoder_options`: a camera's Media2 service, whose
+  `set_encoder_config` is applied and can move the wire through `on_set`.
+- `fake_run` can share one FakeRun across several modules, and answer with a stderr.
+- The `aws` fixture moved to the top-level conftest, and `registry` now serves a `FakeBoto3`, so
+  GUI code can create KVS streams through it.
+
+### P3.2 — the tests
+
+| File | Tests | What it covers | Bugs |
+|---|---:|---|---|
+| `admin/test_admin_routes.py` | 105 | The camera list (**no password, no URI login, in any form**; preview path, wire codec, `flowing` from bytes; unregistered cameras listed, marked). Scan (an empty password logs in). **Status from the local cache with AWS down.** Start/Stop to the right unit family, never enabled; refused for an unregistered camera, and without a producer. IR. Display-name rules. **The three settings shared with the cloud: 54 cases, each sent to both the GUI route and its Lambda, must agree on accepted/refused and leave the same row** | #7, #37, #50, #56, #65, #67, #81, #85 |
+| `admin/test_admin_registration.py` | 36 | **A new camera end to end**: both MediaMTX paths, provisioned and started, KVS streams (recorded and live), the row with every field, detection and the live view recorded, the offline path cache refreshed. The default codec from the wire; waiting for video; an unreachable camera registered conservatively; an existing KVS stream reused; the RTSP login put into the URI, or refused before anything is created. **Failed provisioning rolls back with DELETE.** Every validation before any change. **Re-registration**: a rescan that changes nothing writes nothing to MediaMTX or systemd; the row updated field by field; a moved camera followed (both paths); query credentials kept; an unregistered camera brought back; a camera from the other card provisioned *not started*; **cam-02 never re-provisioned**. **Unregister**: the row and its fields kept; stop, disable, stop live, in that order; both paths deleted; the cache without it; twice is a no-op; MediaMTX down still marks and stops | #36, #60, #67, #69, #80, #81 |
+| `admin/test_admin_detection.py` | 31 | The event list read and recorded only when changed; an unreachable camera shows what was recorded. **The trigger test against a scripted camera**: a detection during the walk counts; the opening report is the state at the start; `Initialized` never counts and `Changed` always does; a detection in another field than declared counts; other topics counted apart; it ends when every trigger fired; the outcome merged into `detectionTests`; a stopped test records only what it saw; the subscription is always given back. Its routes (one at a time, countdown, length limits). Analytics, read-only | #65, #68 |
+| `admin/test_admin_codec_stream.py` | 44 | **Codec**: the USB camera's shown, not offered; a stale registry corrected from the wire once; a switch proved on the wire, at the wire's picture size, the producer left running; a codec already on the wire leaves the camera alone; a switch the wire never shows is a 504. **Stream**: main → sub moves recording, the registry written before MediaMTX, and live view returns to the recorded stream; sub → main sets live view up on sub; a failed MediaMTX update rolls the registry back. **Frame rate**: set on the camera, counted on MediaMTX's copy with ffprobe; a camera sending fewer frames is reported, not rolled back. `_measure_fps` parsing and tolerance | #44, #50, #69 |
+| `adapter/test_live_view.py` | 10 | `live_uri` (only main-plus-sub gets one; credentials carried); `apply`: set up from nothing, an unchanged camera writes nothing, a moved sub stream patches only its path, removal stops the live producer and keeps the KVS stream | — |
+
+### P3.3 — proving the tests catch regressions
+
+| Put back in a scratch copy | Result |
+|---|---|
+| Registration rollback deletes the path with POST (#36) | 1 failed, 1 error |
+| A camera from the other card provisioned *and started* (#81) | 1 failed |
+| cam-02 re-provisioned | 1 failed |
+| Re-registration always patches the source | 2 failed |
+| The camera list echoes the ONVIF password | 1 failed |
+| Status asks DynamoDB on every poll (#56) | 1 failed |
+| Unregister doesn't disable the unit (#80) | 2 failed |
+| Start allowed for an unregistered camera | 1 failed |
+| The GUI's mode route ignores the camera's event list (#65) | 1 failed (the GUI-vs-Lambda check) |
+| The trigger test counts `Initialized` messages (#68) | 1 failed |
+| A codec switch takes the camera's stale picture size | 1 failed |
+| A failed stream switch doesn't roll the registry back | 1 failed |
+| Display names compared case-sensitively | 2 failed |
+| Frame rate measured from the camera instead of MediaMTX's copy | 1 failed |
+| live_view rewrites an unchanged registry row | 1 failed |
+
+All 15 caught.
+
+### P3.4 — what Phase 3 showed
+
+- **#85**: an unknown IR mode got a 500 from the GUI's route, where the cloud's `publish-cmd`
+  answers 400. The camera is never touched (tested). It is pinned by a strict `xfail` and left
+  open; see "Found while writing the tests".
+- **The GUI and the Lambdas agree** on every one of the 54 shared-settings cases. They answer
+  an unknown camera differently, 404 against 400, by design (REST-style routes against one
+  Lambda per action).
+- **Mistakes in the tests, not the code**, caught by running them:
+  - a sloppy expression passed a working camera where an unreachable one was meant;
+  - the fake camera stored a new configuration under the wrong token;
+  - the `aws` fixture wasn't visible outside `tests/cloud`.
+- **CI rehearsal** (fresh venv, stripped copy, empty environment): 846 passed, 1 expected
+  failure, the same as the working tree.
+
+## Found while writing the tests
+
+**#84 (fixed): `mediamtx_api._dur_secs("500ms")` returned 30 000 s.** It parsed one character at a
 time, so the `m` of `ms` meant minutes. The bug was latent: only `recordDeleteAfter` and
 `recordSegmentDuration` are compared, and for an armed path MediaMTX reports both in whole
 units. It was first pinned with a strict `xfail` test, then fixed the same day at the user's
@@ -313,12 +400,24 @@ request.
   (`systemctl --user restart kvs-outage-buffer`). Nothing is urgent, since its decisions
   don't change.
 
+**#85 (open): an unknown IR mode got a 500 from the admin GUI, a 400 from the cloud.** Found
+in Phase 3 by comparing the GUI's routes with the Lambdas they mirror. `POST
+/api/cameras/<id>/ir` lets `camera_control.set_ir_mode()`'s `ValueError` reach its catch-all
+500; `publish-cmd` checks the mode itself and answers 400. The camera is never touched, and
+both pages send only valid modes, so only a direct API call sees it. Pinned by the strict
+`xfail` `test_ff85_an_unknown_ir_mode_is_a_400`. The fix is a mode check in the route, as in
+`publish-cmd`.
+
 ---
 
 ## Conventions for new tests
 
-- **One file per module**, in `tests/adapter/` or `tests/cloud/`. Each file's docstring says
-  what it covers and cites `PYTEST.md`.
+- **One file per module**, in `tests/adapter/` or `tests/cloud/`; the admin GUI, one file per
+  group of routes, in `tests/admin/`. Each file's docstring says what it covers and cites
+  `PYTEST.md`.
+- **Test an admin GUI route through `gui(...)`** (P3.1), and check what reached each fake:
+  `g.table`, `g.mtx.writes()`, `g.system.calls`. A route that mirrors a Lambda gets a case in
+  the GUI-vs-Lambda check in `test_admin_routes.py`.
 - **A bug fixed in Python logic gets a regression test**, `test_ffNN_<what>`, in the same
   change as its `FoundAndFixed.md` entry. Check that the test fails without the fix (step 6
   shows how).
@@ -348,12 +447,6 @@ request.
 ---
 
 ## Next phases
-
-**Phase 3 — the admin GUI routes.** Flask's `test_client()`, with the registry (`registry`,
-passing `app` as a module), MediaMTX (`FakeMediaMTX`), `systemctl` (`fake_run`) and
-`provision-camera.sh` faked. It covers camera ID validation, 409 for an
-unregistered camera, cam-01/cam-02 never re-provisioned, and Unregister disabling the unit
-(#80). `app.py` is 1,380 lines, so this is the largest phase.
 
 **Phase 4 — `agent.py` (D2).** Move the connection block at the end of the file into `main()`,
 behind `if __name__ == "__main__"`. The service behaves the same, but `on_message` and
