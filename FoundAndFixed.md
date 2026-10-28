@@ -16,10 +16,11 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-83 entries, from the first build (2026-08-20) through the move onto a second Pi
+84 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
-2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day.
+2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 was found
+writing the first pytest suite (2026-10-28).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -106,6 +107,7 @@ project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 
 | 81 | GUI-registered producers started at boot, pushing to KVS unattended | provisioning / cost | 2026-10-25 | fixed |
 | 82 | The new `list-cameras` answered 500: a Decimal it couldn't serialise | Lambda | 2026-10-25 | fixed before deploy |
 | 83 | Start Recording could run with nothing recording; it failed only at Stop Recording | cloud page | 2026-10-25 | fixed, page not yet deployed |
+| 84 | MediaMTX's duration parser reads `500ms` as 500 minutes | outage buffer | 2026-10-28 | fixed 2026-10-28 (latent; no live decision changed) |
 
 ### What they have in common
 
@@ -1441,3 +1443,42 @@ can leave the button on for up to a minute; Stop Recording then saves whatever t
 **The rule:** a control that needs footage in the cloud is gated by what KVS reports, not by
 what the page last asked for. The producer may have been started from the admin GUI, or may
 never have started at all.
+
+### #84 — MediaMTX's duration parser reads `500ms` as 500 minutes
+
+**Found:** 2026-10-28, while writing the first pytest suite (`PYTEST.md`, step 5).
+**Referenced from:** `adapter/mediamtx_api.py` (`_dur_secs`),
+`tests/adapter/test_mediamtx_api.py` (`test_ff84_milliseconds_are_not_minutes`).
+
+`mediamtx_api._dur_secs()` turns the durations MediaMTX reports into seconds, so the outage
+supervisor's reconcile check compares values instead of strings ("2m" comes back as "2m0s").
+It read one character at a time: the `m` of `ms` multiplied by 60, and the `s` that followed
+added nothing. So `500ms` read as 30 000 s. The same approach had further faults:
+- a microsecond or nanosecond value read as 0;
+- a number with no unit (`30`) read as 0, where Go refuses it;
+- `1.2.3s` raised `ValueError` instead of returning None;
+- MediaMTX's own day unit read as unreadable. Its path defaults report
+  `"recordDeleteAfter": "1d"`, and the global config reports `hlsPartDuration: "200ms"`,
+  which the old parser read as 12 000 s.
+
+**Why it was latent:** only `recordDeleteAfter` and `recordSegmentDuration` are compared.
+For an armed path, those are always `0s` (or `""`) and `30s`. An unarmed path is decided by
+the `record` flag before either duration is read. Had a sub-second value been compared, the
+check would never have matched, and the reconcile loop would have re-patched the path every
+5 s. That is the symptom the parsed comparison was written to stop.
+
+**Fix:** parse term by term, as Go's `time.ParseDuration` does. The units are `ns`, `us`/`µs`,
+`ms`, `s`, `m`, `h`, plus MediaMTX's `d`, and `ms` is tried before `m`. The terms are summed in
+whole nanoseconds, so two spellings of one value (`1500ms`, `1.5s`) compare exactly equal.
+Anything else is None.
+
+**Verified** (2026-10-28):
+- 52 unit tests pass, 18 of which fail against the old parser.
+- Read-only against the live MediaMTX v1.20.1: every duration it reports (`200ms` … `1d`)
+  parses correctly.
+- `recording_conf_matches` gives the same answer from the old and new parser for every path
+  (cam01–cam04, `all_others`), whether off or armed is wanted. So the running supervisor's
+  decisions don't change; it loads the fix at its next restart.
+
+**The rule:** parse a duration by unit token, the way the program that wrote it does, and
+check it against the values that program actually reports.

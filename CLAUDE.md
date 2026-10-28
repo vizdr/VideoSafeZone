@@ -19,7 +19,9 @@ single source of truth for *why* things are built the way they are** — a narra
 of the real build and its design decisions, updated continuously as the system evolves.
 **`FoundAndFixed.md` holds every defect found in this project** — symptom, cause,
 diagnosis, fix — as permanently numbered entries; the other docs keep only the rule a bug
-left behind plus a `FoundAndFixed.md #N` reference. `LAUNCH.md` is the short operational runbook (what to
+left behind plus a `FoundAndFixed.md #N` reference. `START.md` says where the system starts: the first install, the
+boot order of the services, and the path from a Start press down to the producer. `LAUNCH.md` is
+the short operational runbook (what to
 actually run, in order, assuming the guide has already been followed once) — check it
 first for "how do I start/stop/verify this." Its Part A is the fresh-SD-card setup, which
 is scripted: `setup/setup-all.sh` runs `setup/setup-{system,user,sdk,identity,launch}.sh`
@@ -39,7 +41,9 @@ behind per-camera H.264/H.265 selection (guide §21): hardware, camera, KVS and 
 measurements, and the decisions they led to. `VMS-PORT-PLAN.md` is the plan for porting VMS's
 fixes and features (written in VMS as `SUCCESSOR-PLAN.md`): its decisions D1–D5, phases and
 the VMS→successor bug-number mapping (this repository's #52–#75 = VMS's #51–#74); its
-"Applicability" section says how far the round got. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
+"Applicability" section says how far the round got. `PYTEST.md` records how the pytest suite
+was introduced, step by step, its safety guards and the phases still to come — read it before
+adding tests. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
 may be stale relative to the current guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
 demo is modeled on. **When in doubt about current architecture or "why is it done this
 way," read `Demo-AWS-Video-revCosts4.md` (or grep it for the relevant §-number) before
@@ -51,8 +55,12 @@ real failure that motivated one is the `FoundAndFixed.md` entry it cites.
 `FoundAndFixed.md #N` wherever the resulting rule is documented — don't retell the story
 in the guide, LAUNCH, README or the feature docs.
 
-There is no build system, package manifest, or automated test suite. Verification is
-done live, against the running Pi and AWS account — see "Verifying changes" below.
+There is no build system. `requirements.txt` lists what `venv-adapter` needs and
+`requirements-test.txt` adds pytest. The **pytest suite** (`tests/`, `PYTEST.md`) checks the
+Python logic offline. It runs on the Pi and in GitHub Actions, with AWS, the network, systemd
+and MediaMTX all faked or blocked. It does not replace live verification: media, pipelines
+and the cloud path are still verified against the running Pi and AWS account — see
+"Verifying changes" below.
 
 ## Commands
 
@@ -185,6 +193,29 @@ selectors (`CAM_MATCH`, `CAM_DEVICE`, `CAPS`, `V4L2_*_CTRLS`) go in
 the current tuning as defaults in the script. Hardware choice must stay local, never in
 the DynamoDB registry: cam-01 has to start while AWS is unreachable.
 `detect-hw.sh --print` shows what would be used.
+
+### Tests (pytest)
+
+```bash
+venv-adapter/bin/python -m pytest              # everything, a few seconds
+venv-adapter/bin/python -m pytest tests/cloud  # one folder; -k <name> for one test
+```
+`tests/conftest.py` sets up the guards before any project module is imported. It gives
+`config.py` a fake identity (`tests/fixtures/adapter.env`) and boto3 fake keys. It blocks
+outbound network use and every command but ctypes' read-only probes (`systemctl`, `sudo`,
+`ffmpeg`…). It also moves the modules' absolute paths into `tmp_path`. A test that tries to
+escape fails, even when the code under test swallowed the error. Fake what a test needs with
+`tests/fakes.py` and its fixtures — `fake_run` (commands), `registry` (the `cameras` table on
+the Pi), `aws` (a Lambda's boto3: fake tables, Stubber-checked clients), `FakeMediaMTX` — and
+call API Lambdas through `invoke()`, which checks CORS (#8); never loosen a guard. The tests
+run on the live Pi, where
+MediaMTX answers on `127.0.0.1:9997` and `sudo systemctl start` costs money. Lambdas and
+the hyphen-named `adapter/bin/*.py` scripts are imported with `tests/loaders.py`.
+
+**When you fix a bug in Python logic, add a regression test** named
+`test_ffNN_<what>` for its `FoundAndFixed.md #NN`, and check that it fails without the fix.
+A known defect left unfixed gets a strict `xfail` test citing its number, which turns red
+once the defect is fixed.
 
 ### Verifying changes
 

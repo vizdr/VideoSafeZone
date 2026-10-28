@@ -13,7 +13,9 @@ Recreating a path disconnects every reader -- a running KVS producer included. T
 fields used by the outage buffer ARE in that whitelist; `source` is NOT. So changing a
 camera's source URI costs a reconnect and changing its recording settings does not.
 """
+import re
 import time
+from decimal import Decimal
 
 import requests
 
@@ -236,22 +238,41 @@ def recording_conf_matches(path: str, on: bool, record_path: str = None,
 
 def _dur_eq(a: str, b: str) -> bool:
     # MediaMTX normalises durations on read: "30s" comes back as "30s" but "2m" becomes
-    # "2m0s" and "1h" becomes "1h0m0s". Compare parsed seconds, not strings, or the
-    # reconcile loop patches the same value forever.
+    # "2m0s", "1h" becomes "1h0m0s", and the path defaults' cleaner comes back as "1d". Compare
+    # parsed seconds, not strings, or the reconcile loop patches the same value forever.
     return _dur_secs(a) == _dur_secs(b)
 
 
+# One term of a duration: a decimal number and its unit. Go's units, as time.ParseDuration reads
+# them ("us", or "µ"/"μ" + "s"), plus MediaMTX's own "d", which it accepts and also reports: the
+# path defaults come back as "recordDeleteAfter": "1d". "ms" is listed before "m" and "s", so it is
+# never read as minutes followed by seconds.
+_DUR_TERM = re.compile(r"(\d+\.?\d*|\.\d+)(ns|us|µs|μs|ms|s|m|h|d)")
+_DUR_UNIT_NS = {"ns": 1, "us": 10**3, "µs": 10**3, "μs": 10**3, "ms": 10**6, "s": 10**9,
+                "m": 60 * 10**9, "h": 3600 * 10**9, "d": 86400 * 10**9}
+
+
 def _dur_secs(s) -> float | None:
+    """Seconds in a duration as MediaMTX reports it ("30s", "2m0s", "1h0m0s", "200ms", "1d"), or
+    None when it is empty or can't be read.
+
+    Term by term, as Go parses it. The first version went one character at a time, so the "m" of
+    "ms" counted minutes and "500ms" came out as 30 000 s (FoundAndFixed.md #84). Summed in whole
+    nanoseconds, as Go stores a duration, so two spellings of one value ("1500ms", "1.5s") compare
+    exactly equal.
+    """
     if not s:
         return None
-    total, num = 0.0, ""
-    for ch in str(s):
-        if ch.isdigit() or ch == ".":
-            num += ch
-        else:
-            mult = {"h": 3600, "m": 60, "s": 1, "µ": 0, "n": 0}.get(ch)
-            if mult is None:
-                return None
-            total += float(num or 0) * mult
-            num = ""
-    return total
+    text = str(s).strip()
+    sign = -1 if text[:1] == "-" else 1
+    text = text[1:] if text[:1] in "+-" else text
+    if text == "0":                      # the one unitless duration Go accepts
+        return 0.0
+    total_ns, pos = 0, 0
+    while pos < len(text):
+        term = _DUR_TERM.match(text, pos)
+        if not term:
+            return None
+        total_ns += int(Decimal(term.group(1)) * _DUR_UNIT_NS[term.group(2)])
+        pos = term.end()
+    return sign * total_ns / 10**9 if pos else None

@@ -1045,8 +1045,8 @@ pip install awsiotsdk
 ```
 
 (`awsiotsdk` is all this phase needs. The adapter as it stands — registry, ONVIF,
-discovery, admin GUI — needs the full set: `boto3 awsiotsdk onvif-zeep-async WSDiscovery
-flask requests lxml`, `LAUNCH.md` A4.)
+discovery, admin GUI — needs the full set, listed once in `requirements.txt`: `pip install
+-r requirements.txt`, `LAUNCH.md` A4.)
 
 `agent.py` — subscribe to a command topic, drive systemd, report state, and publish a
 Last Will so the cloud sees ungraceful disconnects:

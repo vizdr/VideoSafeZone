@@ -1,0 +1,42 @@
+# Runs the pytest suite on every push and pull request (PYTEST.md, step 7).
+#
+# No AWS credentials, secrets or OIDC role, on purpose: every test fakes AWS, and tests/conftest.py
+# blocks the network and gives boto3 fake keys, so there is nothing here that could reach the
+# account shared with VMS. Nothing is deployed from here either -- deploys stay cloud/deploy.sh,
+# run by hand (CLAUDE.md).
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    # x86, while the Pi is arm64: the code under test is plain Python, and every package in
+    # requirements.txt has wheels for both.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"     # the Pi's (Raspberry Pi OS trixie) and the Lambdas' runtime
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-test.txt
+
+      - name: Install the packages venv-adapter has
+        run: python -m pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Run the tests
+        run: python -m pytest

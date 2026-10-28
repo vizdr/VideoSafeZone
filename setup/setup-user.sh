@@ -53,7 +53,9 @@ ok "~/.bashrc carries the block (new terminals see it; this one: source ~/.bashr
 # ---------------------------------------------------------------- A4 venv
 step "A4  Python venv"
 [ -x "$VENV/bin/python3" ] || python3 -m venv "$VENV"
-"$VENV/bin/pip" install -q boto3 awsiotsdk onvif-zeep-async WSDiscovery flask requests lxml
+# requirements.txt is the one list of what adapter/ imports (CI installs the same, #27);
+# requirements-test.txt adds pytest (PYTEST.md).
+"$VENV/bin/pip" install -q -r "$VMS_HOME/requirements.txt" -r "$VMS_HOME/requirements-test.txt"
 ok "$("$VENV/bin/python3" --version) in $VENV"
 
 # ---------------------------------------------------------------- A5 MediaMTX
@@ -218,6 +220,7 @@ ok "$CHANGED unit file(s) written; all reloaded"
 step "proofs"
 proof "venv imports every module adapter/ needs" \
   "$VENV/bin/python3" -c "import boto3, awsiot, awscrt, flask, requests, lxml, onvif, wsdiscovery"
+proof "pytest in the venv (PYTEST.md)"         "$VENV/bin/python3" -m pytest --version
 proof "ONVIF WSDLs found with VMS_HOME unset (as under systemd)" \
   env -u VMS_HOME "$VENV/bin/python3" -c "import sys, os; sys.path.insert(0, '$VMS_HOME/adapter'); import camera_control as c; assert os.path.isdir(c.WSDL_DIR)"
 proof "MediaMTX $MEDIAMTX_VERSION"            bash -c "'$VMS_HOME/mediamtx/mediamtx' --version | grep -qx $MEDIAMTX_VERSION"

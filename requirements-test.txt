@@ -1,0 +1,4 @@
+# The test runner, installed into venv-adapter beside requirements.txt (PYTEST.md, step 1).
+# Nothing else on purpose: AWS is faked with small stand-ins and botocore's own Stubber, not moto,
+# which would pull a large dependency tree onto the Pi.
+pytest>=8

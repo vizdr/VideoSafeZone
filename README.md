@@ -247,6 +247,8 @@ cloud/iam/          one policy document per role
 cloud/iot/          IoT rules and thing policy
 mediamtx/           MediaMTX binary and config
 measurements/       recorded results, not prose
+tests/              pytest suite: offline, AWS and the Pi faked (PYTEST.md)
+requirements.txt    what venv-adapter needs; requirements-test.txt adds pytest
 ```
 
 **A naming quirk worth knowing before reading the code:** the camera identifier is
@@ -265,6 +267,8 @@ point — getting it wrong twice made Start/Stop silently do nothing (`FoundAndF
 | [`Demo-AWS-Video-revCosts4.md`](Demo-AWS-Video-revCosts4.md) | **The canonical build guide.** A narrative log of the real build and the design decisions. When in doubt about *why* something is built a certain way, read this |
 | [`FoundAndFixed.md`](FoundAndFixed.md) | Every defect found so far — symptom, cause, fix — numbered; other docs cite them as `#N` |
 | [`LAUNCH.md`](LAUNCH.md) | Operational runbook — fresh-card setup (scripted), launch, verification, deploys |
+| [`START.md`](START.md) | Where the system starts: first install, every boot (which services, in which order), and what a Start press runs, down to the producer |
+| [`PYTEST.md`](PYTEST.md) | How the pytest suite was introduced, step by step: its safety guards, what each test covers, CI, and the phases still to come |
 | [`VMS-PORT-PLAN.md`](VMS-PORT-PLAN.md) | The round that ported the base project's fixes and features (unregister, triggers, stream/fps, live view), with its decisions and status |
 | [`COSTS-1.4.md`](COSTS-1.4.md) | The cost model. Authoritative for any bitrate or dollar figure |
 | [`Camera-Features.md`](Camera-Features.md) | What the ONVIF camera actually does, marked **verified** vs *advertised* |

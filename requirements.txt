@@ -1,0 +1,11 @@
+# Every third-party module adapter/ imports -- the one list of them. setup/setup-user.sh (LAUNCH.md
+# A4) installs it into venv-adapter, and the GitHub Actions workflow installs the same list, so the
+# Pi and CI can't drift apart. It was once written out in several places, one of them incomplete
+# (FoundAndFixed.md #27). Unpinned, as the setup has always installed it.
+boto3
+awsiotsdk
+onvif-zeep-async
+WSDiscovery
+flask
+requests
+lxml

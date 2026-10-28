@@ -136,10 +136,10 @@ bumping `BUILD_RECIPE` in it so older caches stop matching.
 
 ### A4. Python venv (§7.2) — `setup-user.sh`
 
-`venv-adapter` with every third-party module `adapter/` imports: boto3, awsiotsdk,
-onvif-zeep-async, lxml, WSDiscovery, flask, requests (the list was once incomplete,
-FoundAndFixed.md #27). Its proof also resolves the ONVIF WSDLs with `VMS_HOME` unset, as
-under systemd.
+`venv-adapter` with every third-party module `adapter/` imports, from `requirements.txt` —
+the one list of them, which CI installs too (the list was once incomplete,
+FoundAndFixed.md #27) — and pytest, from `requirements-test.txt` (`PYTEST.md`). Its proof
+also resolves the ONVIF WSDLs with `VMS_HOME` unset, as under systemd.
 
 ### A5. MediaMTX (§2.5) — `setup-user.sh`
 
