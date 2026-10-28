@@ -5,12 +5,12 @@ what the tests cover, and the phases still to come. Like `VMS-PORT-PLAN.md`, it 
 record. Bugs the tests find go to `FoundAndFixed.md` as usual, and this file cites them as
 `#N`.
 
-**Status (2026-10-28):** Phases 1–3 are done. The suite has 847 tests: 846 pass and 1 is an
-expected failure (#85, open). It runs in about 13 s on the Pi, and GitHub Actions runs it on
-every push.
+**Status (2026-10-28):** Phases 1–3 are done, and both bugs they found (#84, #85) are fixed.
+The suite has 850 tests, all passing, in about 13 s on the Pi; GitHub Actions runs it on every
+push.
 - **Phase 1** (steps 1–8) set the suite up and tested the pure logic. It found #84, since fixed.
 - **Phase 2** tests behaviour against fakes of AWS, MediaMTX, systemd and the network.
-- **Phase 3** tests the local admin GUI's routes, and found #85.
+- **Phase 3** tests the local admin GUI's routes. It found #85, since fixed.
 
 Phase 4 is under "Next phases".
 
@@ -68,8 +68,8 @@ xfail_strict = true
 - **`--import-mode=importlib`**: test files in different folders may share a name, and the
   `tests/` folders need no `__init__.py`.
 - **`xfail_strict`**: a test marked as an expected failure turns the run red once it starts
-  passing. That is how a known, open defect is pinned; #84 was pinned this way until it was
-  fixed.
+  passing. That is how a known, open defect is pinned; #84 and #85 were pinned this way until
+  they were fixed.
 - **`.gitignore`** gained `.pytest_cache/`.
 
 ## Step 3 — the safety guards (`tests/conftest.py`)
@@ -369,8 +369,8 @@ All 15 caught.
 ### P3.4 — what Phase 3 showed
 
 - **#85**: an unknown IR mode got a 500 from the GUI's route, where the cloud's `publish-cmd`
-  answers 400. The camera is never touched (tested). It is pinned by a strict `xfail` and left
-  open; see "Found while writing the tests".
+  answers 400. The camera is never touched (tested). It was first pinned by a strict `xfail`,
+  then fixed the same day; see "Found while writing the tests".
 - **The GUI and the Lambdas agree** on every one of the 54 shared-settings cases. They answer
   an unknown camera differently, 404 against 400, by design (REST-style routes against one
   Lambda per action).
@@ -400,13 +400,20 @@ request.
   (`systemctl --user restart kvs-outage-buffer`). Nothing is urgent, since its decisions
   don't change.
 
-**#85 (open): an unknown IR mode got a 500 from the admin GUI, a 400 from the cloud.** Found
+**#85 (fixed): an unknown IR mode got a 500 from the admin GUI, a 400 from the cloud.** Found
 in Phase 3 by comparing the GUI's routes with the Lambdas they mirror. `POST
-/api/cameras/<id>/ir` lets `camera_control.set_ir_mode()`'s `ValueError` reach its catch-all
-500; `publish-cmd` checks the mode itself and answers 400. The camera is never touched, and
-both pages send only valid modes, so only a direct API call sees it. Pinned by the strict
-`xfail` `test_ff85_an_unknown_ir_mode_is_a_400`. The fix is a mode check in the route, as in
-`publish-cmd`.
+/api/cameras/<id>/ir` let `camera_control.set_ir_mode()`'s `ValueError` reach its catch-all
+500, while `publish-cmd` checks the mode itself and answers 400. The camera was never touched,
+and both pages send only valid modes, so only a direct API call saw it. It was first pinned by a
+strict `xfail`, then fixed the same day at the user's request.
+
+- **The fix:** the route checks the mode itself, with `publish-cmd`'s message, at the same point
+  in its checks.
+- **Checked:** `test_ff85_an_unknown_ir_mode_is_a_400_as_in_the_cloud` sends four bad modes to
+  both the GUI route and `publish-cmd`. It requires the same answer from each, and that nothing
+  reaches the camera. The four cases fail against the previous `app.py`.
+- **Not done:** the running admin GUI loads the fix at its next restart
+  (`systemctl --user restart onvif-admin`).
 
 ---
 

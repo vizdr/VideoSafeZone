@@ -1349,6 +1349,10 @@ def set_ir(camera_id):
         return _unregistered_error(camera_id)
     if not item.get("hasIrControl"):
         return jsonify({"error": "camera has no IR control"}), 400
+    # Checked here, as publish-cmd does: set_ir_mode's own check raises, and the catch-all below
+    # turned a bad request into a 500 (FoundAndFixed.md #85).
+    if mode not in camera_control.ALLOWED_IR_MODES:
+        return jsonify({"error": "mode must be 'AUTO', 'ON', or 'OFF'"}), 400
     try:
         camera_control.set_ir_mode(item, mode)
     except Exception as e:

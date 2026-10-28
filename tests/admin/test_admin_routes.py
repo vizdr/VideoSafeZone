@@ -209,10 +209,15 @@ def test_an_unknown_ir_mode_never_reaches_the_camera(gui, ir):
     assert status >= 400 and ir == []
 
 
-@pytest.mark.xfail(reason="FoundAndFixed.md #85: an unknown IR mode answers 500, not 400 as the "
-                          "cloud's publish-cmd does")
-def test_ff85_an_unknown_ir_mode_is_a_400(gui, ir):
-    assert gui().post("/api/cameras/cam-02/ir", {"mode": "night"})[0] == 400
+@pytest.mark.parametrize("body", [{"mode": "night"}, {"mode": "auto"}, {"mode": None}, {}])
+def test_ff85_an_unknown_ir_mode_is_a_400_as_in_the_cloud(gui, ir, aws, body):
+    # It was a 500: set_ir_mode's ValueError reached the route's catch-all (#85).
+    status, out = gui().post("/api/cameras/cam-02/ir", body)
+    publish_cmd = load_lambda("publish_cmd")
+    aws(publish_cmd, ROWS)
+    assert (status, out) == invoke(publish_cmd, {"action": "ir", "camera": "cam-02", **body}) == \
+        (400, {"error": "mode must be 'AUTO', 'ON', or 'OFF'"})
+    assert ir == []
 
 
 # --- display names ------------------------------------------------------------------------------

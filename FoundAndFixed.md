@@ -108,7 +108,7 @@ found writing the pytest suite (2026-10-28).
 | 82 | The new `list-cameras` answered 500: a Decimal it couldn't serialise | Lambda | 2026-10-25 | fixed before deploy |
 | 83 | Start Recording could run with nothing recording; it failed only at Stop Recording | cloud page | 2026-10-25 | fixed, page not yet deployed |
 | 84 | MediaMTX's duration parser reads `500ms` as 500 minutes | outage buffer | 2026-10-28 | fixed 2026-10-28 (latent; no live decision changed) |
-| 85 | An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud | admin GUI | 2026-10-28 | **open** — pinned by an `xfail` test |
+| 85 | An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud | admin GUI | 2026-10-28 | fixed 2026-10-28 |
 
 ### What they have in common
 
@@ -1487,8 +1487,8 @@ check it against the values that program actually reports.
 ### #85 — An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud
 
 **Found:** 2026-10-28, writing the admin GUI's tests (`PYTEST.md`, Phase 3), by comparing the
-GUI's routes with the Lambdas they mirror. **Referenced from:**
-`tests/admin/test_admin_routes.py` (`test_ff85_an_unknown_ir_mode_is_a_400`).
+GUI's routes with the Lambdas they mirror. **Referenced from:** `adapter/onvif-admin/app.py`
+(`set_ir`), `tests/admin/test_admin_routes.py` (`test_ff85_an_unknown_ir_mode_is_a_400_as_in_the_cloud`).
 
 `POST /api/cameras/<id>/ir` passes the mode straight to `camera_control.set_ir_mode()`. That
 function refuses anything but `AUTO`, `ON` and `OFF` with a `ValueError`, before any camera
@@ -1500,8 +1500,15 @@ as a server failure. The cloud's `publish-cmd` checks the mode itself and answer
 touched; a test pins that too (`test_an_unknown_ir_mode_never_reaches_the_camera`). Only a
 direct API call sees the wrong status.
 
-**Status:** open, pinned by a strict `xfail` test, which turns the run red once the route
-answers 400.
+**Fix:** the route checks the mode against `camera_control.ALLOWED_IR_MODES` itself and
+answers 400 with `publish-cmd`'s message, at the same point in the same order of checks
+(unknown camera, unregistered, no IR control, then the mode).
+
+**Verified** (2026-10-28): the test sends four bad modes (`night`, `auto`, none, a missing
+field) to both the GUI route and `publish-cmd`. It requires the same status and body from
+each, and that nothing reaches the camera. The four cases fail against the previous `app.py`
+and pass with the fix. The running admin GUI (`onvif-admin.service`) loads the fix at its next
+restart.
 
 **The rule:** a route that mirrors a Lambda validates its input the same way, and answers a bad
 request with a 4xx, never through a catch-all 500.
