@@ -196,27 +196,40 @@ def _heartbeat_loop():
         time.sleep(aws_state.HEARTBEAT_SEC)
 
 
-conn = mqtt_connection_builder.mtls_from_path(
-    endpoint=config.IOT_DATA_ENDPOINT,
-    port=443,                       # ALPN x-amzn-mqtt-ca -- traverses HTTPS-only firewalls
-    cert_filepath=os.path.join(VMS_HOME, "certs", "adapter.cert.pem"),
-    pri_key_filepath=os.path.join(VMS_HOME, "certs", "adapter.private.key"),
-    ca_filepath=os.path.join(VMS_HOME, "certs", "AmazonRootCA1.pem"),
-    client_id=THING,
-    keep_alive_secs=30,
-    clean_session=False,
-    will=mqtt.Will(topic=STATE_T,
-                   qos=mqtt.QoS.AT_LEAST_ONCE,
-                   payload=json.dumps({"online": False}).encode(),
-                   retain=False),
-    on_connection_interrupted=on_connection_interrupted,
-    on_connection_resumed=on_connection_resumed,
-)
-stop_all_live()
-conn.connect().result()
-_publish_aws_state()
-threading.Thread(target=_heartbeat_loop, daemon=True).start()
-conn.subscribe(topic=CMD_T, qos=mqtt.QoS.AT_LEAST_ONCE, callback=on_message)[0].result()
-conn.publish(topic=STATE_T, payload=json.dumps({"online": True}),
-             qos=mqtt.QoS.AT_LEAST_ONCE, retain=False)[0].result()
-threading.Event().wait()
+# The MQTT connection, made by main(); the handlers above publish through it.
+conn = None
+
+
+def main():
+    # Connecting happens here, not at import, so the handlers can be tested without an MQTT
+    # session (PYTEST.md, Phase 4). Run as a script -- kvs-agent.service -- it does exactly what
+    # this file always did at the top level.
+    global conn
+    conn = mqtt_connection_builder.mtls_from_path(
+        endpoint=config.IOT_DATA_ENDPOINT,
+        port=443,                       # ALPN x-amzn-mqtt-ca -- traverses HTTPS-only firewalls
+        cert_filepath=os.path.join(VMS_HOME, "certs", "adapter.cert.pem"),
+        pri_key_filepath=os.path.join(VMS_HOME, "certs", "adapter.private.key"),
+        ca_filepath=os.path.join(VMS_HOME, "certs", "AmazonRootCA1.pem"),
+        client_id=THING,
+        keep_alive_secs=30,
+        clean_session=False,
+        will=mqtt.Will(topic=STATE_T,
+                       qos=mqtt.QoS.AT_LEAST_ONCE,
+                       payload=json.dumps({"online": False}).encode(),
+                       retain=False),
+        on_connection_interrupted=on_connection_interrupted,
+        on_connection_resumed=on_connection_resumed,
+    )
+    stop_all_live()
+    conn.connect().result()
+    _publish_aws_state()
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    conn.subscribe(topic=CMD_T, qos=mqtt.QoS.AT_LEAST_ONCE, callback=on_message)[0].result()
+    conn.publish(topic=STATE_T, payload=json.dumps({"online": True}),
+                 qos=mqtt.QoS.AT_LEAST_ONCE, retain=False)[0].result()
+    threading.Event().wait()
+
+
+if __name__ == "__main__":
+    main()

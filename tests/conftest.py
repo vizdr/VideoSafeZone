@@ -146,6 +146,7 @@ os.system = lambda command: _block(f"os.system({command!r})")
 # import theirs at collection, before any test runs. str stays str, Path stays Path.
 _SANDBOXED_PATHS = {
     "camera_control": {"CHANNELS_DIR": "etc/adapter/channels"},
+    "agent": {"LIVE_DIR": "run/vms-live"},          # the live view deadlines the producers read
     "aws_state": {"STATE_FILE": "run/vms/aws-state.json"},
     "outage_buffer": {
         "BUFFER_ROOT": "mnt/vms-buffer",

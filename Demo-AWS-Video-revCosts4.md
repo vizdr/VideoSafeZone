@@ -1106,7 +1106,8 @@ a CONNECT failure).
 the Thing name and endpoint from `/etc/adapter/adapter.env` (`CLAUDE.md` "Paths"), routes
 Start/Stop through `camera_control.unit_name()` for any registered camera rather than a
 hardcoded `kvs-cam01.service` (FoundAndFixed.md #7, #37), and adds IR control and a
-heartbeat.
+heartbeat. It also connects in `main()` rather than at the top level, so importing it opens no
+MQTT session and its handlers can be tested (`PYTEST.md`, Phase 4).
 
 The SDK's `mtls_from_path` connection already implements exponential-backoff reconnect
 (§14 of the source doc) — you do not write that yourself, but you should be able to say

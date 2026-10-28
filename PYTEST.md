@@ -5,14 +5,16 @@ what the tests cover, and the phases still to come. Like `VMS-PORT-PLAN.md`, it 
 record. Bugs the tests find go to `FoundAndFixed.md` as usual, and this file cites them as
 `#N`.
 
-**Status (2026-10-28):** Phases 1–3 are done, and both bugs they found (#84, #85) are fixed.
-The suite has 850 tests, all passing, in about 13 s on the Pi; GitHub Actions runs it on every
+**Status (2026-10-28):** All four phases are done, and both bugs found (#84, #85) are fixed.
+The suite has 877 tests, all passing, in about 13 s on the Pi; GitHub Actions runs it on every
 push.
 - **Phase 1** (steps 1–8) set the suite up and tested the pure logic. It found #84, since fixed.
 - **Phase 2** tests behaviour against fakes of AWS, MediaMTX, systemd and the network.
 - **Phase 3** tests the local admin GUI's routes. It found #85, since fixed.
+- **Phase 4** made `agent.py` importable and tested its command handling; the running agent
+  was restarted on the new code and checked live.
 
-Phase 4 is under "Next phases".
+"Next phases" lists what is left, all optional.
 
 ```bash
 venv-adapter/bin/python -m pytest                 # everything
@@ -381,6 +383,71 @@ All 15 caught.
 - **CI rehearsal** (fresh venv, stripped copy, empty environment): 846 passed, 1 expected
   failure, the same as the working tree.
 
+## Phase 4 — the MQTT control agent
+
+`adapter/agent.py` built its MQTT connection, connected, subscribed and blocked at the top level
+of the file, so importing it opened a session with AWS IoT. It couldn't be tested at all, and the
+network guard couldn't stop that session, because awscrt connects from C, not through Python's
+sockets (step 3).
+
+### P4.1 — the refactor (decision D2)
+
+The connection block moved, unchanged and in the same order, into `main()`, behind
+`if __name__ == "__main__"`. `conn` stays a module global, `None` until `main()` sets it, and the
+handlers publish through it as before. Ignoring indentation, the diff only adds lines: 13 of them,
+the `def`, the `global`, the guard and their comments. `kvs-agent.service` runs the file as a
+script, so it calls `main()` exactly as it ran the top level. Guide §7.2's note on how the
+current agent differs from that phase's listing says so.
+
+### P4.2 — the tests (`tests/adapter/test_agent.py`, 27)
+
+The agent's live-view folder (`/run/user/<uid>/vms-live`) joined the sandboxed paths (step 3, guard
+5). The connection is a `FakeConnection` that records what is published, connected and
+subscribed.
+
+- **Start/Stop** reach the right unit in both families, cam-02 included (#7, #37), and report
+  `streaming` on the state topic. A message without a camera means cam-01. A camera without a
+  producer here says so instead of pretending. An unregistered camera is ignored, but can still
+  be stopped and its live view ended. Unknown cameras and actions do nothing.
+- **Live view:** `live` writes the deadline, atomically, before starting `kvs-live@`; the
+  deadline is the cost guarantee. The first live view of a camera creates its `-live` KVS stream.
+  `live-stop` writes 0 without asking KVS. A failure is reported on the state topic, not fatal,
+  and the producer isn't started without its stream. At startup every live producer is stopped.
+- **IR:** applied and reported; a failure reported; a camera without IR untouched.
+- **Reachability:** interrupted and resumed reach the heartbeat file, with `seq` counting only
+  real changes.
+- **`main()`:** port 443, the Thing as client ID, a persistent session, **a Last Will that is not
+  retained** (#6), live producers stopped before connecting, the command topic subscribed to
+  `on_message`, `online` announced (not retained), the first heartbeat written.
+- Importing the agent connects nothing.
+
+Put back one at a time in a scratch copy, each defect below was caught: a unit name built from
+the hyphenated ID (#7, 8 failed), a retained Last Will (#6, 1), the live deadline never set
+(1), an unregistered camera obeyed (2), live producers left running at startup (1), and a start
+without a producer pretending (1).
+
+### P4.3 — the live check on the Pi (2026-10-28)
+
+The baseline before the change: `kvs-agent` active since 2026-10-27 21:29 (PID 1080, 0 restarts),
+heartbeat online, no producer or live view running.
+
+1. **Pre-flight:** the refactored file imported with the Pi's real `/etc/adapter/adapter.env`
+   left `conn` as `None`, with client ID `adapter-01` and command topic `adapter/adapter-01/cmd`.
+   Nothing connected.
+2. **Restart:** `systemctl --user restart kvs-agent` at 20:58:56 UTC; the new PID was 77772.
+3. **Connected:** the new process wrote its heartbeat about 1 s after starting (`online: true`,
+   its own PID). That happens only after `conn.connect().result()` returns.
+   setup-launch.sh's "agent online with AWS IoT" proof passed.
+4. **Still running:** the heartbeat advanced in 10 s steps (20:58:58 → 20:59:38), so the
+   heartbeat thread runs. The journal shows a clean stop and start with no traceback, and
+   `NRestarts=0`. A failed subscribe would have raised in `main()` and restarted the unit.
+
+**Not checked live:** a command arriving over AWS IoT. The `on_message` function is unchanged
+and is now covered by the tests above. A live round trip needs either the operator's AWS CLI
+(its session had expired, `aws login`) or a button press in the cloud page. The cheapest is
+`live-stop` for a camera nobody watches: it only writes a 0 deadline and stops a live unit that
+isn't running.
+
 ## Found while writing the tests
 
 **#84 (fixed): `mediamtx_api._dur_secs("500ms")` returned 30 000 s.** It parsed one character at a
@@ -412,8 +479,9 @@ strict `xfail`, then fixed the same day at the user's request.
 - **Checked:** `test_ff85_an_unknown_ir_mode_is_a_400_as_in_the_cloud` sends four bad modes to
   both the GUI route and `publish-cmd`. It requires the same answer from each, and that nothing
   reaches the camera. The four cases fail against the previous `app.py`.
-- **Not done:** the running admin GUI loads the fix at its next restart
-  (`systemctl --user restart onvif-admin`).
+- **Live:** after `onvif-admin` was restarted (2026-10-28, 22:15 CET), `POST
+  /api/cameras/cam-02/ir` with `{"mode": "night"}` and with `{}` both answered 400 with
+  `publish-cmd`'s message. The GUI's startup codec check reported all four cameras ok.
 
 ---
 
@@ -455,10 +523,10 @@ strict `xfail`, then fixed the same day at the user's request.
 
 ## Next phases
 
-**Phase 4 — `agent.py` (D2).** Move the connection block at the end of the file into `main()`,
-behind `if __name__ == "__main__"`. The service behaves the same, but `on_message` and
-`set_live` (the deadline file, unit names, #7) become testable. Verify on the Pi afterwards:
-the agent connects, Start/Stop works from the cloud page, and the heartbeat file updates.
-`observe_state.py` gets the same change if it is worth testing.
+All four planned phases are done. What is left is optional:
 
-**Later, optional:** `cloud/deploy.sh lambda` could run `tests/cloud` before it uploads.
+- `cloud/deploy.sh lambda` could run `tests/cloud` before it uploads.
+- `observe_state.py`, a debugging aid, still connects at import. It could get the same `main()`,
+  but nothing imports it.
+- The shell scripts (`adapter/bin/*.sh`, `setup/*.sh`) could get their own tests, with bats; that
+  would be a separate decision.

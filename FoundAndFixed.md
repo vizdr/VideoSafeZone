@@ -1507,8 +1507,9 @@ answers 400 with `publish-cmd`'s message, at the same point in the same order of
 **Verified** (2026-10-28): the test sends four bad modes (`night`, `auto`, none, a missing
 field) to both the GUI route and `publish-cmd`. It requires the same status and body from
 each, and that nothing reaches the camera. The four cases fail against the previous `app.py`
-and pass with the fix. The running admin GUI (`onvif-admin.service`) loads the fix at its next
-restart.
+and pass with the fix. **Live** (2026-10-28, after `onvif-admin` was restarted at 22:15 CET):
+`POST /api/cameras/cam-02/ir` with `{"mode": "night"}` and with `{}` both answered 400,
+`mode must be 'AUTO', 'ON', or 'OFF'`.
 
 **The rule:** a route that mirrors a Lambda validates its input the same way, and answers a bad
 request with a 4xx, never through a catch-all 500.
