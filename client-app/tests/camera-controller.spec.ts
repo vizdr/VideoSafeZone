@@ -133,6 +133,23 @@ describe("Start and the start window", () => {
 });
 
 describe("the playing session", () => {
+  it("loads hls.js with the first player only, not before", async () => {
+    vi.useFakeTimers();
+    const loadHls = vi.fn(async () => FakeHls as unknown as typeof Hls);
+    const api = { hls: vi.fn(async () => playable()), cmd: vi.fn(async () => ({ ok: true, status: 200, data: {} })) };
+    const c = new CameraController(camera(), { api, loadHls, isVisible: () => true });
+    c.startArchive();
+    await c.command("stop");
+    await tick(0);
+    expect(loadHls).not.toHaveBeenCalled();         // the archive check and Start/Stop need no player
+    c.attach(fakeVideo());
+    await c.load();
+    await c.load();
+    expect(loadHls).toHaveBeenCalledTimes(1);
+    expect(FakeHls.all).toHaveLength(2);
+    c.dispose();
+  });
+
   it("offers sound only when the stream has it, and keeps the choice across a session refresh", async () => {
     const { c, api, v } = setup();
     v.setPaused(true);                                  // a paused player is never a stall
@@ -349,6 +366,54 @@ describe("the archive check (#83)", () => {
     expect(api.hls.mock.calls).toHaveLength(10);
     await tick(1);
     expect(api.hls.mock.calls).toHaveLength(11);
+  });
+
+  it("a Start stays pending until its first footage reaches the archive", async () => {
+    const { c, api } = setup();
+    c.detach();
+    expect(await c.command("start")).toBe(true);
+    expect(c.state).toMatchObject({ archivePending: true, archiveFailed: false, archiving: false });
+    await tick(5000);
+    expect(c.state.archivePending).toBe(true);
+    api.hls.mockResolvedValue(playable());
+    await tick(5000);
+    expect(c.state).toMatchObject({ archivePending: false, archiveFailed: false, archiving: true });
+  });
+
+  it("a Start whose window closes with no footage is reported as failed; Stop clears it (#61)", async () => {
+    const { c } = setup();
+    c.detach();
+    await c.command("start");
+    await tick(40_000);
+    expect(c.state.archivePending).toBe(true);
+    await tick(5_000);                                  // the first answer after the 45 s window
+    expect(c.state).toMatchObject({ archivePending: false, archiveFailed: true, archiving: false });
+    await c.command("stop");
+    expect(c.state.archiveFailed).toBe(false);
+  });
+
+  it("a hidden tab leaves a Start pending until an answer comes back", async () => {
+    const { c, visible } = setup();
+    c.detach();
+    await c.command("start");
+    visible.value = false;
+    await tick(120_000);
+    expect(c.state.archivePending).toBe(true);
+    visible.value = true;
+    c.onVisible();
+    await tick(0);
+    expect(c.state).toMatchObject({ archivePending: false, archiveFailed: true });
+  });
+
+  it("a refused command resolves false and leaves nothing pending", async () => {
+    const { c, api } = setup();
+    c.detach();
+    api.cmd.mockResolvedValueOnce({ ok: false, status: 409, data: { error: "'cam-03' is unregistered" } });
+    expect(await c.command("start")).toBe(false);
+    expect(c.state.archivePending).toBe(false);
+    expect(c.state.status).toBe("error: 'cam-03' is unregistered");
+    api.cmd.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    expect(await c.command("stop")).toBe(false);
   });
 
   it("drops an answer a later check has overtaken; asks nothing while hidden", async () => {

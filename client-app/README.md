@@ -27,9 +27,16 @@ and publishes at `https://dugyd3kkt36pw.cloudfront.net/app/index.html`, beside t
 | `src/api/` | one client for API Gateway; one function per route; the response types |
 | `src/player/camera-controller.ts` | the old page's player, Live, Start/Stop and archive check, framework-free |
 | `src/cameras/list.ts` | the camera list's search, grouping and labels |
+| `src/cameras/settings.ts` | Settings' choices and wording, ported from the old page |
+| `src/stores/players.ts` | one `CameraController` per camera: the archive check, status dots, Cloud recording |
+| `src/composables/useSavedSetting.ts` | save on change, put the old value back when the server refuses |
+| `src/components/settings/` | the Settings cards: Cloud recording, Camera and Recording sections |
 | `src/stores/`, `src/views/`, `src/components/` | Pinia stores and the Vue screens |
 | `src/theme.ts` | the OpenVue preset: Aura, sky accent, slate dark surfaces |
 | `tests/` | Vitest; `camera-controller.spec.ts` keeps the FoundAndFixed fixes the player carries |
+
+That the value lists offered here (outage durations, recording and IR modes) match what the
+Lambdas accept is checked from the pytest side, `tests/test_value_lists.py` in the repository.
 
 The player logic in `camera-controller.ts` was ported from `client/index.html` without changing
 its behaviour; each fix in it cites its `FoundAndFixed.md` entry. Change it there with a test.

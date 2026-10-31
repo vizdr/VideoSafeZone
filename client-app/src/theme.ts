@@ -13,4 +13,16 @@ export const preset = definePreset(Aura, {
       dark: { surface: { 0: "#ffffff", ...scale("slate") } },
     },
   },
+  components: {
+    // Aura's dark switch track is surface-700, the colour of the setting cards: an "off" switch
+    // vanished into its card. A dark track with a light knob reads as off on any card.
+    toggleswitch: {
+      colorScheme: {
+        dark: {
+          root: { background: "{surface.950}", hoverBackground: "{surface.900}", disabledBackground: "{surface.800}" },
+          handle: { background: "{surface.200}", hoverBackground: "{surface.0}", disabledBackground: "{surface.600}" },
+        },
+      },
+    },
+  },
 });

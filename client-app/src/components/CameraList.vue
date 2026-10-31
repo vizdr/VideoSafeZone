@@ -7,11 +7,21 @@ import InputText from "openvue/inputtext";
 import Message from "openvue/message";
 import { cameraName, groupCameras, matchesQuery } from "../cameras/list";
 import { useCamerasStore } from "../stores/cameras";
+import { usePlayersStore } from "../stores/players";
 
 const props = defineProps<{ selected?: string }>();
 const emit = defineEmits<{ select: [id: string] }>();
 
 const store = useCamerasStore();
+const players = usePlayersStore();
+
+// The dot is the archive check's answer (FoundAndFixed.md #83): footage reaching the cloud or not.
+function dot(id: string): { cls: string; label: string } {
+  const s = players.states[id];
+  if (s?.archiving) return { cls: "on", label: "Recording to the cloud" };
+  if (s?.archivePending) return { cls: "pending", label: "Starting cloud recording" };
+  return { cls: "off", label: "Not recording to the cloud" };
+}
 const query = ref("");
 const groups = computed(() => groupCameras(store.cameras.filter(c => matchesQuery(c, query.value))));
 const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length, 0));
@@ -42,6 +52,8 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
           <button type="button" class="cam" :class="{ selected: c.id === props.selected }"
                   :aria-current="c.id === props.selected ? 'true' : undefined"
                   @click="emit('select', c.id)">
+            <span class="dot" :class="dot(c.id).cls" role="img" :aria-label="dot(c.id).label"
+                  :title="dot(c.id).label" />
             <span class="name">{{ cameraName(c) }}</span>
             <span v-if="c.displayName" class="id">{{ c.id }}</span>
           </button>
@@ -79,6 +91,18 @@ h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
 .cam:hover { background: var(--p-surface-800); }
 .cam.selected { background: var(--p-highlight-background); color: var(--p-highlight-color); }
 .cam:focus-visible { outline: 2px solid var(--p-primary-color); }
+.dot {
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  align-self: center;
+  background: var(--p-surface-500);
+}
+.dot.on { background: var(--p-green-400); }
+.dot.pending { background: var(--p-amber-400); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .dot.pending { animation: none; } }
 .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .id { color: var(--p-text-muted-color); font-size: 0.8rem; }
 .list-error { margin-top: 0.75rem; }

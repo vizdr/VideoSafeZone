@@ -6,7 +6,10 @@
 // Framework-free on purpose: the components only call its methods and show its state. State goes
 // out as a fresh snapshot object on every change (subscribe()), so a Vue shallowRef follows it,
 // while the hls.js instance and the timers stay private, outside any reactive proxy.
-import Hls from "hls.js";
+//
+// hls.js is loaded with the first player that starts, not with the page: Settings and the archive
+// check never need it, and it is most of the bundle.
+import type Hls from "hls.js";
 import type { ApiResult } from "../api/client";
 import type { Camera, CommandAction, HlsSession } from "../api/types";
 import { hevcSupport } from "./hevc";
@@ -41,6 +44,10 @@ export interface PlayerState {
   listen: boolean;
   /** Footage is reaching the cloud archive, so Record clip can work (#83). */
   archiving: boolean;
+  /** This page's Start was accepted and its first footage hasn't reached the archive yet. */
+  archivePending: boolean;
+  /** The last Start's window closed with no footage in the archive: the Pi didn't answer. */
+  archiveFailed: boolean;
   /** This browser refused the camera's H.265: the page-level note should show. */
   hevcHelp: boolean;
 }
@@ -52,7 +59,9 @@ export interface PlayerApi {
 
 export interface ControllerDeps {
   api: PlayerApi;
+  /** The hls.js class, already loaded (tests); otherwise it is imported on first use. */
   hls?: typeof Hls;
+  loadHls?: () => Promise<typeof Hls>;
   isVisible?: () => boolean;
   now?: () => number;
   perfNow?: () => number;
@@ -67,12 +76,13 @@ type MediaWithTracks = HTMLVideoElement & {
 export class CameraController {
   private s: PlayerState = {
     view: null, overlay: INITIAL_OVERLAY, status: "", listenAvailable: false, listen: false,
-    archiving: false, hevcHelp: false,
+    archiving: false, archivePending: false, archiveFailed: false, hevcHelp: false,
   };
   private listeners = new Set<(s: PlayerState) => void>();
 
   private readonly api: PlayerApi;
-  private readonly H: typeof Hls;
+  private H: typeof Hls | null;
+  private readonly loadHls: () => Promise<typeof Hls>;
   private readonly isVisible: () => boolean;
   private readonly now: () => number;
   private readonly perfNow: () => number;
@@ -97,7 +107,8 @@ export class CameraController {
 
   constructor(private camera: Camera, deps: ControllerDeps) {
     this.api = deps.api;
-    this.H = deps.hls ?? Hls;
+    this.H = deps.hls ?? null;
+    this.loadHls = deps.loadHls ?? (() => import("hls.js").then(m => m.default));
     this.isVisible = deps.isVisible ?? (() => document.visibilityState === "visible");
     this.now = deps.now ?? Date.now;
     this.perfNow = deps.perfNow ?? (() => performance.now());
@@ -180,7 +191,9 @@ export class CameraController {
         return;
       }
       if (this.video !== v) return;          // detached while the request was out
-      this.startPlayback(v, data.url, data.expires_in, view);
+      const H = this.H ??= await this.loadHls();
+      if (this.video !== v) return;
+      this.startPlayback(H, v, data.url, data.expires_in, view);
     } catch (e) {
       this.setStatus("error: " + (e as Error).message);
       this.showOverlay("Error loading stream.\n\nPress Reload player to retry.");
@@ -193,7 +206,8 @@ export class CameraController {
     return this.load();
   }
 
-  private startPlayback(v: MediaWithTracks, url: string, expiresIn: number | undefined, view: "live" | "recorded") {
+  private startPlayback(H: typeof Hls, v: MediaWithTracks, url: string, expiresIn: number | undefined,
+                        view: "live" | "recorded") {
     if (this.hls) { this.hls.destroy(); this.hls = null; }
     this.clearRefresh();
     this.clearStallTimer();
@@ -206,7 +220,6 @@ export class CameraController {
     v.muted = true;
     this.setListenAvailable(false);
 
-    const H = this.H;
     if (H.isSupported()) {
       const hls = new H();
       this.hls = hls;
@@ -435,7 +448,8 @@ export class CameraController {
 
   // --- Start / Stop: record to the cloud archive ------------------------------------------------
 
-  async command(action: "start" | "stop"): Promise<void> {
+  /** Resolves true when the API accepted the command (not proof the Pi acted: see archivePending). */
+  async command(action: "start" | "stop"): Promise<boolean> {
     this.setStatus(`sending ${action}...`);
     this.stallReloads = 0;
     const watchingLive = this.s.view === "live";     // Start/Stop record; they leave a Live view alone
@@ -451,15 +465,17 @@ export class CameraController {
     try {
       const r = await this.api.cmd(this.id, action);
       this.setStatus(r.ok ? `${action} sent` : "error: " + (r.data.error || r.status));
-      if (!r.ok) { this.showOverlay("Could not send " + action + ": " + (r.data.error || r.status)); return; }
+      if (!r.ok) { this.showOverlay("Could not send " + action + ": " + (r.data.error || r.status)); return false; }
       if (action === "start") {                      // watching Live or not: Start records either way
         this.archiveStoppedAt = 0;
         this.archiveStartedAt = this.perfNow();
         this.archiveWaitUntil = this.now() + ARCHIVE_START_WINDOW_MS;
+        this.set({ archivePending: true, archiveFailed: false });
         void this.checkArchive();
       } else {
         this.archiveStoppedAt = this.now();
         this.archiveWaitUntil = 0;
+        this.set({ archivePending: false, archiveFailed: false });
         this.setArchiving(false);
       }
       if (action === "start" && !watchingLive) {
@@ -469,9 +485,11 @@ export class CameraController {
         this.clearRefresh();
         this.refreshTimer = setTimeout(() => void this.load(), FIRST_LOAD_DELAY_MS);
       }
+      return true;
     } catch (e) {
       this.setStatus("error: " + (e as Error).message);
       this.showOverlay("Network error sending " + action + ".\n\nPress Start to try again.");
+      return false;
     }
   }
 
@@ -512,6 +530,12 @@ export class CameraController {
         // Anything else (an expired sign-in, a Lambda error) says nothing about the stream.
         if (r.status === 200 || r.status === 503) {
           this.setArchiving(r.ok && this.now() - this.archiveStoppedAt > ARCHIVE_STOP_GRACE_MS);
+          // A Start is settled by the first answer that finds footage, or by the first answer
+          // after its window: then nothing arrived in 45 s, the case load() reports as "the Pi
+          // didn't answer" (FoundAndFixed.md #61). Only an answer settles it -- a hidden tab waits.
+          if (this.s.archivePending && (this.s.archiving || this.now() >= this.archiveWaitUntil)) {
+            this.set({ archivePending: false, archiveFailed: !this.s.archiving });
+          }
         }
       } catch {
         if (seq !== this.archiveSeq) return;         // transient; the next tick asks again

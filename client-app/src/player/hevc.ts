@@ -17,6 +17,14 @@ export function hevcSupport(hlsSupported: boolean): { live: boolean; clips: bool
   return { live: hlsSupported ? mse : file, clips: file };
 }
 
+/** Whether hls.js can play here -- its own isSupported() in short: Media Source Extensions with
+ *  H.264 in fMP4. Lets the page decide without loading hls.js, which comes with the first player. */
+export function mseSupported(): boolean {
+  const w = window as unknown as { ManagedMediaSource?: MediaSourceLike; MediaSource?: MediaSourceLike };
+  const MS = w.ManagedMediaSource || w.MediaSource;
+  return !!(MS && MS.isTypeSupported('video/mp4; codecs="avc1.42E01E,mp4a.40.2"'));
+}
+
 /** On Windows the fix is an OS extension; elsewhere, another browser or device. */
 export function hevcOnWindows(): boolean {
   return /Windows/.test(navigator.userAgent);

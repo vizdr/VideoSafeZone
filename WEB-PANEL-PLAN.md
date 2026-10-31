@@ -6,10 +6,11 @@ Update this file as phases complete; when the work is done, fold the outcome int
 (§8, the browser client) the way `OUTAGE.md` folds into §16.3c, and keep this file as the record
 of why.
 
-**Progress (2026-10-31):** Phase 0 is built, tested and **deployed** at
-`https://dugyd3kkt36pw.cloudfront.net/app/index.html` — `client-app/` (42 Vitest tests),
-`deploy.sh app`, the `web` CI job. Its last *Verify* step is the user's: sign in there, and an
-action still works after 70 minutes (the token refresh).
+**Progress (2026-10-31):** Phase 0 is **deployed** at
+`https://dugyd3kkt36pw.cloudfront.net/app/index.html` (commit `029c0bc`, both CI jobs green); its
+last *Verify* step is the user's: sign in there, and an action still works after 70 minutes.
+**Phase 1** (Settings on today's API) is built and tested locally, not yet deployed or committed;
+its *Verify* steps need the deployed page and a signed-in viewer.
 
 ---
 
@@ -334,6 +335,32 @@ the codec read-only where it matters. The same requests as the old page.
 way round; an unregistered camera's 409 is shown; a detection mode the camera doesn't publish is
 greyed out.
 
+*Built 2026-10-31* (62 Vitest tests, 880 pytest):
+- **Settings screen** (§4.2): the middle column holds name, ID, a preview placeholder (hidden when
+  the layout stacks), **Cloud recording** and the links **Camera** (Video, Record microphone, IR)
+  and **Recording** (Recording mode with the trigger note, If the internet drops). Settings always
+  shows a camera: the first until another is picked. Every control saves on the viewer's change
+  only (`useSavedSetting`), is disabled while its save is out, and puts the old value back when
+  the server refuses — now Recording mode too, which the old page left showing. Wording and value
+  lists ported in `src/cameras/settings.ts`.
+- **Cloud recording** is Start/Stop as a switch showing KVS's answer (the archive check, #83), not
+  the last click. The controller gained `archivePending` (a Start waiting for its first footage)
+  and `archiveFailed` (its 45 s window closed with none — the Pi didn't answer, #61), and
+  `command()` now says whether the API accepted it. One controller per camera lives in
+  `stores/players.ts`, running the archive check from sign-in as the old page did; it also feeds
+  the camera list's **status dot** (green = footage arriving, amber = starting).
+- **H.265:** the page-level note (`HevcNote.vue`) and the per-camera warnings in the Video card.
+- **Cross-checks:** `tests/test_value_lists.py` (pytest) reads the outage durations, recording
+  modes and IR modes out of every copy — Lambdas, adapter, admin GUI route and page, old page, web
+  panel — and fails when one drifts (checked by breaking the web list on purpose).
+- **hls.js is loaded with the first player**, not with the page: the first load is 124 kB
+  compressed instead of 302 kB.
+- **Theme:** the dark switch track is surface-950 — Aura's surface-700 was the cards' own colour,
+  so an "off" switch vanished into its card. Rendered offline (fake Cognito and API injected) at
+  1400 px and phone width.
+- **Left for Phase 2:** the "new clips" polling after a detection mode is chosen (it belongs to
+  Events); "Play sound here" (the Live player).
+
 ### Phase 2: Live grid, Events, per-user settings
 
 2.1 Backend: `user-settings` table, Lambda, routes, IAM policy; pytest through `invoke()` (CORS,
@@ -417,7 +444,7 @@ Capacitor; multi-tenancy (revisit D4).
 - [x] Phase 0: scaffold, ported player logic, shell, `deploy.sh app`, CI (built and tested locally)
 - [x] Phase 0: first deploy to `/app/` (2026-10-31)
 - [ ] Phase 0: sign-in and the 70-minute refresh checked at `/app/index.html` (the user)
-- [ ] Phase 1: Settings on today's API
+- [x] Phase 1: Settings on today's API (built; deploy and the *Verify* steps open)
 - [ ] Phase 2: `user-settings` backend, layouts, Live, Events
 - [ ] Phase 3: parity checklist, cutover, docs
 - [ ] Phase 4: `set-camera-settings`, new registry fields, admin GUI ceiling

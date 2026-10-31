@@ -30,11 +30,16 @@ export const useCamerasStore = defineStore("cameras", () => {
     return id ? cameras.value.find(c => c.id === id) : undefined;
   }
 
+  /** A setting the server accepted (or a value put back after it refused one). */
+  function patch(id: string, fields: Partial<Camera>): void {
+    cameras.value = cameras.value.map(c => (c.id === id ? { ...c, ...fields } : c));
+  }
+
   function clear(): void {
     cameras.value = [];
     loaded.value = false;
     error.value = null;
   }
 
-  return { cameras, loaded, loading, error, load, byId, clear };
+  return { cameras, loaded, loading, error, load, byId, patch, clear };
 });

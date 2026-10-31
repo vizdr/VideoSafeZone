@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 import { useAuthStore } from "../stores/auth";
-import { useCamerasStore } from "../stores/cameras";
 
 // Live, Events, Settings; Exit at the bottom (WEB-PANEL-PLAN.md §4.1). Audit logs and the other
 // Videoloft entries are left out on purpose (D8).
@@ -13,18 +12,15 @@ const items = [
 ] as const;
 
 const route = useRoute();
-const router = useRouter();
 const auth = useAuthStore();
-const cameras = useCamerasStore();
 
 // Switching tabs keeps the selected camera.
 const cameraParam = computed(() =>
   typeof route.params.cameraId === "string" ? { cameraId: route.params.cameraId } : {});
 
+// The shell sees the sign-out, ends any Live view, clears the stores and goes to sign-in.
 function exit(): void {
   auth.signOut();
-  cameras.clear();
-  void router.replace({ name: "login" });
 }
 </script>
 
