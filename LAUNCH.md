@@ -728,11 +728,31 @@ bash cloud/deploy.sh all --dry-run              # what a deploy would change, ch
 bash cloud/deploy.sh lambda get-hls-url list-cameras    # the named functions
 bash cloud/deploy.sh lambdas                    # every function whose live code differs from the tree
 bash cloud/deploy.sh page                       # client/index.html
+bash cloud/deploy.sh app                        # client-app/, the Vue web panel, at /app/
 bash cloud/deploy.sh all                        # lambdas, then the page
 ```
 
 `status` says, per function and for the page, whether the live code is **this tree**, **git
-HEAD** (this tree has undeployed changes), or **neither** — deployed from somewhere else.
+HEAD** (this tree has undeployed changes), or **neither** — deployed from somewhere else. For the
+app it shows the commit it was built from; `app --dry-run` builds and compares.
+
+### The web panel needs Node
+
+The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the
+machine that builds and deploys it needs — nothing on the adapter runs it, so `setup/` doesn't
+install it. Into `~/.local`, no sudo, checksum-verified:
+
+```bash
+V=v24.22.2; F=node-$V-linux-arm64.tar.xz; T=$(mktemp -d); cd "$T"
+curl -fsSO https://nodejs.org/dist/$V/$F && curl -fsSO https://nodejs.org/dist/$V/SHASUMS256.txt
+grep " $F\$" SHASUMS256.txt | sha256sum -c - && mkdir -p ~/.local/lib/nodejs ~/.local/bin && tar -xJf $F -C ~/.local/lib/nodejs
+for b in node npm npx; do ln -sfn ~/.local/lib/nodejs/node-$V-linux-arm64/bin/$b ~/.local/bin/$b; done; cd -
+```
+
+`bash cloud/deploy.sh app` then builds a fresh copy from `client-app/package-lock.json` in a
+temporary directory and publishes it at `https://dugyd3kkt36pw.cloudfront.net/app/index.html`,
+beside the old page, until the cutover (WEB-PANEL-PLAN.md Phase 3). Day-to-day commands are in
+`client-app/README.md`.
 
 ### The sequence for a change that spans Pi and cloud
 
@@ -767,12 +787,18 @@ HEAD** (this tree has undeployed changes), or **neither** — deployed from some
   upload is live at once (`x-cache: RefreshHit`) with no invalidation.
 - **Done means verified:** after each deploy the live code is downloaded again and compared
   with the tree, and the page is fetched back through CloudFront.
+- **The app goes up under `/app/` only,** never over the page. Its hashed assets are cached for
+  good and go up first; `index.html` goes up last with the page's `no-cache`, so a browser never
+  gets an `index.html` whose assets aren't there yet. A `version.json` beside it records what was
+  uploaded: a live `/app/` without a matching one wasn't put there by the script, and needs
+  `--force`.
 
 ### Rolling back
 
 ```bash
 bash cloud/deploy.sh rollback lambda get-hls-url    # the copy saved before its last deploy
 bash cloud/deploy.sh rollback page
+bash cloud/deploy.sh rollback app                   # none after a first deploy: aws s3 rm --recursive the prefix
 ```
 
 Or deploy an older version from git: check it out (`git stash` your changes, or

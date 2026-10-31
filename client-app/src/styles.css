@@ -1,0 +1,44 @@
+/* Colours come from the OpenVue theme's CSS variables (src/theme.ts), so the page follows it. */
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--p-surface-900);
+  color: var(--p-text-color);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+a { color: var(--p-primary-color); }
+h1, h2, h3 { line-height: 1.2; }
+.muted { color: var(--p-text-muted-color); }
+
+/* Icon rail | camera list | the view -- WEB-PANEL-PLAN.md §4. */
+.shell {
+  display: grid;
+  grid-template-columns: 5.5rem 17.5rem minmax(0, 1fr);
+  min-height: 100vh;
+}
+.shell > .cameras-col {
+  background: var(--p-surface-900);
+  border-right: 1px solid var(--p-content-border-color);
+  padding: 1rem;
+  overflow-y: auto;
+  max-height: 100vh;
+  box-sizing: border-box;
+}
+.shell > .content {
+  background: var(--p-surface-800);
+  padding: 1.5rem 2rem;
+  min-width: 0;
+}
+.view h1 { margin: 0 0 1rem; font-size: 1.5rem; }
+
+/* Phone width: the rail becomes a top bar and the list sits above the view. */
+@media (max-width: 800px) {
+  .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
+  .shell > .cameras-col {
+    max-height: 40vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--p-content-border-color);
+  }
+  .shell > .content { padding: 1rem; }
+}

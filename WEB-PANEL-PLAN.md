@@ -6,7 +6,10 @@ Update this file as phases complete; when the work is done, fold the outcome int
 (§8, the browser client) the way `OUTAGE.md` folds into §16.3c, and keep this file as the record
 of why.
 
-**Progress:** plan only — nothing built yet.
+**Progress (2026-10-31):** Phase 0 is built, tested and **deployed** at
+`https://dugyd3kkt36pw.cloudfront.net/app/index.html` — `client-app/` (42 Vitest tests),
+`deploy.sh app`, the `web` CI job. Its last *Verify* step is the user's: sign in there, and an
+action still works after 70 minutes (the token refresh).
 
 ---
 
@@ -44,13 +47,25 @@ app; nothing moves out of it.
 
 ## 3. Decisions (settled 2026-10-31)
 
-**D1. Vue 3 + TypeScript + Vite + PrimeVue 4.** With Pinia (state), vue-router in hash mode,
-VueUse (`useDocumentVisibility`, `useIntervalFn`), Vitest + @vue/test-utils. hls.js comes from
-npm, pinned by the lockfile, which ends the CDN-pinning risk of #66. PrimeVue in styled mode with
-an own dark preset.
+**D1. Vue 3 + TypeScript + Vite + OpenVue** (decided as PrimeVue 4; changed to OpenVue on
+2026-10-31, below). With Pinia (state), vue-router in hash mode, Vitest + @vue/test-utils; VueUse
+(`useDocumentVisibility`, `useIntervalFn`) joins when Phase 1–2 first need it. hls.js comes from
+npm, pinned by the lockfile, which ends the CDN-pinning risk of #66. OpenVue in styled mode with
+an own dark preset (`src/theme.ts`). Icons: primeicons **7.0.0**.
 Considered: React + Mantine (as good on widgets; Vue won on porting today's HTML templates almost
 unchanged, a simpler player lifecycle — no effects run twice in development — and Capacitor as
 the path to the mobile app of requirements §6); Svelte; Lit or Preact without a build step.
+
+*Why OpenVue, not PrimeVue* (found while starting Phase 0): PrimeVue 5.0 (2026-07-15) and
+primeicons 8 moved to the commercial PrimeUI License — a license key, free for individuals and
+small organisations but renewed yearly, paid otherwise, shipped compiled. The MIT line stopped at
+PrimeVue 4.5.5 (2026-04-08). OpenVue (`openvue`, github.com/openvi-foundation/openvue, MIT) is a
+community fork of 4.5.5 that keeps its API: checked, the same 149 components and the same type
+definitions for the controls this panel uses. Switching between the two is a package rename in
+either direction (`@openvue/migrate` does it), so if OpenVue stalls, the way back to 4.5.5 is
+cheap. Its risk is youth — 1.0 on 2026-09-10, two npm maintainers — not compatibility.
+*Tool versions:* Node 24 LTS (Node 22 leaves support in April 2027; 26 was three days into LTS);
+TypeScript 6.0 — TypeScript 7 is the native compiler, and vue-tsc's support for it is unproven.
 
 **D2. Built beside the old page, cut over at parity.** Source in `client-app/`; published at
 `/app/index.html` on the same bucket and distribution until Phase 3, then at the root. Hash routes
@@ -155,7 +170,8 @@ camera (the H.265 notes).
   none, so after about an hour every API call returns 401. ID and access tokens in memory; the
   refresh token in `sessionStorage` (survives a reload, gone when the tab closes).
 - **Camera list** (Live and Settings): from `GET /cameras`; search on name, ID and tag; grouped by
-  first tag, untagged last; a status dot. The "Preview" switch shows thumbnails once Phase 5
+  first tag, untagged last; a status dot from Phase 1, when the archive check gives it something
+  to show. The "Preview" switch shows thumbnails once Phase 5
   provides them.
 
 ### 4.2 Settings
@@ -266,8 +282,8 @@ the guide.
 
 ### Phase 0: Scaffold and shell
 
-0.1 `client-app/`: Vite (Vue + TypeScript), PrimeVue 4, Pinia, vue-router (hash), VueUse, Vitest;
-scripts `typecheck`, `test`, `build`. Node 22 LTS is needed only to build the page, so it goes
+0.1 `client-app/`: Vite (Vue + TypeScript), OpenVue, Pinia, vue-router (hash), Vitest;
+scripts `typecheck`, `test`, `build`. Node 24 LTS is needed only to build the page, so it goes
 in LAUNCH Part H, not in `setup/` — the Pi's runtime doesn't need it.
 0.2 Framework-free modules: `api/` (fetch with the token, JSON errors), `auth/cognito.ts`
 (sign-in, refresh), `player/` (the ported logic, §2).
@@ -280,6 +296,34 @@ CloudFront. It refuses to touch `/index.html` until Phase 3.
 
 *Verify:* sign in at `https://dugyd3kkt36pw.cloudfront.net/app/index.html`; the camera list
 matches the old page's; leave the page open 70 minutes, then an action still works (refresh).
+
+*Done 2026-10-31, before the deploy:*
+- **0.1** Node 24.22.2 in `~/.local` (checksum-verified). Exact pins in `package.json`:
+  vue 3.5.44, vue-router 5.4.0, pinia 4.1.0, openvue + @openvue/themes 1.1.0, primeicons 7.0.0,
+  hls.js 1.7.3 (the old page's version, so the port is compared like for like), vite 8.3.5,
+  TypeScript 6.0.3, vue-tsc 3.3.14, vitest 5.0.5. `npm audit`: no vulnerabilities.
+- **0.2** `CameraController` holds the old page's `load()`, `watchStalls()`, `liveToggle()`,
+  `cmd()`, `checkArchive()` and session refresh, behaviour unchanged, comments and `#N`
+  references kept. Additions only: a guard for a player detached while a request was out, and
+  `dispose()` (ends Live, clears every timer) for components that go away. 18 tests pin the
+  behaviour (#43, #61, #66, #83); breaking the stop grace or the playlist-error rule on purpose
+  turns them red. Cognito: the token is renewed two minutes before it expires, on the call that
+  needs it, and a 401 renews and retries once.
+- **0.3** Rendered in headless Chromium at 1400 px and phone width (the rail becomes a top bar).
+- **0.4** `app --dry-run` built fresh from the lockfile (~20 s) and found `/app/` empty (a first
+  deploy); the upload order and headers were checked with a recording stub. Two builds of the
+  same tree are byte-identical, which the "already live" check relies on.
+- **0.5** `.github/workflows/web.yml`, on changes under `client-app/`.
+
+*Deployed 2026-10-31* (`bash cloud/deploy.sh app`, 50 s; `/app/` was empty in the bucket): 9
+files, verified through CloudFront by the script. Checked after: `index.html` and `version.json`
+`no-cache, must-revalidate` (`x-cache: RefreshHit`), hashed assets `immutable`, every content
+type right (fonts included); the hashes equal a local build in another directory, so "already
+live" works; the old page untouched (live = this tree). The Cognito app client allows
+`ALLOW_REFRESH_TOKEN_AUTH`, has no secret (none is sent), and keeps the default 60-minute ID
+token and a 30-day refresh token. The bare `/app/` answers 403 — S3 has no directory index under
+OAC — so the address is `/app/index.html`. Headless Chromium in Claude's sandbox can't load
+network pages; the same build rendered from `file://`.
 
 ### Phase 1: Settings on today's API
 
@@ -370,7 +414,9 @@ Capacitor; multi-tenancy (revisit D4).
 
 ## 8. Session checklist
 
-- [ ] Phase 0: scaffold, ported player logic, shell, `deploy.sh app`, CI
+- [x] Phase 0: scaffold, ported player logic, shell, `deploy.sh app`, CI (built and tested locally)
+- [x] Phase 0: first deploy to `/app/` (2026-10-31)
+- [ ] Phase 0: sign-in and the 70-minute refresh checked at `/app/index.html` (the user)
 - [ ] Phase 1: Settings on today's API
 - [ ] Phase 2: `user-settings` backend, layouts, Live, Events
 - [ ] Phase 3: parity checklist, cutover, docs

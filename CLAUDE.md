@@ -41,7 +41,9 @@ behind per-camera H.264/H.265 selection (guide §21): hardware, camera, KVS and 
 measurements, and the decisions they led to. `VMS-PORT-PLAN.md` is the plan for porting VMS's
 fixes and features (written in VMS as `SUCCESSOR-PLAN.md`): its decisions D1–D5, phases and
 the VMS→successor bug-number mapping (this repository's #52–#75 = VMS's #51–#74); its
-"Applicability" section says how far the round got. `PYTEST.md` records how the pytest suite
+"Applicability" section says how far the round got. `WEB-PANEL-PLAN.md` is the plan for
+rebuilding the cloud client as a Vue app with panels (`client-app/`): decisions D1–D8, phases,
+progress — read it before touching either client. `PYTEST.md` records how the pytest suite
 was introduced, step by step, its safety guards and the phases still to come — read it before
 adding tests. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
 may be stale relative to the current guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
@@ -55,7 +57,8 @@ real failure that motivated one is the `FoundAndFixed.md` entry it cites.
 `FoundAndFixed.md #N` wherever the resulting rule is documented — don't retell the story
 in the guide, LAUNCH, README or the feature docs.
 
-There is no build system. `requirements.txt` lists what `venv-adapter` needs and
+There is no build system, with one exception: the web panel in `client-app/` (Vue + Vite,
+Node 24, its own Vitest suite and CI job; `client-app/README.md`). `requirements.txt` lists what `venv-adapter` needs and
 `requirements-test.txt` adds pytest. The **pytest suite** (`tests/`, `PYTEST.md`) checks the
 Python logic offline. It runs on the Pi and in GitHub Actions, with AWS, the network, systemd
 and MediaMTX all faked or blocked. It does not replace live verification: media, pipelines
@@ -117,8 +120,10 @@ of the live copy, taken before each upload.
 
 ```bash
 bash cloud/deploy.sh page        # checks the live page, backs it up, uploads, verifies via CloudFront
+bash cloud/deploy.sh app         # the web panel: fresh build from its lockfile, published under /app/
 ```
-Served at **https://dugyd3kkt36pw.cloudfront.net** (CloudFront + OAC, guide §8.5.1). The
+Served at **https://dugyd3kkt36pw.cloudfront.net** (CloudFront + OAC, guide §8.5.1); the web
+panel at `/app/index.html` beside it until its cutover (`WEB-PANEL-PLAN.md`). The
 `--cache-control` header (`deploy.sh` sets it) is required and does double duty: it prevents stale clients
 after a deploy (FoundAndFixed.md #11), and it makes CloudFront revalidate rather than
 serve a cached copy, so an upload is live immediately (`x-cache: RefreshHit`). Drop the

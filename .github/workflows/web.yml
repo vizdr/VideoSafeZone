@@ -1,0 +1,49 @@
+# Type-checks, tests and builds the web panel (client-app/, WEB-PANEL-PLAN.md) whenever it changes.
+#
+# No AWS credentials, secrets or OIDC role, on purpose, as in tests.yml: the Vitest suite fakes
+# Cognito, API Gateway and hls.js, and nothing is deployed from here -- deploys stay
+# cloud/deploy.sh, run by hand (CLAUDE.md).
+name: web
+
+on:
+  push:
+    paths: ["client-app/**", ".github/workflows/web.yml"]
+  pull_request:
+    paths: ["client-app/**", ".github/workflows/web.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    # x86, while the Pi is arm64: the lockfile carries the build tools' binaries for both.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: client-app
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"          # the Pi's (LAUNCH.md Part H)
+          cache: npm
+          cache-dependency-path: client-app/package-lock.json
+
+      - name: Install from the lockfile
+        run: npm ci --no-fund --no-audit
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run the tests
+        run: npm test
+
+      - name: Build
+        run: npm run build

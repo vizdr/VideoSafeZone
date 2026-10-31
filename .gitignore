@@ -23,3 +23,7 @@ __pycache__/
 
 # pytest
 .pytest_cache/
+
+# Web panel (client-app/): installed from its lockfile and built locally, never kept in git
+client-app/node_modules/
+client-app/dist/
