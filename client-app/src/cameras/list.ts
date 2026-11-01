@@ -44,6 +44,12 @@ export function codecLabel(c: Camera): string {
   return `video ${name}${where ? ` (${where})` : ""}`;
 }
 
+/** The codec the cloud stream carries: what the producer last pulled -- the sub stream's, when
+ *  that is recorded (WEB-PANEL-PLAN.md D5) -- else the camera's set codec. */
+export function cloudCodec(c: Camera): string {
+  return c.videoCodecActive || c.videoCodec;
+}
+
 /** "USB, transcoded" or "ONVIF, passthrough". */
 export function modeLabel(c: Camera): string {
   return c.mode === "passthrough" ? "ONVIF, passthrough" : "USB, transcoded";

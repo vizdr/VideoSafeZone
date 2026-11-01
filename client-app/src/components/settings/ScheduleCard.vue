@@ -16,8 +16,8 @@ import SettingCard from "./SettingCard.vue";
 import SettingRow from "./SettingRow.vue";
 
 // The camera schedule (WEB-PANEL-PLAN.md D6, §4.2): weekly entries that start or stop cloud
-// recording or set the recording mode. Stored now; the Pi runs it from Phase 5, edge-triggered --
-// each entry acts once, when its time passes, so a manual change in between stands.
+// recording or set the recording mode. The Pi runs it every minute (adapter/schedule_runner.py),
+// edge-triggered -- each entry acts once, when its time passes, so a manual change in between stands.
 const props = defineProps<{ camera: Camera }>();
 const cameras = useCamerasStore();
 
@@ -72,8 +72,8 @@ const pct = (min: number) => `${(min / 1440) * 100}%`;
   <SettingCard icon="pi-calendar">
     <SettingRow title="Camera schedule" :status="problem ? { text: problem, tone: 'error' } : save.status.value">
       Starts and stops cloud recording, or changes the recording mode, at set times every week.
-      <p class="pending">Stored with the camera. Not run yet: the Pi starts following schedules in a
-        coming update.</p>
+      <p class="pending">The Pi runs it every minute. Each entry acts once, when its time comes: a
+        Start or Stop pressed in between stands until the next entry.</p>
 
       <div class="form" role="group" aria-label="New schedule entry">
         <div class="days" role="group" aria-label="Days">
@@ -113,7 +113,7 @@ const pct = (min: number) => `${(min / 1440) * 100}%`;
 </template>
 
 <style scoped>
-.pending { color: var(--p-amber-400); margin: 0.4rem 0 0; }
+.pending { margin: 0.4rem 0 0; }
 .form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.75rem; }
 .days { display: flex; gap: 0.2rem; }
 .day {

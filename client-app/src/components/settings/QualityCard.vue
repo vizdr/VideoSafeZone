@@ -10,7 +10,8 @@ import SettingRow from "./SettingRow.vue";
 
 // Recorded quality (WEB-PANEL-PLAN.md D5): the admin GUI's choice is the ceiling, and the cloud may
 // only go lower -- one step, the sub stream, which the Pi already pulls for live view. The frame
-// rate stays in the admin GUI. Saved now; the producer starts reading it in Phase 5.
+// rate stays in the admin GUI. The producer reads the choice when it starts (stream-codec.py), so
+// it applies from the next Start, and records what it pulled (recordQualityActive).
 const props = defineProps<{ camera: Camera }>();
 const cameras = useCamerasStore();
 
@@ -34,8 +35,12 @@ const save = useSavedSetting<string | null>({
   apply: v => cameras.patch(props.camera.id, { recordQuality: !v || v === ceiling.value ? null : { stream: v } }),
   send: v => endpoints.setCameraSettings(props.camera.id,
                                          { recordQuality: !v || v === ceiling.value ? null : { stream: v } }),
-  saved: () => "Saved. Not applied yet: the Pi starts using this choice in a coming update (then on the next Start).",
+  saved: () => "Saved. Applies from the next Start of cloud recording.",
 });
+const active = computed(() => props.camera.recordQualityActive);
+const activeLabel = computed(() => active.value?.stream
+  ? `${active.value.stream === "sub" ? "Sub stream" : active.value.stream === "main" ? "Main stream" : "the camera's stream"}${active.value.size ? ` · ${active.value.size}` : ""}`
+  : null);
 const status = computed<SettingStatus | null>(() => save.status.value);
 </script>
 
@@ -50,6 +55,7 @@ const status = computed<SettingStatus | null>(() => save.status.value);
         <template v-if="options.length > 1">The sub stream records a smaller picture, for less.
           Applies from the next Start.</template>
         <template v-else>Nothing lower is offered: {{ ceiling === "sub" ? "the camera already records its sub stream" : "the camera has no sub stream" }}.</template>
+        <p v-if="activeLabel" class="active">Last cloud recording: {{ activeLabel }}.</p>
       </template>
       <template v-if="options.length > 1" #control>
         <Select :input-id="`quality-${camera.id}`" :model-value="choice" :options="options" option-label="label"
@@ -61,4 +67,5 @@ const status = computed<SettingStatus | null>(() => save.status.value);
 
 <style scoped>
 .wide { min-width: 13rem; }
+.active { margin: 0.35rem 0 0; }
 </style>

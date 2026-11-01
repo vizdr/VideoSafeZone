@@ -5,6 +5,7 @@ import IconField from "openvue/iconfield";
 import InputIcon from "openvue/inputicon";
 import InputText from "openvue/inputtext";
 import Message from "openvue/message";
+import ToggleSwitch from "openvue/toggleswitch";
 import { cameraName, groupCameras, matchesQuery } from "../cameras/list";
 import { useCamerasStore } from "../stores/cameras";
 import { usePlayersStore } from "../stores/players";
@@ -23,13 +24,28 @@ function dot(id: string): { cls: string; label: string } {
   return { cls: "off", label: "Not recording to the cloud" };
 }
 const query = ref("");
+
+// "Preview": the Pi's latest frame of each camera beside its name (thumbnails.py, every 10 min).
+// A choice for this browser only, remembered where storage allows it.
+const PREVIEW_KEY = "vsz.preview";
+const preview = ref((() => { try { return localStorage.getItem(PREVIEW_KEY) === "1"; } catch { return false; } })());
+function setPreview(on: boolean): void {
+  preview.value = on;
+  try { localStorage.setItem(PREVIEW_KEY, on ? "1" : "0"); } catch { /* storage blocked */ }
+}
+const failed = ref(new Set<string>());
 const groups = computed(() => groupCameras(store.cameras.filter(c => matchesQuery(c, query.value))));
 const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length, 0));
 </script>
 
 <template>
   <section class="camera-list" aria-label="Cameras">
-    <h2>Cameras <span class="count">({{ store.cameras.length }})</span></h2>
+    <div class="head">
+      <h2>Cameras <span class="count">({{ store.cameras.length }})</span></h2>
+      <label class="preview">Preview
+        <ToggleSwitch :model-value="preview" aria-label="Show camera pictures" @update:model-value="setPreview" />
+      </label>
+    </div>
     <IconField>
       <InputIcon class="pi pi-search" />
       <InputText v-model="query" placeholder="Search" aria-label="Search cameras" size="small" fluid />
@@ -54,6 +70,9 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
                   @click="emit('select', c.id)">
             <span class="dot" :class="dot(c.id).cls" role="img" :aria-label="dot(c.id).label"
                   :title="dot(c.id).label" />
+            <span v-if="preview" class="mini">
+              <img v-if="c.thumbnailUrl && !failed.has(c.id)" :src="c.thumbnailUrl" alt="" @error="failed.add(c.id)" />
+            </span>
             <span class="name">{{ cameraName(c) }}</span>
             <span v-if="c.displayName" class="id">{{ c.id }}</span>
           </button>
@@ -64,7 +83,12 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
 </template>
 
 <style scoped>
-h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+h2 { margin: 0; font-size: 1.05rem; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
+.preview { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--p-text-muted-color); }
+.mini { flex: none; width: 3.6rem; aspect-ratio: 16 / 9; border-radius: 0.2rem; overflow: hidden;
+        background: var(--p-surface-950); align-self: center; }
+.mini img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .count { color: var(--p-text-muted-color); font-weight: normal; }
 .group {
   margin: 1rem 0 0.25rem;

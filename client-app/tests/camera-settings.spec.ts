@@ -139,7 +139,7 @@ describe("Recorded quality card (D5)", () => {
     sel.vm.$emit("update:modelValue", "sub");
     await flushPromises();
     expect(fake.endpoints.setCameraSettings).toHaveBeenLastCalledWith("cam-02", { recordQuality: { stream: "sub" } });
-    expect(w.text()).toContain("Not applied yet");
+    expect(w.text()).toContain("Applies from the next Start of cloud recording.");
     await refresh(w);
     w.findComponent(Select).vm.$emit("update:modelValue", "main");
     await flushPromises();
@@ -170,7 +170,7 @@ describe("Schedule card (D6)", () => {
 
   it("adds entries in this browser's time zone, draws the week, and warns while a Start has no Stop", async () => {
     const w = mountCard(ScheduleCard, cam());
-    expect(w.text()).toContain("Not run yet");
+    expect(w.text()).toContain("The Pi runs it every minute.");
     await addEntry(w, ["Mon", "Tue"], "18:00", "start");
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     expect(fake.endpoints.setCameraSettings).toHaveBeenLastCalledWith("cam-02",
@@ -198,5 +198,12 @@ describe("Schedule card (D6)", () => {
     await w.find('button[aria-label^="Delete:"]').trigger("click");
     await flushPromises();
     expect(fake.endpoints.setCameraSettings).toHaveBeenLastCalledWith("cam-02", { schedule: null });
+  });
+});
+
+describe("what the Pi reports back (Phase 5)", () => {
+  it("shows what the last cloud recording pulled", () => {
+    const w = mountCard(QualityCard, cam({ recordQualityActive: { stream: "sub", size: "800x448" } }));
+    expect(w.text()).toContain("Last cloud recording: Sub stream · 800x448.");
   });
 });

@@ -803,6 +803,8 @@ All additive; no existing field changes meaning. VMS reads none of the new succe
 | `liveStream` *(new)* | when the `-live` KVS stream is created | KVS stream name for live view | ignored |
 | `tags`, `schedule`, `recordQuality` *(new, web panel)* | set-camera-settings (cloud) | camera tags; the weekly schedule; the cloud's recorded-quality choice below the ceiling (`WEB-PANEL-PLAN.md` §5.1) | ignored |
 | `recordStream`, `recordSize`, `recordFps` *(new, web panel)* | this admin GUI: registration, stream/fps switch, stream read | the recorded-quality ceiling (D5 of `WEB-PANEL-PLAN.md`); VMS's own switches don't write it, so it is relearnt on this GUI's next read | ignored |
+| `recordQualityActive` *(new, web panel)* | this project's producers, at start (`stream-codec.py`) | `{stream, size}` the recording last pulled | ignored |
+| `videoCodecActiveSince` *(meaning widened)* | this project's producers | since when the archive's video is as it is now: stamped on a change of codec **or of picture** (main/sub, size) — KVS refuses a clip across either | VMS's clip Lambdas split at it too: a split where nothing changed for VMS costs only one extra clip |
 
 Two consequences to keep in mind: the `cameras` table is shared, so **unregistering in either
 project hides the camera in both**, and a stream switch in either project changes what the other

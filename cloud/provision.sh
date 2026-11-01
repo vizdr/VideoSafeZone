@@ -6,6 +6,8 @@
 #                                                     table, role, function, routes, CORS, stage
 #   bash cloud/provision.sh camera-settings           POST /cameras/settings (WEB-PANEL-PLAN.md
 #                                                     Phase 4): role, function, route, CORS, stage
+#   bash cloud/provision.sh thumbnails                camera thumbnails (Phase 5.3): a policy for the
+#                                                     Pi's role and for list-cameras', its BUCKET
 #
 # deploy.sh replaces the code of functions that exist; this creates what doesn't exist yet -- and
 # only that. Every step looks first and leaves an existing resource as it is, so a second run
@@ -105,6 +107,35 @@ ensure_function() {   # ensure_function NAME ROLE -- python3.13, arm64, 128 MB, 
   done
   aws lambda wait function-active-v2 --function-name "$name"
   CHANGED=1
+}
+
+ensure_inline_policy() {   # ensure_inline_policy ROLE NAME FILE -- adds a policy, never changes one
+  local role=$1 pname=$2 file="$IAM_DIR/$3" live
+  [ -e "$file" ] || die "no $file"
+  aws iam get-role --role-name "$role" >/dev/null 2>&1 || die "no role $role"
+  if live=$(aws iam get-role-policy --role-name "$role" --policy-name "$pname" --query PolicyDocument --output json 2>/dev/null); then
+    if python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1]) != json.load(open(sys.argv[2])))' "$live" "$file"; then
+      say "policy $pname on $role: exists, as cloud/iam/$3"
+    else
+      warn "policy $pname on $role differs from cloud/iam/$3 -- left as is; reconcile them (FoundAndFixed #41)"
+    fi
+    return
+  fi
+  create "policy $pname on $role (cloud/iam/$3)" aws iam put-role-policy --role-name "$role" \
+    --policy-name "$pname" --policy-document "file://$file"
+}
+
+ensure_env() {   # ensure_env FUNCTION KEY VALUE -- adds one environment variable, never changes one
+  local fn=$1 key=$2 value=$3 vars current merged
+  vars=$(aws lambda get-function-configuration --function-name "$fn" --query 'Environment.Variables' --output json)
+  current=$(python3 -c 'import json,sys; print((json.loads(sys.argv[1]) or {}).get(sys.argv[2], ""))' "$vars" "$key")
+  if [ "$current" = "$value" ]; then say "$fn: $key=$value already"; return; fi
+  if [ -n "$current" ]; then warn "$fn: $key is '$current', not '$value' -- left as is"; return; fi
+  merged=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]) or {}; d[sys.argv[2]]=sys.argv[3]; print(json.dumps({"Variables": d}))' "$vars" "$key" "$value")
+  if [ "$DRY" -eq 1 ]; then say "would set $fn's $key=$value"; return; fi
+  say "setting $fn's $key=$value"
+  aws lambda update-function-configuration --function-name "$fn" --environment "$merged" >/dev/null
+  aws lambda wait function-updated --function-name "$fn"
 }
 
 resource_id() {    # resource_id /me/settings -> its id, or empty
@@ -217,8 +248,27 @@ provision_camera_settings() {
   verify_route /cameras/settings "give cameraId" POST
 }
 
+provision_thumbnails() {
+  # The evidence bucket, as the clip Lambdas know it -- not spelled out here a second time.
+  local bucket; bucket=$(aws lambda get-function-configuration --function-name record-clip \
+    --query 'Environment.Variables.BUCKET' --output text)
+  [ -n "$bucket" ] && [ "$bucket" != None ] || die "record-clip has no BUCKET: can't tell the evidence bucket"
+  grep -q "arn:aws:s3:::$bucket/thumbs/" "$IAM_DIR/thumbnails-policy.json" "$IAM_DIR/list-cameras-thumbnails-policy.json" ||
+    die "the policies in cloud/iam/ don't name $bucket"
+  ensure_inline_policy KVSAdapterRole Thumbnails thumbnails-policy.json
+  ensure_inline_policy ListCamerasLambdaRole thumbnails-read list-cameras-thumbnails-policy.json
+  ensure_env list-cameras BUCKET "$bucket"
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  aws iam get-role-policy --role-name KVSAdapterRole --policy-name Thumbnails >/dev/null &&
+    aws iam get-role-policy --role-name ListCamerasLambdaRole --policy-name thumbnails-read >/dev/null &&
+    [ "$(aws lambda get-function-configuration --function-name list-cameras --query 'Environment.Variables.BUCKET' --output text)" = "$bucket" ] ||
+    die "thumbnails: a policy or list-cameras' BUCKET isn't there afterwards"
+  say "verified: both policies attached, list-cameras knows the bucket"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
-  *) sed -n '2,9p' "$0"; exit 1 ;;
+  thumbnails)      preflight; provision_thumbnails ;;
+  *) sed -n '2,11p' "$0"; exit 1 ;;
 esac

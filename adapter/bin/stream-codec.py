@@ -26,11 +26,19 @@ clip windows are clamped to, so the live view's codec goes to its own additive f
 liveVideoCodecActive, which only the cloud page's H.265 warning for the Live player reads: a
 camera can record H.264 on main while its sub stream, the live view, stays H.265 (cam-04).
 
-When the codec differs from the last one recorded, it also records the change, soft-failing
-and on a hard time budget so AWS can never delay a start:
-  - registry: videoCodecActive, plus videoCodecActiveSince when it replaces another codec.
-    The GUIs show it, and clip windows get clamped to it: KVS refuses any clip or HLS
-    session spanning a codec change (measurements/codec-phase0.md §4).
+For the recording producer the path is the camera's recorded one -- unless the cloud page chose
+the sub stream (recordQuality {"stream": "sub"} below a main-stream ceiling, WEB-PANEL-PLAN.md
+D5): then it is the live-view path, which MediaMTX already pulls continuously. Read once, at start,
+like audioEnabled (camera-audio.py), so a choice applies from the next Start; on a short budget, and
+an unreachable registry means the recorded stream -- the most the camera records, never no producer.
+
+When what it receives differs from the last one recorded, it also records the change,
+soft-failing and on a hard time budget so AWS can never delay a start:
+  - registry: videoCodecActive and recordQualityActive ({"stream", "size"}: what it pulled), plus
+    videoCodecActiveSince when either replaces another: a new codec, or another picture -- the
+    sub stream instead of main, or a stream switched in an admin GUI. Clip windows get clamped to
+    it: KVS refuses any clip or HLS session whose fragments' codec private data differs, and the
+    picture size is part of it, as the codec is (measurements/codec-phase0.md §4).
   - KVS: the stream's MediaType, which consumers such as the console player read.
     UpdateStream, not a new stream -- the archive and ARN stay (codec-phase0.md §3).
 """
@@ -46,6 +54,7 @@ import camera_control  # noqa: E402
 import mediamtx_api    # noqa: E402
 
 RECORD_BUDGET_SEC = 8
+QUALITY_BUDGET_SEC = 6
 
 
 def wait_for_codec(path: str, wait: int) -> str | None:
@@ -63,7 +72,44 @@ def wait_for_codec(path: str, wait: int) -> str | None:
         time.sleep(1)
 
 
-def record(camera_id: str, codec: str, stream: str, live: bool) -> None:
+def chosen_sub(camera_id: str) -> bool:
+    """Whether the cloud page chose the sub stream for this camera's recording: recordQuality
+    {"stream": "sub"} below a main-stream ceiling (set-camera-settings checks the same)."""
+    try:
+        from botocore.config import Config
+        from aws_device_creds import get_session   # loads config; inside the try on purpose
+        quick = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
+        item = (get_session().resource("dynamodb", config=quick).Table("cameras")
+                .get_item(Key={"cameraId": camera_id}).get("Item") or {})
+    except Exception as e:  # noqa: BLE001 -- the camera's own stream is always a safe choice
+        print(f"stream-codec.py: registry unreachable ({type(e).__name__}): recording the camera's "
+              f"own stream", file=sys.stderr)
+        return False
+    return (item.get("recordQuality") or {}).get("stream") == "sub" and item.get("recordStream") == "main"
+
+
+def recorded_path(camera_id: str) -> tuple[str, bool]:
+    """(MediaMTX path, whether it is the sub stream) for the recording producer."""
+    path = camera_control.mediamtx_path_name(camera_id)
+    box = {}
+    t = threading.Thread(target=lambda: box.update(sub=chosen_sub(camera_id)), daemon=True)
+    t.start()
+    t.join(QUALITY_BUDGET_SEC)
+    if not box.get("sub"):
+        return path, False
+    live = camera_control.live_path_name(camera_id)
+    try:
+        if mediamtx_api.get_path_conf(live) is not None:
+            return live, True
+    except Exception:  # noqa: BLE001 -- MediaMTX not answering: the codec wait fails anyway
+        pass
+    print(f"stream-codec.py: {camera_id}: the sub stream was chosen, but MediaMTX has no "
+          f"'{live}' path -- recording the camera's own stream", file=sys.stderr)
+    return path, False
+
+
+def record(camera_id: str, codec: str, stream: str, live: bool,
+           sub: bool = False, size: str | None = None) -> None:
     try:
         from botocore.config import Config
         from aws_device_creds import get_session   # loads config; inside the try on purpose
@@ -73,26 +119,37 @@ def record(camera_id: str, codec: str, stream: str, live: bool) -> None:
         if live:
             record_live_registry(table, camera_id, codec)
         else:
-            record_registry(table, camera_id, codec)
+            record_registry(table, camera_id, codec, sub, size)
         record_media_type(session.client("kinesisvideo", config=quick), stream, codec)
     except Exception as e:  # noqa: BLE001 -- recording is best effort, streaming is not
         print(f"stream-codec.py: could not record {codec} for {stream} "
               f"({type(e).__name__}: {e}); streaming anyway", file=sys.stderr)
 
 
-def record_registry(table, camera_id: str, codec: str) -> None:
-    prev = (table.get_item(Key={"cameraId": camera_id}).get("Item") or {}).get("videoCodecActive")
+def record_registry(table, camera_id: str, codec: str, sub: bool = False,
+                    size: str | None = None) -> None:
+    item = table.get_item(Key={"cameraId": camera_id}).get("Item") or {}
+    prev, prev_active = item.get("videoCodecActive"), item.get("recordQualityActive")
+    active = {"stream": "sub" if sub else (item.get("recordStream") or "recorded"),
+              **({"size": size} if size else {})}
+    sets, values = [], {}
     if prev != codec:
-        # "Since" only marks a real switch. On the very first record there is no
-        # earlier codec in the archive, so there is no boundary to clamp clips to.
-        update, values = "SET videoCodecActive = :c", {":c": codec}
-        if prev:
-            update += ", videoCodecActiveSince = :t"
-            values[":t"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression=update,
+        sets.append("videoCodecActive = :c")
+        values[":c"] = codec
+    if prev_active != active:
+        sets.append("recordQualityActive = :q")
+        values[":q"] = active
+    # "Since" only marks a real switch -- of codec or of picture. On the very first record there
+    # is nothing earlier in the archive, so there is no boundary to clamp clips to.
+    picture = lambda a: (a.get("stream"), a.get("size"))   # noqa: E731
+    if (prev and prev != codec) or (prev_active and picture(prev_active) != picture(active)):
+        sets.append("videoCodecActiveSince = :t")
+        values[":t"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if sets:
+        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET " + ", ".join(sets),
                           ExpressionAttributeValues=values)
-        print(f"stream-codec.py: {camera_id} now streams {codec} (was {prev or 'unrecorded'})",
-              file=sys.stderr)
+        print(f"stream-codec.py: {camera_id} now streams {codec} {active} "
+              f"(was {prev or 'unrecorded'} {prev_active or ''})", file=sys.stderr)
 
 
 def record_live_registry(table, camera_id: str, codec: str) -> None:
@@ -133,15 +190,17 @@ def main() -> int:
             pass
         stream = camera_control.live_stream_name(args.camera_id)
     else:
-        path, stream = camera_control.mediamtx_path_name(args.camera_id), args.camera_id
+        (path, sub), stream = recorded_path(args.camera_id), args.camera_id
     codec = wait_for_codec(path, args.wait)
     if not codec:
         print(f"stream-codec.py: no H.264/H.265 video flowing on MediaMTX path '{path}' after "
               f"{args.wait}s", file=sys.stderr)
         return 1
 
-    t = threading.Thread(target=record, args=(args.camera_id, codec, stream, args.live),
-                         daemon=True)
+    track = mediamtx_api.path_video_track(path) or {}
+    size = f"{track['width']}x{track['height']}" if track.get("width") and track.get("height") else None
+    t = threading.Thread(target=record, args=(args.camera_id, codec, stream, args.live,
+                                              not args.live and sub, size), daemon=True)
     t.start()
     t.join(RECORD_BUDGET_SEC)
     if t.is_alive():

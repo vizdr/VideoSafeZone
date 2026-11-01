@@ -11,7 +11,7 @@
 #       (deploys, creating a device certificate); the adapter itself never uses it. Logging in
 #       is interactive and left to you:  aws login --remote  (only when you need it).
 #   A8  the user units: MediaMTX, the cam-01 publisher, agent, admin GUI, event watcher, outage
-#       supervisor and uploader, rematch timer, and netwatch. Written, not enabled: that is
+#       supervisor and uploader, rematch, schedule and thumbnail timers, and netwatch. Written, not enabled: that is
 #       setup-launch.sh, once the certificate exists. This script is the authoritative source of
 #       the unit files (they are not in git).
 #
@@ -197,6 +197,52 @@ Description=Rescan for moved ONVIF cameras every 5 minutes
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+# The camera schedules from the web panel (WEB-PANEL-PLAN.md D6): every minute, on the minute.
+# Edge-triggered and caught up after a gap by schedule_runner.py itself, so Persistent= isn't
+# wanted -- a timer that fired late for missed minutes would replay what the runner skips.
+uunit kvs-schedule.service <<EOF
+[Unit]
+Description=Run the camera schedules (start/stop cloud recording, recording mode)
+
+[Service]
+Type=oneshot
+WorkingDirectory=$VMS_HOME/adapter
+ExecStart=$VENV/bin/python3 -u $VMS_HOME/adapter/schedule_runner.py
+EOF
+uunit kvs-schedule.timer <<EOF
+[Unit]
+Description=Run the camera schedules every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+# Camera thumbnails for the web panel (WEB-PANEL-PLAN.md Phase 5.3): one frame per camera with
+# video, every 10 minutes.
+uunit kvs-thumbnails.service <<EOF
+[Unit]
+Description=Upload a thumbnail of each camera with video
+After=kvs-mediamtx.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=$VMS_HOME/adapter
+ExecStart=$VENV/bin/python3 -u $VMS_HOME/adapter/thumbnails.py
+EOF
+uunit kvs-thumbnails.timer <<EOF
+[Unit]
+Description=Upload camera thumbnails every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
 
 [Install]
 WantedBy=timers.target

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watchEffect } from "vue";
+import { computed, ref, watch, watchEffect } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { cameraName, modeLabel } from "../cameras/list";
 import CameraSection from "../components/settings/CameraSection.vue";
@@ -22,6 +22,13 @@ const requested = computed(() =>
 const cam = computed(() => cameras.byId(requested.value));
 const section = computed(() => (route.params.section === "recording" ? "recording" : "camera"));
 
+// The Pi's latest frame (thumbnails.py, every 10 minutes). Its link lasts an hour: an expired or
+// missing one falls back to the placeholder.
+const thumbFailed = ref(false);
+watch(() => cam.value?.thumbnailUrl, () => { thumbFailed.value = false; });
+const takenAt = computed(() => cam.value?.thumbnailAt
+  ? `taken ${new Date(cam.value.thumbnailAt).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}` : null);
+
 // Settings always shows a camera: the first one until another is picked.
 watchEffect(() => {
   if (!requested.value && cameras.cameras.length) {
@@ -40,10 +47,12 @@ watchEffect(() => {
           {{ cameraName(cam) }}<span v-if="cam.displayName" class="cam-id">{{ cam.id }}</span>
         </h2>
         <p class="muted small">{{ modeLabel(cam) }}{{ cam.hasIrControl ? " · IR control" : "" }}</p>
-        <div class="thumb" aria-hidden="true">
-          <i class="pi pi-image" />
-          <span>No preview yet</span>
-        </div>
+        <figure class="thumb">
+          <img v-if="cam.thumbnailUrl && !thumbFailed" :src="cam.thumbnailUrl" :alt="`Latest frame of ${cameraName(cam)}`"
+               @error="thumbFailed = true" />
+          <template v-else><i class="pi pi-image" aria-hidden="true" /><span>No picture yet</span></template>
+          <figcaption v-if="cam.thumbnailUrl && !thumbFailed && takenAt">{{ takenAt }}</figcaption>
+        </figure>
         <CloudRecording :camera="cam" />
         <nav class="sections" aria-label="Settings sections">
           <RouterLink v-for="s in SECTIONS" :key="s.name"
@@ -89,6 +98,12 @@ watchEffect(() => {
   font-size: 0.8rem;
 }
 .thumb .pi { font-size: 1.6rem; }
+.thumb { position: relative; overflow: hidden; margin: 0; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb figcaption {
+  position: absolute; right: 0.4rem; bottom: 0.35rem; padding: 0.1rem 0.4rem; border-radius: 0.3rem;
+  background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 0.72rem;
+}
 .sections { display: flex; flex-direction: column; gap: 0.5rem; }
 .sections a {
   display: flex;

@@ -6,7 +6,7 @@
 # Needs the earlier steps: setup-system.sh, setup-user.sh, setup-identity.sh (the SDK only for
 # the producers, which this script never starts). Then:
 #   1. enables and starts every user unit -- MediaMTX, the cam-01 publisher, agent, admin GUI,
-#      event watcher, outage supervisor and uploader, the rematch timer, netwatch. Enabled means
+#      event watcher, outage supervisor and uploader, the rematch, schedule and thumbnail timers, netwatch. Enabled means
 #      they come back by themselves after every reboot (lingering is on), so this runs once.
 #   2. gives every camera registered from another SD card -- or before this card existed -- its
 #      producer: a kvs-cam@ instance via provision-camera.sh, *not* started and *not* enabled
@@ -32,6 +32,8 @@ for u in "${USER_UNITS[@]}"; do
   systemctl --user enable --now "$u.service" >/dev/null 2>&1 || warn "$u didn't start -- journalctl --user -u $u"
 done
 systemctl --user enable --now kvs-camera-rematch.timer >/dev/null 2>&1
+systemctl --user enable --now kvs-schedule.timer >/dev/null 2>&1
+systemctl --user enable --now kvs-thumbnails.timer >/dev/null 2>&1
 ok "$(for u in "${USER_UNITS[@]}"; do printf '%s=%s ' "$u" "$(systemctl --user is-active "$u")"; done)"
 
 step "2. producers for cameras registered elsewhere (provisioned, not started)"

@@ -90,7 +90,7 @@ fi
 if [ "${AUDIO:-off}" = "on" ]; then
   echo "stream-cam02: audio ENABLED (${AUDIO_TRACK} -> AAC 8kHz), video ${VIDEO_CODEC}"
   producer_run stream-cam02 -v \
-    rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
+    rtspsrc location="rtsp://127.0.0.1:8554/${VIDEO_PATH:-cam02}" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
     ! ${VIDEO_CHAIN} ! queue ! kvs.video_0 \
     src. ! application/x-rtp,media=audio ! queue \
@@ -110,7 +110,7 @@ fi
 # track at all, which is cam-01's case, so the same shape is safe everywhere.
 echo "stream-cam02: audio disabled (video only), video ${VIDEO_CODEC}"
 producer_run stream-cam02 -v \
-  rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
+  rtspsrc location="rtsp://127.0.0.1:8554/${VIDEO_PATH:-cam02}" protocols=tcp latency=200 name=src \
   src. ! application/x-rtp,media=video ! queue \
   ! ${VIDEO_CHAIN} \
   ! ${KVSSINK} \

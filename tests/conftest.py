@@ -158,6 +158,9 @@ _SANDBOXED_PATHS = {
         "REGISTRY_CACHE": "state/vms/cameras-cache.json",
     },
     "outage_uploader": {"BUFFER_ROOT": "mnt/vms-buffer", "OUTAGE_DIR": "mnt/vms-buffer/outage"},
+    "schedule_runner": {"STATE_DIR": "state/vms-schedule",
+                        "LAST_RUN": "state/vms-schedule/last-run.json",
+                        "CACHE": "state/vms-schedule/schedules.json"},
     "sync_mediamtx_paths": {"STATE_DIR": "state/vms-adapter",
                             "CACHE": "state/vms-adapter/cameras-cache.json"},
 }

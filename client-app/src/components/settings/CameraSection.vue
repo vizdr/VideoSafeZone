@@ -5,7 +5,7 @@ import ToggleSwitch from "openvue/toggleswitch";
 import { endpoints } from "../../api";
 import { errorText } from "../../api/client";
 import type { Camera, IrMode } from "../../api/types";
-import { codecLabel } from "../../cameras/list";
+import { cloudCodec, codecLabel } from "../../cameras/list";
 import { IR_MODES, audioHint, audioSaved } from "../../cameras/settings";
 import { useSavedSetting, type SettingStatus } from "../../composables/useSavedSetting";
 import { hevcSupport, mseSupported } from "../../player/hevc";
@@ -24,7 +24,7 @@ const id = computed(() => props.camera.id);
 // Video: display only. The codec is set on the camera, in the admin GUI (guide §21.3); here it
 // matters for whether this browser can play the camera at all.
 const canPlayHevc = hevcSupport(mseSupported()).live;
-const recordedHevcWarning = computed(() => props.camera.videoCodec === "h265" && !canPlayHevc);
+const recordedHevcWarning = computed(() => cloudCodec(props.camera) === "h265" && !canPlayHevc);
 const liveHevcWarning = computed(() => props.camera.liveView === "sub"
   && props.camera.liveVideoCodec === "h265" && props.camera.videoCodec !== "h265" && !canPlayHevc);
 

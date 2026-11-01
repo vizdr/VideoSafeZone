@@ -37,9 +37,14 @@ export interface Camera {
   recordFps?: number | null;
   /** The cloud's choice below the ceiling; null = the ceiling. */
   recordQuality?: { stream: string } | null;
-  recordQualityActive?: { stream?: string } | null;
+  /** What the producer pulled at its last start: the stream and its picture size. */
+  recordQualityActive?: { stream?: string; size?: string } | null;
   /** The streams the page may choose, the ceiling first; empty = nothing to choose. */
   recordQualityOptions?: string[];
+  /** The Pi's latest frame of the camera (adapter/thumbnails.py): a link valid for an hour, and
+   *  when it was taken. Null before the first one, or before provision.sh thumbnails. */
+  thumbnailUrl?: string | null;
+  thumbnailAt?: string | null;
 }
 
 export type Day = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";

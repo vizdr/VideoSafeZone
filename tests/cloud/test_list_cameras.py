@@ -69,7 +69,8 @@ def test_fields_the_page_uses(aws):
         "detectionTests": None, "webUrl": None, "liveView": "sub", "liveVideoCodec": None,
         # WEB-PANEL-PLAN.md §5.1, all absent from this row; no ceiling recorded yet: no choices.
         "tags": [], "schedule": None, "recordStream": None, "recordSize": None, "recordFps": None,
-        "recordQuality": None, "recordQualityActive": None, "recordQualityOptions": []}
+        "recordQuality": None, "recordQualityActive": None, "recordQualityOptions": [],
+        "thumbnailUrl": None, "thumbnailAt": None}      # no bucket configured in this test: none
     assert cams["cam-01"]["recordingMode"] == "manual"          # the default
     assert cams["cam-01"]["supportsDetection"] is False         # no ONVIF: manual only
     assert (cams["cam-01"]["videoCodec"], cams["cam-01"]["videoEncode"]) == ("h264", "pi-hw")
@@ -108,3 +109,21 @@ def test_quality_options_follow_the_ceiling():
     assert opts({"onvifHost": "h", "recordStream": "sub"}) == ["sub"]            # nothing below sub
     assert opts({"onvifHost": "h"}) == []                                        # ceiling not known yet
     assert opts({"mode": "transcode", "recordStream": "main"}) == []             # USB: fixed on the Pi
+
+
+
+def test_thumbnails_are_linked_when_the_pi_has_uploaded_one(aws, monkeypatch):
+    # WEB-PANEL-PLAN.md Phase 5.3: a HEAD per camera; a missing key (403 without ListBucket) is no thumbnail.
+    from datetime import datetime, timezone
+    monkeypatch.setattr(list_cameras, "BUCKET", "evidence-bucket")
+    fake = aws(list_cameras, ROWS)
+    s3 = fake.stub("s3")
+    s3.add_client_error("head_object", "403", "Forbidden", expected_params={"Bucket": "evidence-bucket", "Key": "thumbs/cam-01.jpg"})
+    s3.add_response("head_object", {"LastModified": datetime(2026, 11, 1, 10, 20, tzinfo=timezone.utc)},
+                    {"Bucket": "evidence-bucket", "Key": "thumbs/cam-02.jpg"})
+    code, out = invoke(list_cameras)
+    cams = {c["id"]: c for c in out["cameras"]}
+    assert (cams["cam-01"]["thumbnailUrl"], cams["cam-01"]["thumbnailAt"]) == (None, None)
+    url = cams["cam-02"]["thumbnailUrl"]
+    assert url.startswith("https://s3.eu-central-1.amazonaws.com/evidence-bucket/thumbs/cam-02.jpg?")
+    assert "X-Amz-Expires=3600" in url and cams["cam-02"]["thumbnailAt"] == "2026-11-01T10:20:00Z"

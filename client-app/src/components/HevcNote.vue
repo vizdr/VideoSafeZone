@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import Message from "openvue/message";
 import { HEVC_STORE_URL, hevcOnWindows, hevcSupport, mseSupported } from "../player/hevc";
+import { cloudCodec } from "../cameras/list";
 import { useCamerasStore } from "../stores/cameras";
 import { usePlayersStore } from "../stores/players";
 
@@ -13,7 +14,7 @@ const players = usePlayersStore();
 const canPlay = hevcSupport(mseSupported()).live;
 const windows = hevcOnWindows();
 const show = computed(() =>
-  (!canPlay && cameras.cameras.some(c => c.videoCodec === "h265"))
+  (!canPlay && cameras.cameras.some(c => cloudCodec(c) === "h265"))
   || Object.values(players.states).some(s => s.hevcHelp));
 </script>
 

@@ -50,7 +50,9 @@ VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
   || { echo "stream-channel(${KVS_STREAM}): no H.264/H.265 video on ${MEDIAMTX_PATH} from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
 eval "${VIDEO_ENV}"
 VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
-[ -n "${LIVE_OF:-}" ] && MEDIAMTX_PATH="${VIDEO_PATH}"
+# The path stream-codec.py chose: the live view's for a Live producer, and for a recording producer
+# the camera's recorded path -- or its sub stream's, when the cloud page chose it (D5).
+MEDIAMTX_PATH="${VIDEO_PATH:-$MEDIAMTX_PATH}"
 if live_deadline_passed; then
   # Started (or restarted after a failure) with no viewer left: nothing to push.
   echo "stream-channel(${KVS_STREAM}): live-view deadline already passed -- not starting" >&2

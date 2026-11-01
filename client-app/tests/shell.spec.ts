@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils";
 import OpenVue from "openvue/config";
+import ToggleSwitch from "openvue/toggleswitch";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Camera } from "../src/api/types";
@@ -63,10 +64,21 @@ describe("CameraList", () => {
 
   it("filters as the viewer types and says when nothing matches", async () => {
     const w = mountList([cam("cam-01"), cam("cam-02", { displayName: "Front gate" })]);
-    await w.find("input").setValue("gate");
+    await w.find('input[aria-label="Search cameras"]').setValue("gate");
     expect(w.findAll("button.cam").map(b => b.text())).toEqual(["Front gatecam-02"]);
-    await w.find("input").setValue("nothing");
+    await w.find('input[aria-label="Search cameras"]').setValue("nothing");
     expect(w.text()).toContain("No camera matches “nothing”.");
+  });
+
+  it("Preview shows each camera's latest picture, and is remembered in this browser", async () => {
+    localStorage.removeItem("vsz.preview");
+    const w = mountList([cam("cam-01", { thumbnailUrl: "https://s3.example/thumbs/cam-01.jpg" }), cam("cam-02")]);
+    expect(w.findAll("img")).toHaveLength(0);
+    w.findComponent(ToggleSwitch).vm.$emit("update:modelValue", true);
+    await w.vm.$nextTick();
+    expect(w.findAll("img").map(i => i.attributes("src"))).toEqual(["https://s3.example/thumbs/cam-01.jpg"]);
+    expect(w.findAll(".mini")).toHaveLength(2);           // cam-02: an empty frame, no broken image
+    expect(localStorage.getItem("vsz.preview")).toBe("1");
   });
 
   it("says so when no camera is registered", () => {

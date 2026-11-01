@@ -148,7 +148,9 @@ live view (below), never enabled.
 `kvs-event-watcher` (ONVIF detection → clips), `netwatch` (logs the network every 10 s,
 FoundAndFixed.md #79), `kvs-outage-buffer` +
 `kvs-outage-uploader` (durable outage buffering, `OUTAGE.md`), and the
-`kvs-camera-rematch.timer` oneshot (follows ONVIF cameras to a new IP).
+`kvs-camera-rematch.timer` oneshot (follows ONVIF cameras to a new IP), `kvs-schedule.timer`
+(every minute: runs the web panel's camera schedules, `adapter/schedule_runner.py`) and
+`kvs-thumbnails.timer` (every 10 min: one frame per camera for the web panel, `adapter/thumbnails.py`).
 
 A unit in one manager **cannot** `Requires=`/`After=` a unit in the other — they're
 independent systemd instances; a cross-manager `Requires=` fails with "Unit not found"

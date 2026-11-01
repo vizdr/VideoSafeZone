@@ -22,6 +22,10 @@ backup (byte-identical to the committed file) and `client/index.html` has left t
 user): `set-camera-settings` created by `provision.sh camera-settings` (`POST /cameras/settings`
 answers 401 without a token), `list-cameras` deployed, the admin GUI restarted, `deploy.sh page`
 done; `deploy.sh status` shows every function as this tree. Not committed yet.
+**Phase 5** (the Pi side: schedule runner, sub-stream step, thumbnails) is built and tested locally
+(2026-11-01) — not committed, not installed or deployed: it needs the two new timers on the Pi,
+`bash cloud/provision.sh thumbnails`, `bash cloud/deploy.sh lambda list-cameras` and
+`deploy.sh page`.
 
 ---
 
@@ -532,6 +536,42 @@ fragments); a reboot across an entry fires it within the catch-up window; with "
 next Start pushes the sub resolution (ffprobe the HLS URL, decode a frame and look at it);
 thumbnails appear and refresh.
 
+*Built 2026-11-01* (119 Vitest tests, 971 pytest):
+- **5.1 `adapter/schedule_runner.py`**, run by `kvs-schedule.timer` on every minute (oneshot;
+  `Persistent=` off on purpose — the runner catches up by itself). Edge-triggered with a last-run
+  file; entries missed by up to 10 min still act, older ones are logged and skipped; the first run
+  replays nothing; times in the schedule's zone with `zoneinfo` (a skipped DST time acts once after
+  the jump, a repeated one once). Actions: start/stop through `camera_control.set_stream` (a camera
+  with no producer on this Pi is skipped), a mode through a conditional registry write that refuses
+  an unregistered camera; a mode change and a Start at one moment run mode first. **Deviation:** the
+  outage supervisor's cache holds only buffer seconds, so the runner keeps its own 0600 cache of the
+  schedules (no credentials), refreshed at most every 5 min and used while AWS is unreachable.
+  Found by its tests before it shipped: a small clock step back (NTP) made an entry act twice — the
+  later last-run time is now kept, and a last run recorded far ahead (a Pi with no battery clock)
+  starts over from now. 15 tests. Run once against the real registry: reads it with the device's
+  identity, finds no schedules, does nothing.
+- **5.2 the stream step:** `stream-codec.py` reads `recordQuality` once at start (6 s budget; an
+  unreachable registry means the camera's own stream) and, for "sub" below a main ceiling with a
+  `_live` path in MediaMTX, the recording producer pulls that path (`VIDEO_PATH`, now used by
+  `stream-channel.sh` and `stream-cam02.sh` for recording too). It records `recordQualityActive`
+  (`{stream, size}`) and stamps `videoCodecActiveSince` on a change of picture as well as of codec:
+  KVS refuses a clip whose codec private data changes, and the size is part of it — so a clip
+  across a main/sub switch is split, not lost. That also covers a stream switched in an admin GUI
+  with the codec unchanged, which nothing split before (unmeasured, §7). 10 tests (the first for
+  `stream-codec.py`). The page's H.265 warnings use the codec the cloud stream carries.
+- **5.3 thumbnails:** `adapter/thumbnails.py`, run by `kvs-thumbnails.timer` every 10 min: one frame
+  per camera whose path is flowing (#50), from the sub stream when there is one, scaled to ≤640 px,
+  uploaded as `thumbs/<cameraId>.jpg`. Looking at the first real frames found cam-02/03/04 grey with
+  only moving edges — a P-frame decoded without its keyframe; `-skip_frame nokey` fixed it (real
+  pictures in 2–3 s; a test pins the flag). `list-cameras` HEADs each thumbnail and returns a 1-hour
+  link with the time taken. AWS side by `bash cloud/provision.sh thumbnails`: inline policy
+  `Thumbnails` on `KVSAdapterRole` (`cloud/iam/thumbnails-policy.json`), `thumbnails-read` on
+  `ListCamerasLambdaRole` (`cloud/iam/list-cameras-thumbnails-policy.json`), and list-cameras'
+  `BUCKET` taken from record-clip's — adding only, never changing (dry run checked against the
+  account). The page shows the picture in Settings, and small ones in the camera list behind a
+  "Preview" switch (remembered per browser). **Deviation:** no on-demand grab when Settings opens
+  (it would need a new MQTT command); every 10 minutes is the only cadence.
+
 ### Later
 
 Playback with a timeline (archive with a scroll bar, requirements §5); Dashboard (online/offline,
@@ -561,5 +601,5 @@ Capacitor; multi-tenancy (revisit D4).
 - [x] Phase 3: parity audit; cutover tooling (`deploy.sh page` = web panel at the root), rehearsed
 - [x] Phase 3: the user's checks at `/app/`; `deploy.sh page` (the cutover); `client/index.html` out, docs (2026-11-01)
 - [x] Phase 4: `set-camera-settings`, new registry fields, admin GUI ceiling — provisioned and deployed (2026-11-01)
-- [ ] Phase 5: schedule runner, stream step, thumbnails
+- [x] Phase 5: schedule runner, stream step, thumbnails (built; timers, provision, deploy open)
 - [ ] Measurements of §7 recorded here
