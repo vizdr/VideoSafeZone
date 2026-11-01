@@ -727,8 +727,8 @@ bash cloud/deploy.sh status                     # each function and the page: li
 bash cloud/deploy.sh all --dry-run              # what a deploy would change, changing nothing
 bash cloud/deploy.sh lambda get-hls-url list-cameras    # the named functions
 bash cloud/deploy.sh lambdas                    # every function whose live code differs from the tree
-bash cloud/deploy.sh page                       # client/index.html
-bash cloud/deploy.sh app                        # client-app/, the Vue web panel, at /app/
+bash cloud/deploy.sh page                       # the web panel (client-app/) at the site's root
+bash cloud/deploy.sh app                        # the same build at /app/: a preview beside the site
 bash cloud/deploy.sh all                        # lambdas, then the page
 ```
 
@@ -763,9 +763,13 @@ grep " $F\$" SHASUMS256.txt | sha256sum -c - && mkdir -p ~/.local/lib/nodejs ~/.
 for b in node npm npx; do ln -sfn ~/.local/lib/nodejs/node-$V-linux-arm64/bin/$b ~/.local/bin/$b; done; cd -
 ```
 
-`bash cloud/deploy.sh app` then builds a fresh copy from `client-app/package-lock.json` in a
-temporary directory and publishes it at `https://dugyd3kkt36pw.cloudfront.net/app/index.html`,
-beside the old page, until the cutover (WEB-PANEL-PLAN.md Phase 3). Day-to-day commands are in
+`deploy.sh page` and `deploy.sh app` then build a fresh copy from `client-app/package-lock.json`
+in a temporary directory. `page` publishes it at the site's root,
+`https://dugyd3kkt36pw.cloudfront.net/`; `app` publishes the same build at `/app/index.html`, a
+preview to look at before `page`. The first `page` deploy was the cutover from the old
+single-file page (`client/index.html`, 2026-11-01, WEB-PANEL-PLAN.md Phase 3): the script recognised
+a committed version of that page at the root and replaced it, after backing it up;
+`rollback page` would still bring it back from that backup. Day-to-day commands are in
 `client-app/README.md`.
 
 ### The sequence for a change that spans Pi and cloud
@@ -801,23 +805,25 @@ beside the old page, until the cutover (WEB-PANEL-PLAN.md Phase 3). Day-to-day c
   upload is live at once (`x-cache: RefreshHit`) with no invalidation.
 - **Done means verified:** after each deploy the live code is downloaded again and compared
   with the tree, and the page is fetched back through CloudFront.
-- **The app goes up under `/app/` only,** never over the page. Its hashed assets are cached for
-  good and go up first; `index.html` goes up last with the page's `no-cache`, so a browser never
-  gets an `index.html` whose assets aren't there yet. A `version.json` beside it records what was
-  uploaded: a live `/app/` without a matching one wasn't put there by the script, and needs
-  `--force`.
+- **The web panel's hashed assets go up first,** cached for good; `index.html` goes up last with
+  `no-cache`, so a browser never gets an `index.html` whose assets aren't there yet. Earlier assets
+  stay, for pages still open on them. A `version.json` beside `index.html` records what was
+  uploaded: one without a matching record wasn't put there by the script and needs `--force` —
+  except, at the root, a committed version of the old page, which the cutover replaces.
+- **At the root only `index.html` and `version.json` are backed up,** never the whole bucket
+  (`/app/` lives there too); `rollback page` puts them back, the old page included.
 
 ### Rolling back
 
 ```bash
 bash cloud/deploy.sh rollback lambda get-hls-url    # the copy saved before its last deploy
-bash cloud/deploy.sh rollback page
+bash cloud/deploy.sh rollback page                  # the root as it was: after the cutover, the old page
 bash cloud/deploy.sh rollback app                   # none after a first deploy: aws s3 rm --recursive the prefix
 ```
 
 Or deploy an older version from git: check it out (`git stash` your changes, or
-`git checkout <commit> -- cloud/lambda/<file>.py client/index.html`), run `deploy.sh` with
-`--force` (the live code is now "neither"), then restore your tree.
+`git checkout <commit> -- cloud/lambda/<file>.py client-app/`), run `deploy.sh` with `--force`
+(the live code is now "neither"), then restore your tree.
 
 ### Checking the API without signing in
 
@@ -843,8 +849,9 @@ pasted multi-line command leaves the shell waiting at `>`, and nothing runs.
 F=get_hls_url; T=$(mktemp -d); cp cloud/lambda/$F.py "$T/" && (cd "$T" && zip -qX $F.zip $F.py)
 aws lambda update-function-code --function-name ${F//_/-} --zip-file fileb://$T/$F.zip --query LastModified
 aws lambda wait function-updated --function-name ${F//_/-}
-aws s3 cp client/index.html s3://vms-demo-client-596633517506/index.html --content-type text/html --cache-control "no-cache, must-revalidate"
-curl -fsS https://dugyd3kkt36pw.cloudfront.net/index.html | cmp - client/index.html && echo "page live"
+(cd client-app && npm ci && npm run build) && aws s3 cp client-app/dist/assets s3://vms-demo-client-596633517506/assets --recursive --cache-control "public, max-age=31536000, immutable"
+aws s3 cp client-app/dist/index.html s3://vms-demo-client-596633517506/index.html --content-type text/html --cache-control "no-cache, must-revalidate"
+curl -fsS https://dugyd3kkt36pw.cloudfront.net/index.html | cmp - client-app/dist/index.html && echo "page live"
 ```
 
 Before overwriting by hand, look at what is live (`bash cloud/deploy.sh status`, or

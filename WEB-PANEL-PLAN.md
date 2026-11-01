@@ -12,9 +12,12 @@ last *Verify* step is the user's: sign in there, and an action still works after
 **Phase 1** (Settings on today's API) is **deployed** too (commit `32d6c78`, both CI jobs green,
 deployed by the user with `bash cloud/deploy.sh app`); its *Verify* steps are the user's, signed in
 at `/app/index.html`.
-**Phase 2** (Live grid, Events, per-user settings) is built and tested locally — not committed,
-not deployed. Its backend needs `bash cloud/provision.sh user-settings` once (the user's go-ahead:
-it creates resources in the shared account); until then the page works with the default layout.
+**Phase 2** (Live grid, Events, per-user settings) is committed (`125a802`, both CI jobs green) and
+deployed; its backend was created by the user with `bash cloud/provision.sh user-settings`
+(2026-11-01: `/me/settings` answers 401 without a token, and its CORS preflight allows GET, PUT).
+**Phase 3 — the cutover — is done (2026-11-01):** the user checked Phases 0–2 at `/app/` and ran
+`bash cloud/deploy.sh page`; **the site's root serves the web panel**, the old page is in the deploy
+backup (byte-identical to the committed file) and `client/index.html` has left the tree.
 
 ---
 
@@ -410,19 +413,54 @@ CPU and memory measured with every camera live at once (§7) before 16 tiles are
 
 ### Phase 3: Cutover
 
-Parity checklist against the old page:
+Parity checklist against the old page — audited 2026-11-01: every function of `client/index.html`
+has its place in the app, and each item below is pinned by tests. "Live" is the user's check of
+the same thing on the deployed `/app/`.
 
-- [ ] Live / End live; live keep-alive; `live-stop` on leaving the page
-- [ ] Start / Stop; the Start window and "no video arrived within 45 s"
-- [ ] Stall reload and "video arrives but doesn't play"; session refresh about hourly; Reload player
-- [ ] Record clip; Play sound here
-- [ ] IR; recording mode; sound; outage buffer
-- [ ] Clips: paging, tier, delete, play; the new-clips notice
-- [ ] H.265 notes (page and per camera)
+| Old page | Web panel | Tested by | Live |
+|---|---|---|---|
+| Live / End live; keep-alive every 2 min; `live-stop` on leaving | `CameraController.toggleLive`, `LiveTile` (also on leaving the tab), `stores/players` (pagehide) | `camera-controller.spec` (Live), `live.spec` | [x] |
+| Start / Stop; Start window; "no video arrived within 45 s" (#43, #61, #66) | `command`, `load`; Settings → Cloud recording; tile control | `camera-controller.spec` (Start), `settings.spec` | [x] |
+| Stall reload; "arrives but doesn't play"; session refresh; Reload player (#66) | `watchStalls`, `scheduleSessionRefresh`, `reload` | `camera-controller.spec` | [x] |
+| Record clip (#83); Play sound here | `startClip`/`stopClip`; `setListen`; tile controls | `camera-controller.spec`, `live.spec` | [x] |
+| IR; recording mode (#65); sound; outage buffer | Settings → Camera / Recording | `settings.spec`, `test_value_lists.py` | [x] |
+| Clips: paging, tier, delete, play, restore messages, new-clips notice | Events (`ClipList`, `ClipPlayer`) | `events.spec`, `test_value_lists.py` | [x] |
+| H.265 notes, page and per camera | `HevcNote`, the Video card, the tile message, the clip line | `settings.spec`, `live.spec` | [x] |
 
-Then `deploy.sh page` publishes the app at the root (the deploy backs up the old page first);
-`client/index.html` leaves the tree (git history keeps it); CLAUDE.md (the "no build system"
-line, "Two GUIs", deploying the browser client), README, LAUNCH Part H and guide §8 are updated.
+*Live* ticked on the user's word (2026-11-01: "points 1, 2, 3 of the cutover done").
+
+Different by design (D3): the Live grid plays every camera on the page, where the old page played
+one camera per press; Start/Stop also sits in Settings as a switch.
+
+*Built for the cutover (2026-11-01):* `deploy.sh page` now publishes the web panel at the root —
+the same fresh build as `app`, which stays as a preview at `/app/`. At the root it recognises the
+old page by looking the live file up among the committed versions of `client/index.html`
+(`git log --find-object`), so the first `page` deploy isn't refused as someone else's; it backs up
+only the root's `index.html` (and `version.json`, when there is one), never the whole bucket, and
+`rollback page` puts them back — the old page included. Rehearsed with a recording stand-in for the
+AWS CLI against the real CloudFront: the dry run names the old page (committed in `df70e8f`);
+assets go up first and immutable, `version.json` and `index.html` last with `no-cache`; the backup
+is byte-identical to the committed page; `rollback page` restores it and removes the root's
+`version.json`. `status` shows what each location serves. LAUNCH Part H and CLAUDE.md describe it.
+
+The cutover, in order:
+1. The user checks Phases 0–2 at `/app/index.html` (the *Live* column above), after
+   `bash cloud/provision.sh user-settings` so the layout is saved with the account.
+2. `bash cloud/deploy.sh page --dry-run`, then `bash cloud/deploy.sh page` — the root serves the
+   web panel; the old page is in the backup (`rollback page` brings it back).
+3. Then `client/index.html` leaves the tree (git history keeps it), with what still reads it:
+   `tests/test_value_lists.py`'s old-page copies, `adapter/onvif-admin/app.py`'s comment; and the
+   docs are updated: CLAUDE.md ("Two GUIs", the "no build system" line), README, START.md, guide §8.
+
+*Done 2026-11-01.* Checked after the user's steps: `/me/settings` answers 401 without a token
+(the authorizer) and its preflight allows GET, PUT, OPTIONS; the root's `version.json` and
+`index.html` are the web panel, its assets load; the deploy backup `20261101T091604Z/index.html`
+is byte-identical to the last committed `client/index.html`; `page --dry-run` and `app --dry-run`
+both say "already live, unchanged". Then `client/index.html` was removed (`git rm`);
+`tests/test_value_lists.py` now compares the admin GUI's mode list instead of the old page's;
+CLAUDE.md, README, START.md, PYTEST.md, LAUNCH Part H, `client-app/README.md` and the guide (§8.7,
+new; §12; §16) describe the web panel. Historical records that cite the old file (FoundAndFixed,
+OUTAGE.md, AUDIO.md, the guide's §8.4–8.6) are left as they were written.
 
 ### Phase 4: Camera settings backend
 
@@ -475,11 +513,13 @@ Capacitor; multi-tenancy (revisit D4).
 
 - [x] Phase 0: scaffold, ported player logic, shell, `deploy.sh app`, CI (built and tested locally)
 - [x] Phase 0: first deploy to `/app/` (2026-10-31)
-- [ ] Phase 0: sign-in and the 70-minute refresh checked at `/app/index.html` (the user)
+- [x] Phase 0: sign-in and the 70-minute refresh checked (the user, before the cutover)
 - [x] Phase 1: Settings on today's API, deployed at `/app/` (2026-10-31)
-- [ ] Phase 1: the *Verify* steps, signed in (the user)
-- [x] Phase 2: `user-settings` backend, layouts, Live, Events (built; provision, deploy and *Verify* open)
-- [ ] Phase 3: parity checklist, cutover, docs
+- [x] Phase 1: the *Verify* steps, signed in (the user, before the cutover)
+- [x] Phase 2: `user-settings` backend, layouts, Live, Events — committed, provisioned, deployed
+- [ ] Phase 2: Pi CPU and memory with every camera live at once (§7), before 16 tiles are called usable
+- [x] Phase 3: parity audit; cutover tooling (`deploy.sh page` = web panel at the root), rehearsed
+- [x] Phase 3: the user's checks at `/app/`; `deploy.sh page` (the cutover); `client/index.html` out, docs (2026-11-01)
 - [ ] Phase 4: `set-camera-settings`, new registry fields, admin GUI ceiling
 - [ ] Phase 5: schedule runner, stream step, thumbnails
 - [ ] Measurements of §7 recorded here

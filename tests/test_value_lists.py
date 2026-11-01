@@ -1,7 +1,8 @@
 """The value lists the pages offer match what the Lambdas accept (WEB-PANEL-PLAN.md Phase 1).
 
 A choice is duplicated wherever it is offered or checked: the outage-buffer durations live in the
-Lambda, the adapter, the admin GUI's route and page, the old cloud page and the web panel. A copy
+Lambda, the adapter, the admin GUI's route and page, and the web panel (the old single-file cloud
+page was one more copy until the cutover, WEB-PANEL-PLAN.md Phase 3). A copy
 that drifts offers a value the Lambda refuses, or hides one it allows. These read every copy from
 source -- nothing is imported or run -- and compare it with the Lambda's.
 """
@@ -36,7 +37,6 @@ LIMITS = py_constant(ROOT / "cloud" / "lambda" / "set_camera_outage_buffer.py", 
 
 
 def test_outage_buffer_limits_match_the_lambda_everywhere():
-    old_page = (ROOT / "client" / "index.html").read_text()
     admin_page = (ROOT / "adapter" / "onvif-admin" / "static" / "index.html").read_text()
     admin_select = re.search(r'<select[^>]*outage[^>]*>(.*?)</select>', admin_page, re.S | re.I)
     copies = {
@@ -45,7 +45,6 @@ def test_outage_buffer_limits_match_the_lambda_everywhere():
         "adapter/onvif-admin/app.py": py_constant(ROOT / "adapter" / "onvif-admin" / "app.py", "VALID", within=ADMIN_OUTAGE_ROUTE),
         "adapter/onvif-admin/static/index.html":
             {int(v) for v in re.findall(r'<option value="(\d+)"', admin_select.group(1))} if admin_select else None,
-        "client/index.html": {int(v) for v in re.findall(r"\{ sec: (\d+),", old_page)},
         "client-app settings.ts": {int(v) for v in re.findall(r"sec: (\d+)", ts_block(WEB, "OUTAGE_LIMITS"))},
     }
     wrong = {name: sorted(v) if v else v for name, v in copies.items() if v != LIMITS}
@@ -55,9 +54,8 @@ def test_outage_buffer_limits_match_the_lambda_everywhere():
 def test_recording_modes_match_the_lambda():
     modes = py_constant(ROOT / "cloud" / "lambda" / "set_camera_mode.py", "VALID_MODES")
     web = set(re.findall(r'value: "(\w+)"', ts_block(WEB, "MODE_OPTIONS")))
-    old = set(re.findall(r'<option value="(\w+)"',
-                         re.search(r'id="recMode-.*?</select>', (ROOT / "client" / "index.html").read_text(), re.S).group(0)))
-    assert web == modes and old == modes, (sorted(modes), sorted(web), sorted(old))
+    admin = py_constant(ROOT / "adapter" / "onvif-admin" / "app.py", "VALID", within="set_recording_mode")
+    assert web == modes and admin == modes, (sorted(modes), sorted(web), sorted(admin))
 
 
 def test_ir_modes_match_the_lambda():

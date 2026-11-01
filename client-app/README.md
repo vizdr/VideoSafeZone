@@ -1,7 +1,7 @@
 # client-app — the web panel
 
 The cloud client rebuilt as a Vue app with panels (Live, Events, Settings), replacing
-`client/index.html` once it does everything that page does. Plan, decisions and progress:
+`client/index.html` — which it did at the cutover on 2026-11-01. Plan, decisions and progress:
 [`WEB-PANEL-PLAN.md`](../WEB-PANEL-PLAN.md).
 
 Vue 3 + TypeScript + Vite, OpenVue (the MIT fork of PrimeVue 4.5.5, WEB-PANEL-PLAN.md D1),
@@ -15,8 +15,9 @@ npm run typecheck   # vue-tsc, including the tests
 npm run build       # into dist/ (not in git)
 ```
 
-Deploy with `bash cloud/deploy.sh app` from the repository root: it builds fresh from the lockfile
-and publishes at `https://dugyd3kkt36pw.cloudfront.net/app/index.html`, beside the old page.
+Deploy from the repository root: `bash cloud/deploy.sh page` builds fresh from the lockfile and
+publishes at `https://dugyd3kkt36pw.cloudfront.net/`; `bash cloud/deploy.sh app` publishes the same
+build at `/app/index.html`, a preview to look at first.
 
 ## Layout
 
@@ -42,5 +43,5 @@ and publishes at `https://dugyd3kkt36pw.cloudfront.net/app/index.html`, beside t
 That the value lists offered here (outage durations, recording and IR modes) match what the
 Lambdas accept is checked from the pytest side, `tests/test_value_lists.py` in the repository.
 
-The player logic in `camera-controller.ts` was ported from `client/index.html` without changing
+The player logic in `camera-controller.ts` was ported from `client/index.html` (now in git history) without changing
 its behaviour; each fix in it cites its `FoundAndFixed.md` entry. Change it there with a test.

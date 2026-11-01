@@ -515,7 +515,9 @@ strict `xfail`, then fixed the same day at the user's request.
   check the logic around the media, never the media itself.
 - **The shell scripts** (`adapter/bin/*.sh`, `setup/*.sh`). A shell test framework (bats)
   would be a separate decision.
-- **`client/index.html`**, which is JavaScript.
+- **The web panel** (`client-app/`), which is JavaScript: it has its own Vitest suite and CI
+  job (`client-app/README.md`). Its value lists are compared with the Lambdas' from here,
+  `tests/test_value_lists.py`.
 - **AWS itself.** IAM, the deployed Lambdas, IoT rules. `cloud/deploy.sh status` and
   LAUNCH Part C still verify those.
 

@@ -76,7 +76,7 @@ Starting one is always a person's decision: the next section.
 From the cloud page, anywhere:
 
 ```
-client/index.html                                   Start button
+client-app (web panel)                              Cloud recording switch or a tile's Start
   → API Gateway → publish-cmd Lambda                cloud/lambda/publish_cmd.py
   → MQTT topic adapter/<thing>/cmd                  AWS IoT Core, outbound session
   → agent.py on_message()                           the control plane's entry point on the Pi

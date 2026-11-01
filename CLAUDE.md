@@ -120,11 +120,13 @@ an overwritten `index.html` comes back only from a working tree or from `deploy.
 of the live copy, taken before each upload.
 
 ```bash
-bash cloud/deploy.sh page        # checks the live page, backs it up, uploads, verifies via CloudFront
-bash cloud/deploy.sh app         # the web panel: fresh build from its lockfile, published under /app/
+bash cloud/deploy.sh page        # the web panel at the root: fresh build, backup, upload, verify via CloudFront
+bash cloud/deploy.sh app         # the same build at /app/ only: a preview beside the site
 ```
-Served at **https://dugyd3kkt36pw.cloudfront.net** (CloudFront + OAC, guide §8.5.1); the web
-panel at `/app/index.html` beside it until its cutover (`WEB-PANEL-PLAN.md`). The
+Served at **https://dugyd3kkt36pw.cloudfront.net** (CloudFront + OAC, guide §8.5.1): the web
+panel since the cutover of 2026-11-01 (`WEB-PANEL-PLAN.md` Phase 3), which replaced the old
+single-file page, `client/index.html` — gone from the tree, kept in git history and in
+`deploy.sh`'s backup (`rollback page` brings it back). The
 `--cache-control` header (`deploy.sh` sets it) is required and does double duty: it prevents stale clients
 after a deploy (FoundAndFixed.md #11), and it makes CloudFront revalidate rather than
 serve a cached copy, so an upload is live immediately (`x-cache: RefreshHit`). Drop the
@@ -186,7 +188,7 @@ installed by `LAUNCH.md` A7). Python code reads it via `import config`
 file, and a missing key is a hard error, never a silent default — except where a script
 is designed to degrade (e.g. `camera-audio.py` falls back to `AUDIO=off`), in which case
 the config load belongs inside its `try`. Never write an endpoint, region or Thing name
-into code again. Cloud-side code (`cloud/lambda/`, `client/index.html`) is configured
+into code again. Cloud-side code (`cloud/lambda/`, `client-app/src/config.ts`) is configured
 separately, through Lambda environment variables and the client's own constants.
 
 **Local hardware is detected, not named.** No `/dev/video*`, `/dev/v4l/by-id/<model>`,
@@ -406,11 +408,15 @@ DynamoDB access on `cameras`) — see `cloud/iam/kvs-producer-policy.json`. The 
 
 ### Two GUIs, deliberately not one
 
-`client/index.html` — the **cloud** client. Static, S3-hosted, Cognito-authenticated,
-reachable from anywhere. Talks only to API Gateway/Lambda/MQTT; has no LAN access.
-Renders one panel per camera fetched from `GET /cameras` (not hardcoded), with live view
-(cloud HLS via KVS), manual recording, evidence-clip browsing/tiering, per-camera IR
-control where applicable, and each camera's codec shown read-only.
+`client-app/` — the **cloud** client, a Vue app with panels (`WEB-PANEL-PLAN.md`; it replaced
+the single-file `client/index.html` on 2026-11-01). Static, S3-hosted behind CloudFront,
+Cognito-authenticated, reachable from anywhere. Talks only to API Gateway/Lambda/MQTT; has no LAN
+access. Cameras come from `GET /cameras` (not hardcoded). **Live**: a grid in the account's own
+layout (saved through `GET/PUT /me/settings`), each tile a camera's live view, with Start/Stop,
+Record clip and sound on the selected tile. **Events**: the evidence clips, with tiering.
+**Settings**: per camera (cloud recording, recording mode, microphone, IR, outage buffer, codec
+read-only) and per account (Live view). The old page's player logic lives on, behaviour
+unchanged, in `src/player/camera-controller.ts`, with its FoundAndFixed fixes under test.
 
 `adapter/onvif-admin/` — a small local Flask app, LAN-only, no login, run directly on the
 Pi. It exists because **WS-Discovery is UDP multicast and only works from a process on

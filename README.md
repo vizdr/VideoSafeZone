@@ -83,9 +83,9 @@ either GUI controls exactly that process.
 
 ### Two GUIs, deliberately not one
 
-**Cloud client** (`client/index.html`) — static, S3-hosted behind CloudFront,
-Cognito-authenticated, reachable from anywhere. Live view, recording, clips, per-camera
-settings.
+**Cloud client** (`client-app/`, a Vue app) — static, S3-hosted behind CloudFront,
+Cognito-authenticated, reachable from anywhere. A Live grid in your own layout, recording,
+evidence clips, per-camera and per-account settings.
 
 **Local admin** (`adapter/onvif-admin/`) — a small Flask app on the Pi, LAN-only. It
 exists because **WS-Discovery is UDP multicast and only works from the camera's own LAN
@@ -240,8 +240,9 @@ adapter/            on-device Python and pipelines
   onvif-admin/        local Flask GUI
   bin/                GStreamer pipelines, detect-hw.sh, operator tools
 config/             templates for /etc/adapter/ (adapter.env, cameras/*.env)
-client/index.html   the cloud browser client (single file)
-cloud/deploy.sh     deploys the Lambdas and the page, with the shared-account checks
+client-app/         the cloud browser client: Vue + Vite, its own tests (client-app/README.md)
+cloud/deploy.sh     deploys the Lambdas and the web panel, with the shared-account checks
+cloud/provision.sh  creates a new cloud feature's table, role, function and routes, once
 cloud/lambda/       one file per Lambda
 cloud/iam/          one policy document per role
 cloud/iot/          IoT rules and thing policy
@@ -308,7 +309,7 @@ will not work against another.
 To rebuild: follow the guide's §3 (KVS + IAM + IoT), §6 (Lambda + API Gateway + Cognito)
 and §8 (client + CloudFront), then put the new account's region, Thing, endpoints and
 bucket into `/etc/adapter/adapter.env` (template `config/adapter.env.example`, its header
-has the lookup commands — `LAUNCH.md` A7) and replace the constants at the top of
-`client/index.html`. The adapter code itself holds none. The policy documents in
+has the lookup commands — `LAUNCH.md` A7) and replace the constants in
+`client-app/src/config.ts`. The adapter code itself holds none. The policy documents in
 [`cloud/iam/`](cloud/iam/) and [`cloud/iot/`](cloud/iot/) are reusable as-is apart from
 the account number.

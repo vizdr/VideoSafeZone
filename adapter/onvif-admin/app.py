@@ -1,6 +1,6 @@
 """Local ONVIF admin GUI -- discover, register, and control ONVIF cameras on this LAN.
 
-Deliberately separate from client/index.html: WS-Discovery is UDP multicast, which only
+Deliberately separate from the cloud client (client-app/): WS-Discovery is UDP multicast, which only
 works from a process on the same LAN segment as the cameras -- the cloud-hosted client
 (served from S3, reached over the internet through CloudFront/API Gateway) has no route
 to do that, and Lambda has no route to the LAN at all. So the *discovery and

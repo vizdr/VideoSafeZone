@@ -1634,6 +1634,28 @@ Full write-ups in `FoundAndFixed.md`:
 The general lesson: test the unhappy paths in a real browser. `curl` ignores CORS and
 never holds a session open long enough to see it expire.
 
+### 8.7 The web panel replaces the single file (November 2026)
+
+The single HTML file above grew to one long page with a panel per camera. On 2026-11-01 it was
+replaced at the same address by `client-app/`, a Vue app with panels — Live, Events, Settings —
+modelled on the structure of the Videoloft web app. The plan and its decisions are
+`WEB-PANEL-PLAN.md`; what follows is what changed in how the client is built and run.
+
+- **Stack:** Vue 3 + TypeScript + Vite, OpenVue (the MIT fork of PrimeVue 4.5.5, after PrimeVue 5
+  went commercial), Pinia, vue-router in hash mode — hash routes, because a deep path would get
+  S3's 403 under OAC. Node 24 builds it; nothing on the Pi runs it.
+- **The player logic was ported, not rewritten:** this section's fixes (#8–#14) and the later
+  ones (#43, #61, #66, #83) live in `src/player/camera-controller.ts`, behaviour unchanged, each
+  pinned by a Vitest test that fails when the fix is taken out.
+- **Sign-in** is the same `InitiateAuth` over `fetch`, plus the refresh the single file never
+  had: the ID token is renewed before it expires, so the page no longer gets 401s after an hour.
+- **Per-account settings** (the Live layout) go through `GET/PUT /me/settings`, a Lambda over a
+  `user-settings` table keyed by the Cognito `sub`, created once by `cloud/provision.sh`.
+- **Deploying:** `deploy.sh page` builds fresh from the lockfile and publishes at the root —
+  hashed assets first and immutable, `index.html` last with `no-cache` (#11); `deploy.sh app`
+  publishes the same build at `/app/` as a preview. The cutover deploy recognised the old page as
+  a committed version of `client/index.html` and backed it up; the file has left the tree.
+
 ---
 
 ## 9. Phase 8 — Event clips to S3
@@ -1915,8 +1937,7 @@ VideoSafeZone/                  # $VMS_HOME — everything lives here, not scatt
 │   │   ├── publish_cmd.py
 │   │   └── clip_to_s3.py
 │   └── template.yaml          # SAM — makes it reproducible, and reviewers notice
-├── client/
-│   └── index.html
+├── client-app/                # the web panel (Vue); replaced client/index.html, §8.7
 ├── measurements/
 │   ├── latency_vs_gop.csv
 │   ├── reconnect_timeline.md
@@ -2091,7 +2112,7 @@ Matches what onboarding found manually.
 
 **Why a separate local app, not a button in the browser client.** WS-Discovery is UDP
 multicast — it only works from a process on the same LAN segment as the cameras. The
-cloud client (`client/index.html`) is served from S3 and reached over the internet
+cloud client (`client-app/`, §8.7) is served from S3 and reached over the internet
 through CloudFront/API Gateway; it has no route to the LAN, and neither does Lambda. So
 the discovery *and* registration half of onboarding has to run somewhere on the Pi
 itself, which is what `adapter/onvif-admin/` is: a small Flask app, LAN-only, no login
