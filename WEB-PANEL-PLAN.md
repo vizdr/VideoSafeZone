@@ -9,8 +9,12 @@ of why.
 **Progress (2026-10-31):** Phase 0 is **deployed** at
 `https://dugyd3kkt36pw.cloudfront.net/app/index.html` (commit `029c0bc`, both CI jobs green); its
 last *Verify* step is the user's: sign in there, and an action still works after 70 minutes.
-**Phase 1** (Settings on today's API) is built and tested locally, not yet deployed or committed;
-its *Verify* steps need the deployed page and a signed-in viewer.
+**Phase 1** (Settings on today's API) is **deployed** too (commit `32d6c78`, both CI jobs green,
+deployed by the user with `bash cloud/deploy.sh app`); its *Verify* steps are the user's, signed in
+at `/app/index.html`.
+**Phase 2** (Live grid, Events, per-user settings) is built and tested locally — not committed,
+not deployed. Its backend needs `bash cloud/provision.sh user-settings` once (the user's go-ahead:
+it creates resources in the shared account); until then the page works with the default layout.
 
 ---
 
@@ -376,6 +380,34 @@ the large-cell camera pickers.
 `kvs-live@` unit within the deadline (journal: deadline exit, `inactive`, result `success`); Pi
 CPU and memory measured with every camera live at once (§7) before 16 tiles are called usable.
 
+*Built 2026-10-31* (103 Vitest tests, 899 pytest):
+- **2.1** `cloud/lambda/user_settings.py` (GET/PUT, user = the token's `sub`, a whitelist of
+  `liveLayout`/`largeCells`, field-by-field writes, 4 kB cap; 17 pytest through `invoke()`, which
+  now also passes `httpMethod` and the authorizer's claims) and `cloud/iam/user-settings-policy.json`.
+  **Created by `cloud/provision.sh user-settings`**, not by hand as §5.3 first said: it makes the
+  table, role, function, `/me/settings` with GET, PUT and the CORS preflight, deploys the stage and
+  verifies through API Gateway; it only creates what is missing and never changes what exists
+  (`--dry-run` lists what it would create). `deploy.sh lambdas` skips a function not created yet.
+  Picks for cameras that are gone are dropped by the page, so the Lambda needs no registry access.
+- **2.2** `src/layouts/grid.ts`: layouts as data, `cameraOrder` (large cell i shows pick i; "" or
+  a gone camera = the next one), `pageOf`, `bringToLarge`. The tests found that `Object.keys` put
+  "16" first (integer-like keys come first in JavaScript), so the order is spelled out.
+- **2.3** Live: `LiveTile` plays its camera while mounted and sends `live-stop` when it goes (page,
+  layout, tab); a live view this browser can't decode (H.265) isn't started. The selected tile has
+  Live / End live, Start / Stop, Record clip (ported into the controller, #83), Play sound here,
+  Reload and full screen. A click on a small tile swaps it into the first large cell for the visit;
+  a camera picked in the list opens its page. The controller gained `startLive`/`stopLive` and a
+  guard: a Live ended or restarted while its `live` was on the way left a second keep-alive timer
+  running in the old code — easy to trigger in a grid (tests fail without the guard). Settings →
+  Live view (yours): layout picker and large-cell pickers; the same picker in the Live toolbar.
+  Before `/me/settings` exists the page shows the default and keeps a change for the visit.
+- **2.4** Events: the old clip list per camera (paging, tier, delete with confirmation, play in a
+  dialog, Deep Archive restore messages, the "new clips" notice while a detection mode is set).
+- **Cross-checks:** `tests/test_value_lists.py` now also compares the layouts with
+  `user_settings.py` and the storage tiers with `set_clip_tier.py`.
+- Rendered offline (fake API) at 1400 px and phone width. Not measured yet: Pi load with every
+  camera live (§7) — that needs the deploy and real cameras.
+
 ### Phase 3: Cutover
 
 Parity checklist against the old page:
@@ -444,8 +476,9 @@ Capacitor; multi-tenancy (revisit D4).
 - [x] Phase 0: scaffold, ported player logic, shell, `deploy.sh app`, CI (built and tested locally)
 - [x] Phase 0: first deploy to `/app/` (2026-10-31)
 - [ ] Phase 0: sign-in and the 70-minute refresh checked at `/app/index.html` (the user)
-- [x] Phase 1: Settings on today's API (built; deploy and the *Verify* steps open)
-- [ ] Phase 2: `user-settings` backend, layouts, Live, Events
+- [x] Phase 1: Settings on today's API, deployed at `/app/` (2026-10-31)
+- [ ] Phase 1: the *Verify* steps, signed in (the user)
+- [x] Phase 2: `user-settings` backend, layouts, Live, Events (built; provision, deploy and *Verify* open)
 - [ ] Phase 3: parity checklist, cutover, docs
 - [ ] Phase 4: `set-camera-settings`, new registry fields, admin GUI ceiling
 - [ ] Phase 5: schedule runner, stream step, thumbnails

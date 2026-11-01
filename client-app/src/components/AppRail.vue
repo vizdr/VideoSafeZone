@@ -18,6 +18,9 @@ const auth = useAuthStore();
 const cameraParam = computed(() =>
   typeof route.params.cameraId === "string" ? { cameraId: route.params.cameraId } : {});
 
+// "settings-live" (Settings → Live view) is still the Settings tab.
+const isActive = (name: string) => typeof route.name === "string" && route.name.startsWith(name);
+
 // The shell sees the sign-out, ends any Live view, clears the stores and goes to sign-in.
 function exit(): void {
   auth.signOut();
@@ -27,8 +30,8 @@ function exit(): void {
 <template>
   <nav class="rail" aria-label="Main">
     <RouterLink v-for="item in items" :key="item.name" :to="{ name: item.name, params: cameraParam }"
-                class="rail-item" :class="{ active: route.name === item.name }"
-                :aria-current="route.name === item.name ? 'page' : undefined">
+                class="rail-item" :class="{ active: isActive(item.name) }"
+                :aria-current="isActive(item.name) ? 'page' : undefined">
       <i :class="['pi', item.icon]" aria-hidden="true" />
       <span>{{ item.label }}</span>
     </RouterLink>

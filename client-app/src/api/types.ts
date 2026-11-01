@@ -57,5 +57,11 @@ export interface HlsSession {
   expires_in?: number;
 }
 
+/** GET/PUT /me/settings: the signed-in user's own settings (user_settings.py). */
+export interface UserSettings {
+  liveLayout?: string;                         // one of layouts/grid.ts LAYOUT_IDS
+  largeCells?: string[];                       // camera IDs; "" = the next camera in list order
+}
+
 export type CommandAction = "start" | "stop" | "live" | "live-stop";
 export type IrMode = "AUTO" | "ON" | "OFF";

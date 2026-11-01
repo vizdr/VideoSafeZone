@@ -31,6 +31,10 @@ and publishes at `https://dugyd3kkt36pw.cloudfront.net/app/index.html`, beside t
 | `src/stores/players.ts` | one `CameraController` per camera: the archive check, status dots, Cloud recording |
 | `src/composables/useSavedSetting.ts` | save on change, put the old value back when the server refuses |
 | `src/components/settings/` | the Settings cards: Cloud recording, Camera and Recording sections |
+| `src/layouts/grid.ts` | the Live layouts as data; which camera goes in which cell, paging, swaps |
+| `src/components/live/` | the Live grid's tile (plays while mounted) and the layout picker |
+| `src/stores/userSettings.ts` | the account's own settings (GET/PUT `/me/settings`) |
+| `src/clips/format.ts`, `src/components/events/` | Events: the clip list and its player |
 | `src/stores/`, `src/views/`, `src/components/` | Pinia stores and the Vue screens |
 | `src/theme.ts` | the OpenVue preset: Aura, sky accent, slate dark surfaces |
 | `tests/` | Vitest; `camera-controller.spec.ts` keeps the FoundAndFixed fixes the player carries |

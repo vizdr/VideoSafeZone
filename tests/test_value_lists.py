@@ -63,3 +63,17 @@ def test_recording_modes_match_the_lambda():
 def test_ir_modes_match_the_lambda():
     ir = py_constant(ROOT / "cloud" / "lambda" / "publish_cmd.py", "ALLOWED_IR_MODES")
     assert set(re.findall(r'value: "(\w+)"', ts_block(WEB, "IR_MODES"))) == ir
+
+
+def test_live_layouts_match_the_user_settings_lambda():
+    layouts = py_constant(ROOT / "cloud" / "lambda" / "user_settings.py", "LAYOUTS")
+    grid = ROOT / "client-app" / "src" / "layouts" / "grid.ts"
+    m = re.search(r"export const LAYOUT_IDS\b[^=]*=\s*\[(.*?)\];", grid.read_text(), re.S)
+    assert m, "no LAYOUT_IDS in grid.ts"
+    assert set(re.findall(r'"([^"]+)"', m.group(1))) == layouts
+
+
+def test_storage_tiers_match_the_set_clip_tier_lambda():
+    tiers = py_constant(ROOT / "cloud" / "lambda" / "set_clip_tier.py", "VALID_TIERS")
+    fmt = ROOT / "client-app" / "src" / "clips" / "format.ts"
+    assert set(re.findall(r'value: "(\w+)"', ts_block(fmt, "TIER_CHOICES"))) == tiers

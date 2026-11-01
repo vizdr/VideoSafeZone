@@ -20,7 +20,9 @@ export const usePlayersStore = defineStore("players", () => {
     for (const cam of cameras) {
       const existing = controllers.get(cam.id);
       if (existing) { existing.setCamera(cam); continue; }
-      const c = markRaw(new CameraController(cam, { api: { hls: endpoints.hls, cmd: endpoints.cmd } }));
+      const c = markRaw(new CameraController(cam, {
+        api: { hls: endpoints.hls, cmd: endpoints.cmd, recordClip: endpoints.recordClip },
+      }));
       controllers.set(cam.id, c);
       c.subscribe(s => { states.value = { ...states.value, [cam.id]: s }; });
       states.value = { ...states.value, [cam.id]: c.state };

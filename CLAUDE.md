@@ -104,6 +104,7 @@ check itself:
 bash cloud/deploy.sh status                       # live = this tree? = git HEAD? = neither?
 bash cloud/deploy.sh lambda get-hls-url --dry-run # then without --dry-run
 bash cloud/deploy.sh lambdas                      # every function whose live code differs
+bash cloud/provision.sh user-settings --dry-run   # a new feature's table/role/function/routes, created once
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single

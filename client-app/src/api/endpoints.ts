@@ -1,7 +1,7 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  Camera, ClipsPage, CommandAction, HlsSession, IrMode, RecordingMode, StorageTier,
+  Camera, ClipsPage, CommandAction, HlsSession, IrMode, RecordingMode, StorageTier, UserSettings,
 } from "./types";
 
 const q = encodeURIComponent;
@@ -41,6 +41,12 @@ export function makeEndpoints(api: ApiClient) {
 
     deleteClip: (s3Key: string, startTs: string) =>
       api.request("POST", "/clips/delete", { s3Key, startTs }),
+
+    getMySettings: () => api.request<{ settings?: UserSettings }>("GET", "/me/settings"),
+
+    /** Only the settings named are written; the others stay as they are. */
+    putMySettings: (settings: UserSettings) =>
+      api.request<{ settings?: UserSettings }>("PUT", "/me/settings", settings),
 
     playClip: (s3Key: string) =>
       api.request<{ status?: string; url?: string; eta_hours?: number }>("POST", "/clips/play", { s3Key }),

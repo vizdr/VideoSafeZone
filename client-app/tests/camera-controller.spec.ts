@@ -53,6 +53,8 @@ function setup(over: Partial<Camera> = {}) {
   const api = {
     hls: vi.fn(async (_c: string, _v: "live" | "recorded", _s?: string): Promise<Reply> => notLive),
     cmd: vi.fn(async (): Promise<ApiResult> => ({ ok: true, status: 200, data: {} })),
+    recordClip: vi.fn(async (_s: string, _a: string, _b: string): Promise<ApiResult<{ keys?: string[] }>> =>
+      ({ ok: true, status: 200, data: { keys: ["clips/cam-03/1.mp4"] } })),
   };
   const c = new CameraController(camera(over), {
     api, hls: FakeHls as unknown as typeof Hls, isVisible: () => visible.value,
@@ -136,7 +138,8 @@ describe("the playing session", () => {
   it("loads hls.js with the first player only, not before", async () => {
     vi.useFakeTimers();
     const loadHls = vi.fn(async () => FakeHls as unknown as typeof Hls);
-    const api = { hls: vi.fn(async () => playable()), cmd: vi.fn(async () => ({ ok: true, status: 200, data: {} })) };
+    const api = { hls: vi.fn(async () => playable()), cmd: vi.fn(async () => ({ ok: true, status: 200, data: {} })),
+                  recordClip: vi.fn(async () => ({ ok: true, status: 200, data: {} })) };
     const c = new CameraController(camera(), { api, loadHls, isVisible: () => true });
     c.startArchive();
     await c.command("stop");
@@ -321,6 +324,90 @@ describe("Live", () => {
     const before = api.cmd.mock.calls.length + api.hls.mock.calls.length;
     await tick(600_000);
     expect(api.cmd.mock.calls.length + api.hls.mock.calls.length).toBe(before);
+  });
+});
+
+describe("Live on and off for grid tiles", () => {
+  it("startLive and stopLive only act when they change something", async () => {
+    const { c, api } = setup();
+    await c.startLive();
+    await c.startLive();
+    expect(cmdCalls(api, "live")).toHaveLength(1);
+    c.stopLive();
+    c.stopLive();
+    expect(cmdCalls(api, "live-stop")).toHaveLength(1);
+    expect(c.state.view).toBeNull();
+  });
+
+  it("a Live ended while its `live` was on the way leaves no timers behind", async () => {
+    const { c, api } = setup();
+    let answer!: (r: ApiResult) => void;
+    api.cmd.mockImplementationOnce(() => new Promise<ApiResult>(res => { answer = res; }));
+    const starting = c.startLive();
+    c.stopLive();                                       // the tile left the screen at once
+    answer({ ok: true, status: 200, data: {} });
+    await starting;
+    await tick(600_000);
+    expect(cmdCalls(api, "live")).toHaveLength(1);      // no keep-alive
+    expect(api.hls).not.toHaveBeenCalled();             // no player
+  });
+
+  it("start, stop, start quickly: one keep-alive, not two", async () => {
+    const { c, api } = setup();
+    let answer!: (r: ApiResult) => void;
+    api.cmd.mockImplementationOnce(() => new Promise<ApiResult>(res => { answer = res; }));
+    const first = c.startLive();
+    c.stopLive();
+    await c.startLive();
+    answer({ ok: true, status: 200, data: {} });
+    await first;
+    const sent = cmdCalls(api, "live").length;
+    await tick(120_000);
+    expect(cmdCalls(api, "live")).toHaveLength(sent + 1);
+  });
+});
+
+describe("Record clip (#83)", () => {
+  it("starts only while footage reaches the archive, and saves the time span on stop", async () => {
+    const { c, api } = setup();
+    c.startClip();
+    expect(c.state.recording).toBe(false);              // nothing in the archive to cut from
+    api.hls.mockResolvedValue(playable());
+    c.startArchive();
+    await tick(0);
+    c.startClip();
+    expect(c.state).toMatchObject({ recording: true, recordingSince: 1_000_000 });
+    await tick(12_000);
+    await c.stopClip();
+    expect(api.recordClip).toHaveBeenCalledWith("cam-03", "1970-01-01T00:16:40.000Z", "1970-01-01T00:16:52.000Z");
+    expect(c.state).toMatchObject({ recording: false, recordingSince: null, clipStatus: "Recording saved." });
+  });
+
+  it("a recording across a codec switch comes back as several clips; errors are reported", async () => {
+    const { c, api } = setup();
+    api.hls.mockResolvedValue(playable());
+    c.startArchive();
+    await tick(0);
+    api.recordClip.mockResolvedValueOnce({ ok: true, status: 200, data: { keys: ["a", "b"] } });
+    c.startClip();
+    await c.stopClip();
+    expect(c.state.clipStatus).toBe("Recording saved as 2 clips — the camera's video codec changed during it.");
+    api.recordClip.mockResolvedValueOnce({ ok: false, status: 404, data: { error: "No fragments found" } });
+    c.startClip();
+    await c.stopClip();
+    expect(c.state.clipStatus).toBe("Error saving recording: No fragments found");
+  });
+
+  it("a recording in progress can be stopped after Start has stopped", async () => {
+    const { c, api } = setup();
+    api.hls.mockResolvedValue(playable());
+    c.startArchive();
+    await tick(0);
+    c.startClip();
+    await c.command("stop");
+    expect(c.state.archiving).toBe(false);
+    await c.stopClip();
+    expect(api.recordClip).toHaveBeenCalled();
   });
 });
 

@@ -130,6 +130,10 @@ deploy_lambda() {
   local name=$1 py state
   [[ "$name" != pir-* ]] || die "$name is VMS's (pir-*): this repository never deploys it"
   py=$(file_of "$name"); [ -e "$py" ] || die "no $py"
+  # A function this tree has but AWS doesn't yet is created by provision.sh, not here.
+  if ! aws lambda get-function-configuration --function-name "$name" >/dev/null 2>&1; then
+    say "$name: not created yet -- skipped (bash cloud/provision.sh creates it)"; return 0
+  fi
   state=$(compare_lambda "$name")
   case "$state" in
     same) say "$name: already live, unchanged -- skipped"; return 0 ;;

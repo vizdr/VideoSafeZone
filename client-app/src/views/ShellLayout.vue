@@ -7,19 +7,24 @@ import HevcNote from "../components/HevcNote.vue";
 import { useAuthStore } from "../stores/auth";
 import { useCamerasStore } from "../stores/cameras";
 import { usePlayersStore } from "../stores/players";
+import { useUserSettingsStore } from "../stores/userSettings";
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 const cameras = useCamerasStore();
 const players = usePlayersStore();
+const userSettings = useUserSettingsStore();
 
 const cameraId = computed(() =>
   typeof route.params.cameraId === "string" ? route.params.cameraId : undefined);
 
 onMounted(() => {
   if (!cameras.loaded && !cameras.loading) void cameras.load();
+  if (!userSettings.loaded) void userSettings.load();
 });
+
+const onSettings = computed(() => route.name === "settings" || route.name === "settings-live");
 
 // One controller per camera, following the list (stores/players.ts).
 watch(() => cameras.cameras, list => players.sync(list), { immediate: true });
@@ -30,11 +35,14 @@ watch(() => auth.signedIn, signedIn => {
   if (signedIn) return;
   players.clear();
   cameras.clear();
+  userSettings.clear();
   void router.replace({ name: "login" });
 });
 
 function select(id: string): void {
-  void router.push({ name: route.name ?? "live", params: { ...route.params, cameraId: id } });
+  // From Settings → Live view, a camera opens that camera's settings.
+  const name = route.name === "settings-live" ? "settings" : (route.name ?? "live");
+  void router.push({ name, params: { ...route.params, cameraId: id } });
 }
 </script>
 
@@ -42,6 +50,10 @@ function select(id: string): void {
   <div class="shell">
     <AppRail />
     <aside class="cameras-col">
+      <RouterLink v-if="onSettings" :to="{ name: 'settings-live' }" class="yours"
+                  :class="{ active: route.name === 'settings-live' }">
+        <i class="pi pi-th-large" aria-hidden="true" /> Live view <span>(yours)</span>
+      </RouterLink>
       <CameraList :selected="cameraId" @select="select" />
     </aside>
     <main class="content">
@@ -50,3 +62,21 @@ function select(id: string): void {
     </main>
   </div>
 </template>
+
+<style scoped>
+.yours {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  background: var(--p-surface-800);
+  color: var(--p-text-color);
+  text-decoration: none;
+  font-weight: 600;
+}
+.yours span { color: var(--p-text-muted-color); font-weight: normal; }
+.yours.active { background: var(--p-highlight-background); color: var(--p-highlight-color); }
+.yours:focus-visible { outline: 2px solid var(--p-primary-color); }
+</style>

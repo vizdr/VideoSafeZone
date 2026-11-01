@@ -230,15 +230,22 @@ class FakeBoto3:
             stub.assert_no_pending_responses()
 
 
-def invoke(handler_module, body=None, query=None):
+def invoke(handler_module, body=None, query=None, method=None, claims=None, raw_body=None):
     """Call an API Gateway Lambda. Returns (statusCode, decoded body). Every answer, errors
     included, must carry the CORS header: without it the browser can't read the response at all
-    and fetch() throws a bare NetworkError (FoundAndFixed.md #8)."""
+    and fetch() throws a bare NetworkError (FoundAndFixed.md #8). `method` and `claims` are what
+    API Gateway adds (httpMethod; the Cognito authorizer's token claims); `raw_body` is sent as is."""
     event = {}
     if body is not None:
         event["body"] = json.dumps(body)
+    if raw_body is not None:
+        event["body"] = raw_body
     if query is not None:
         event["queryStringParameters"] = query
+    if method is not None:
+        event["httpMethod"] = method
+    if claims is not None:
+        event["requestContext"] = {"authorizer": {"claims": claims}}
     resp = handler_module.lambda_handler(event, None)
     assert resp["headers"]["Access-Control-Allow-Origin"] == "*", resp
     return resp["statusCode"], json.loads(resp["body"])

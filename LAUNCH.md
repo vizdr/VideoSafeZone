@@ -736,6 +736,20 @@ bash cloud/deploy.sh all                        # lambdas, then the page
 HEAD** (this tree has undeployed changes), or **neither** — deployed from somewhere else. For the
 app it shows the commit it was built from; `app --dry-run` builds and compares.
 
+### A new cloud feature's resources: `provision.sh`
+
+`deploy.sh` replaces the code of functions that exist. Creating a feature's table, role, function
+and API routes is `cloud/provision.sh`'s job, once per feature; it creates only what is missing,
+leaves what exists as it is (a role whose policy differs from `cloud/iam/` is reported, not
+changed), deploys the API stage and verifies the new route through API Gateway:
+
+```bash
+bash cloud/provision.sh user-settings --dry-run   # what it would create, changing nothing
+bash cloud/provision.sh user-settings             # GET/PUT /me/settings for the web panel
+```
+
+After that, `deploy.sh lambda user-settings` updates the function's code like any other.
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

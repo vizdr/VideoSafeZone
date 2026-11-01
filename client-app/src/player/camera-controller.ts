@@ -50,11 +50,17 @@ export interface PlayerState {
   archiveFailed: boolean;
   /** This browser refused the camera's H.265: the page-level note should show. */
   hevcHelp: boolean;
+  /** Record clip is running: since when (this page's clock, ms). */
+  recording: boolean;
+  recordingSince: number | null;
+  /** What became of the last recording: "Saving recording…", "Recording saved.", an error. */
+  clipStatus: string;
 }
 
 export interface PlayerApi {
   hls(camera: string, view: "live" | "recorded", since?: string): Promise<ApiResult<HlsSession>>;
   cmd(camera: string, action: CommandAction, keepalive?: boolean): Promise<ApiResult>;
+  recordClip(stream: string, startTs: string, endTs: string): Promise<ApiResult<{ keys?: string[] }>>;
 }
 
 export interface ControllerDeps {
@@ -77,6 +83,7 @@ export class CameraController {
   private s: PlayerState = {
     view: null, overlay: INITIAL_OVERLAY, status: "", listenAvailable: false, listen: false,
     archiving: false, archivePending: false, archiveFailed: false, hevcHelp: false,
+    recording: false, recordingSince: null, clipStatus: "",
   };
   private listeners = new Set<(s: PlayerState) => void>();
 
@@ -93,6 +100,7 @@ export class CameraController {
   private refreshTimer: Timer | null = null;
   private stallTimer: Timer | null = null;
   private liveTimer: Timer | null = null;
+  private liveSeq = 0;               // which Live start is current: a stale one stops after its await
   private netRetries = 0;
   private stallReloads = 0;
   private liveSentAt = 0;
@@ -385,6 +393,7 @@ export class CameraController {
   async toggleLive(): Promise<void> {
     this.stallReloads = 0;
     this.clearLiveTimer();
+    const seq = ++this.liveSeq;
     if (this.s.view === "live") {                       // End live
       this.set({ view: null });
       this.userStopped = true;
@@ -414,6 +423,9 @@ export class CameraController {
       this.showOverlay("Network error starting the live view.\n\nPress Live to try again.");
       return;
     }
+    // Ended, or started again, while `live` was on its way: the newer call owns the timers. Without
+    // this a quick start-stop-start left two keep-alive timers running (easy to do in a grid).
+    if (seq !== this.liveSeq || !this.isLive()) return;
     this.liveSentAt = this.now();
     this.startedAt = this.perfNow();
     this.liveWaitUntil = this.now() + START_WINDOW_MS;
@@ -424,6 +436,16 @@ export class CameraController {
     }, LIVE_RESEND_MS);
     this.clearRefresh();
     this.refreshTimer = setTimeout(() => void this.load(), FIRST_LOAD_DELAY_MS);
+  }
+
+  /** Live on, if it isn't: a grid tile coming on screen. */
+  async startLive(): Promise<void> {
+    if (this.s.view !== "live") await this.toggleLive();
+  }
+
+  /** Live off, if it is on: a grid tile leaving the screen. */
+  stopLive(): void {
+    if (this.s.view === "live") void this.toggleLive();
   }
 
   /** The tab became visible again: renew Live at once, and ask the archive. */
@@ -444,6 +466,37 @@ export class CameraController {
   /** Leaving the page: tell the Pi, best effort (keepalive lets the request outlive the page). */
   onPageHide(): void {
     if (this.s.view === "live") this.api.cmd(this.id, "live-stop", true).catch(() => {});
+  }
+
+  // --- Record clip (FoundAndFixed.md #83) -------------------------------------------------------
+  // Record clip sends no video of its own: stopping it asks the cloud to cut that time span out of
+  // the camera's archive (record_clip.py), which has footage only while Start runs. So it can start
+  // only while footage is reaching the archive; a recording in progress can always be stopped, and
+  // whatever footage its span holds is saved.
+
+  startClip(): void {
+    if (this.s.recording || !this.s.archiving) return;
+    this.set({ recording: true, recordingSince: this.now(), clipStatus: "" });
+  }
+
+  async stopClip(): Promise<void> {
+    const since = this.s.recordingSince;
+    if (!this.s.recording || since === null) return;
+    const startTs = new Date(since).toISOString();
+    const endTs = new Date(this.now()).toISOString();
+    this.set({ recording: false, recordingSince: null, clipStatus: "Saving recording…" });
+    try {
+      const r = await this.api.recordClip(this.id, startTs, endTs);
+      if (!r.ok) { this.set({ clipStatus: "Error saving recording: " + (r.data.error || r.status) }); return; }
+      // A recording that spans a codec switch comes back as one clip per codec: KVS cannot make a
+      // single clip across the switch (record_clip.py, codec_windows).
+      const keys = r.data.keys;
+      this.set({ clipStatus: keys && keys.length > 1
+        ? `Recording saved as ${keys.length} clips — the camera's video codec changed during it.`
+        : "Recording saved." });
+    } catch (e) {
+      this.set({ clipStatus: "Network error saving recording: " + (e as Error).message });
+    }
   }
 
   // --- Start / Stop: record to the cloud archive ------------------------------------------------
@@ -554,6 +607,8 @@ export class CameraController {
     for (const fn of this.listeners) fn(this.s);
   }
   private setStatus(msg: string): void { this.set({ status: msg }); }
+  /** A call, not a property read: TypeScript would keep a narrowing of s.view across an await. */
+  private isLive(): boolean { return this.s.view === "live"; }
   private showOverlay(msg: string): void { this.set({ overlay: msg }); }
   private hideOverlay(): void { this.set({ overlay: null }); }
 
