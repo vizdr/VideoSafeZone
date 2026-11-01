@@ -12,6 +12,19 @@ def video_codec(item):
     return item.get("videoCodec") or item.get("videoCodecDefault") or "h264"
 
 
+def record_quality_options(item):
+    """The recorded qualities the cloud page may choose for this camera (WEB-PANEL-PLAN.md D5):
+    the admin GUI's choice -- the ceiling -- and the one step below it, the sub stream, offered
+    when the camera records main and has one. The USB camera has none: the Pi encodes it at a
+    fixed 720p15. Empty also while the admin GUI hasn't recorded the ceiling yet."""
+    if not item.get("onvifHost"):
+        return []
+    ceiling = item.get("recordStream")
+    if ceiling == "main" and item.get("liveRtspUrl"):
+        return ["main", "sub"]
+    return [ceiling] if ceiling else []
+
+
 def plain(v):
     """A registry value as JSON can carry it: DynamoDB returns every number as a Decimal, which
     json.dumps refuses -- one Decimal anywhere in the response turns the whole camera list into
@@ -100,6 +113,18 @@ def lambda_handler(event, context):
                     "liveView": "sub" if i.get("liveRtspUrl") else "recorded",
                     "liveVideoCodec": i.get("liveVideoCodecActive")
                                       or (None if i.get("liveRtspUrl") else video_codec(i)),
+                    # The web panel's per-camera settings (set-camera-settings, WEB-PANEL-PLAN.md
+                    # §5.1): tags, the schedule, and the recorded quality -- the admin GUI's
+                    # ceiling (stream, picture size, frame rate), the cloud's choice below it,
+                    # what the producer last pulled, and the choices offered.
+                    "tags": i.get("tags") or [],
+                    "schedule": i.get("schedule"),
+                    "recordStream": i.get("recordStream"),
+                    "recordSize": i.get("recordSize"),
+                    "recordFps": i.get("recordFps"),
+                    "recordQuality": i.get("recordQuality"),
+                    "recordQualityActive": i.get("recordQualityActive"),
+                    "recordQualityOptions": record_quality_options(i),
                 }
                 for i in items
             ),

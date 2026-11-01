@@ -746,6 +746,7 @@ changed), deploys the API stage and verifies the new route through API Gateway:
 ```bash
 bash cloud/provision.sh user-settings --dry-run   # what it would create, changing nothing
 bash cloud/provision.sh user-settings             # GET/PUT /me/settings for the web panel
+bash cloud/provision.sh camera-settings           # POST /cameras/settings: tags, schedule, quality
 ```
 
 After that, `deploy.sh lambda user-settings` updates the function's code like any other.

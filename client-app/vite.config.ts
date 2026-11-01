@@ -11,6 +11,9 @@ export default defineConfig({
     // hls.js alone is ~575 kB and is split off, loaded with the first player (camera-controller.ts);
     // the warning would otherwise flag that lazy chunk on every build.
     chunkSizeWarningLimit: 600,
+    // Rolldown reports when plugins take a large share of a build -- on the Pi the Vue transform
+    // always does (~2 s), and the report filled `deploy.sh page` output with noise.
+    rolldownOptions: { checks: { bundlerTimings: false } },
   },
   test: {
     environment: "jsdom",

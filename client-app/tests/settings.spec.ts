@@ -60,6 +60,9 @@ function mountSection(component: unknown, camera: Camera) {
 async function refresh(w: ReturnType<typeof mountSection>) {
   await w.setProps({ camera: useCamerasStore().cameras[0] });
 }
+/** A dropdown by its input id: card order changes as cards are added. */
+const byId = (w: ReturnType<typeof mountSection>, id: string) =>
+  w.findAllComponents(Select).find(c => c.props("inputId") === id)!;
 const saves = () => Object.entries(fake.endpoints)
   .filter(([n]) => n.startsWith("set")).flatMap(([, f]) => f.mock.calls);
 
@@ -162,7 +165,7 @@ describe("Camera section", () => {
 describe("Recording section", () => {
   it("greys out the modes the camera doesn't publish, and saves a chosen one", async () => {
     const w = mountSection(RecordingSection, cam());
-    const select = w.findAllComponents(Select)[0];
+    const select = byId(w, "mode-cam-02");
     const disabled = (select.props("options") as { value: string; disabled: boolean }[])
       .filter(o => o.disabled).map(o => o.value);
     expect(disabled).toEqual(["human"]);
@@ -174,13 +177,13 @@ describe("Recording section", () => {
 
   it("a camera without ONVIF events is manual only", () => {
     const w = mountSection(RecordingSection, cam({ supportsDetection: false }));
-    expect(w.findAllComponents(Select)[0].props("disabled")).toBe(true);
+    expect(byId(w, "mode-cam-02").props("disabled")).toBe(true);
     expect(w.text()).toContain("no ONVIF — manual only");
   });
 
   it("If the internet drops saves the number of seconds", async () => {
     const w = mountSection(RecordingSection, cam());
-    w.findAllComponents(Select)[1].vm.$emit("update:modelValue", 120);
+    byId(w, "outage-cam-02").vm.$emit("update:modelValue", 120);
     await flushPromises();
     expect(fake.endpoints.setOutageBuffer).toHaveBeenCalledWith("cam-02", 120);
     expect(w.text()).toContain("Saved — on — up to 2 minutes after a drop");

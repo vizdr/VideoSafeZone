@@ -4,6 +4,8 @@
 #   bash cloud/provision.sh user-settings --dry-run   say what would be created, change nothing
 #   bash cloud/provision.sh user-settings             GET/PUT /me/settings (WEB-PANEL-PLAN.md 2.1):
 #                                                     table, role, function, routes, CORS, stage
+#   bash cloud/provision.sh camera-settings           POST /cameras/settings (WEB-PANEL-PLAN.md
+#                                                     Phase 4): role, function, route, CORS, stage
 #
 # deploy.sh replaces the code of functions that exist; this creates what doesn't exist yet -- and
 # only that. Every step looks first and leaves an existing resource as it is, so a second run
@@ -171,9 +173,10 @@ deploy_stage() {
 
 # The route answers through API Gateway: the preflight with CORS, a call without a token is turned
 # away by the authorizer (an unknown route would say "Missing Authentication Token" instead), and
-# test-invoke -- which skips the authorizer -- reaches the function, which wants a user.
-verify_route() {      # verify_route PATH METHOD...
-  local path=$1; shift
+# test-invoke -- which skips the authorizer and sends no body -- reaches the function, whose
+# answer to that empty call contains PHRASE.
+verify_route() {      # verify_route PATH PHRASE METHOD...
+  local path=$1 phrase=$2; shift 2
   local url="https://$API.execute-api.$REGION.amazonaws.com/$STAGE$path" m rid out i
   for i in 1 2 3 4 5 6; do
     curl -s -o /dev/null -D "$TMP/h" -X OPTIONS "$url" -H "Origin: https://example.org" \
@@ -186,7 +189,7 @@ verify_route() {      # verify_route PATH METHOD...
   done
   rid=$(resource_id "$path")
   out=$(aws apigateway test-invoke-method --rest-api-id "$API" --resource-id "$rid" --http-method "$1" --query '[status, body]' --output text)
-  grep -q "no signed-in user" <<<"$out" || die "test-invoke $1 $path didn't reach the function: $out"
+  grep -q "$phrase" <<<"$out" || die "test-invoke $1 $path didn't reach the function: $out"
   say "verified: $path answers (CORS preflight, authorizer, function)"
 }
 
@@ -200,10 +203,22 @@ provision_user_settings() {
   ensure_cors "$rid" /me/settings "GET,PUT,OPTIONS"
   deploy_stage user-settings
   if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
-  verify_route /me/settings GET PUT
+  verify_route /me/settings "no signed-in user" GET PUT
+}
+
+provision_camera_settings() {
+  ensure_role SetCameraSettingsLambdaRole cameras-rw set-camera-settings-policy.json
+  ensure_function set-camera-settings SetCameraSettingsLambdaRole
+  local rid; rid=$(ensure_resource /cameras/settings)
+  ensure_method "$rid" /cameras/settings POST set-camera-settings
+  ensure_cors "$rid" /cameras/settings "POST,OPTIONS"
+  deploy_stage camera-settings
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  verify_route /cameras/settings "give cameraId" POST
 }
 
 case "${1:-}" in
-  user-settings) preflight; provision_user_settings ;;
-  *) sed -n '2,7p' "$0"; exit 1 ;;
+  user-settings)   preflight; provision_user_settings ;;
+  camera-settings) preflight; provision_camera_settings ;;
+  *) sed -n '2,9p' "$0"; exit 1 ;;
 esac

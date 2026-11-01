@@ -283,9 +283,10 @@ def register_camera():
         detection = _registration_detection(camera_id, host, port, user, password)
         # The stream may have changed, and an unregistered camera's live path went with
         # Unregister: set the live view up again from what the camera says now.
-        live = _apply_live_view(camera_id, {**existing, "onvifHost": host, "onvifPort": port,
-                                            "onvifUser": user, "onvifPassword": password,
-                                            "rtspUrl": stream_uri})
+        reregistered = {**existing, "onvifHost": host, "onvifPort": port,
+                        "onvifUser": user, "onvifPassword": password, "rtspUrl": stream_uri}
+        live = _apply_live_view(camera_id, reregistered)
+        _registration_ceiling(camera_id, reregistered)
         _refresh_path_cache()
         return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"],
                         "updated": True, "reactivated": reactivate, "producer": producer,
@@ -363,6 +364,7 @@ def register_camera():
 
     detection = _registration_detection(camera_id, host, port, user, password)
     live = _apply_live_view(camera_id, row)    # registered on the main stream: live view on sub
+    _registration_ceiling(camera_id, row)
     _refresh_path_cache()
     return jsonify({"cameraId": camera_id, "kvsStreamArn": stream_arn, "updated": False,
                     "fps": fps_result, "detectionModes": detection, "liveView": live}), 201
@@ -403,6 +405,53 @@ def _registration_fps(host, port, user, password, stream_uri, fps):
         return {"asked": fps, "configured": got["frameRate"], "govLength": got["govLength"]}
     except Exception as e:  # noqa: BLE001
         return {"asked": fps, "error": f"{type(e).__name__}: {e}"}
+
+
+def _ceiling_fields(stream, fps=None):
+    """The recorded stream as the cloud page's quality ceiling (WEB-PANEL-PLAN.md D5): which
+    stream, its picture size (the camera's claim), and its frame rate when it is one of the two
+    this system offers (D5 of VMS-PORT-PLAN.md: no other rate is shown)."""
+    rate = fps if fps is not None else stream.get("fps")
+    # The camera's read-back is a float (10.0); DynamoDB through boto3 takes no floats at all.
+    rate = int(rate) if isinstance(rate, (int, float)) and float(rate).is_integer() else None
+    return {"recordStream": stream["name"],
+            "recordSize": f'{stream["width"]}x{stream["height"]}',
+            "recordFps": rate if rate in onvif_media2.FPS_CHOICES else None}
+
+
+def _record_ceiling(camera_id, item, stream, fps=None):
+    """Write the ceiling when it differs from the row, field by field, and clear a cloud choice
+    that is no longer below it: the only lower step is the sub stream, so a camera that no longer
+    records main loses a "sub" choice (WEB-PANEL-PLAN.md D5). Best effort -- the stream already
+    is what it is -- so the outcome goes in the response, never an error."""
+    want = _ceiling_fields(stream, fps)
+    sets = {k: v for k, v in want.items() if v is not None and item.get(k) != v}
+    removes = [k for k, v in want.items() if v is None and k in item]
+    if want["recordStream"] != "main" and "recordQuality" in item:
+        removes.append("recordQuality")
+    if not sets and not removes:
+        return {"ceiling": want, "written": False}
+    parts = (["SET " + ", ".join(f"{k} = :{k}" for k in sets)] if sets else []) + \
+            (["REMOVE " + ", ".join(removes)] if removes else [])
+    try:
+        cameras_table().update_item(
+            Key={"cameraId": camera_id}, UpdateExpression=" ".join(parts),
+            **({"ExpressionAttributeValues": {f":{k}": v for k, v in sets.items()}} if sets else {}))
+        return {"ceiling": want, "written": True,
+                **({"clearedCloudChoice": True} if "recordQuality" in removes else {})}
+    except Exception as e:  # noqa: BLE001
+        return {"ceiling": want, "written": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def _registration_ceiling(camera_id, item):
+    """At registration the recorded stream is the URI the form chose: record its ceiling from the
+    camera's own stream list. Never fails the registration."""
+    try:
+        found = onvif_media2.streams(onvif_media2.for_camera(item))
+        stream = next((x for x in found if onvif_media2.same_stream(x["streamUri"], item.get("rtspUrl"))), None)
+        return _record_ceiling(camera_id, item, stream) if stream else {"written": False}
+    except Exception as e:  # noqa: BLE001
+        return {"written": False, "reason": f"{type(e).__name__}: {e}"}
 
 
 def _apply_live_view(camera_id, item, found=None):
@@ -1225,7 +1274,9 @@ def _stream_view(x):
 @app.get("/api/cameras/<camera_id>/stream")
 def get_stream_choice(camera_id):
     """The camera's streams, which one this system records, and the frame rates (10/15) each
-    accepts. Read-only, once per table load (FoundAndFixed.md #56)."""
+    accepts. Once per table load (FoundAndFixed.md #56). Read-only but for the cloud page's quality
+    ceiling, written when the recorded stream differs from what the row says -- a switch made in
+    VMS's admin GUI or the camera's own page -- as the codec is learnt on read (#69)."""
     try:
         item = _camera_item_quick(camera_id)
     except Exception as e:  # noqa: BLE001
@@ -1243,7 +1294,9 @@ def get_stream_choice(camera_id):
                     if onvif_media2.same_stream(x["streamUri"], item.get("rtspUrl"))), None)
     live_path = (camera_control.live_path_name(camera_id) if item.get("liveRtspUrl")
                  else camera_control.mediamtx_path_name(camera_id))
-    return jsonify({"cameraId": camera_id, "switchable": True, "current": current,
+    recorded = next((x for x in found if x["name"] == current), None)
+    ceiling = _record_ceiling(camera_id, item, recorded) if recorded else None
+    return jsonify({"cameraId": camera_id, "switchable": True, "current": current, "ceiling": ceiling,
                     "streams": [_stream_view(x) for x in found],
                     "wire": mediamtx_api.path_video_track(camera_control.mediamtx_path_name(camera_id)),
                     # What live view (preview and cloud Live player) shows.
@@ -1332,6 +1385,9 @@ def set_stream_choice(camera_id):
             if not _fps_ok(measured, want_fps):
                 out["warning"] = (f"the camera accepted {want_fps} fps, but MediaMTX receives "
                                   + (f"{measured} fps" if measured else "no countable video"))
+        # The new ceiling for the cloud page; a "sub" choice there goes if this isn't main (D5).
+        out["ceiling"] = _record_ceiling(camera_id, item, target,
+                                         out["fps"]["configured"] if "fps" in out else None)
     except onvif_media2.OnvifError as e:
         return jsonify({"error": str(e), **out}), 502
 

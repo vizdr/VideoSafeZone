@@ -341,3 +341,12 @@ def test_unregister_with_mediamtx_down_still_marks_and_stops(gui):
     status, body = g.post("/api/cameras/cam-03/unregister")
     assert status == 200 and "next MediaMTX restart" in body["warning"]
     assert g.table.row("cam-03")["unregisteredAt"] and len(systemctl_writes(g.system)) == 3
+
+
+def test_registration_records_the_quality_ceiling(gui):
+    # WEB-PANEL-PLAN.md D5: what the form registered is the most the cloud page may choose.
+    g = _new_camera_gui(gui)
+    _expect_kvs(g)
+    assert g.post("/api/cameras", NEW)[0] == 201
+    row = g.table.row("cam-04")
+    assert (row["recordStream"], row["recordSize"], row["recordFps"]) == ("main", "2560x1440", 15)

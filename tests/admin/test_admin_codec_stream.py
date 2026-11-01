@@ -292,3 +292,44 @@ def test_measure_fps_timeout(monkeypatch):
 def test_fps_tolerance(measured, fps, ok):
     # cam-03 sends 19.8 fps at a 20 fps limit.
     assert admin._fps_ok(measured, fps) is ok
+
+
+# --- the cloud page's quality ceiling (WEB-PANEL-PLAN.md D5) -------------------------------------
+
+def test_reading_the_streams_records_the_ceiling_once(gui):
+    g = gui(mtx=_cam03_mtx(), camera=media2("192.0.2.13"))
+    body = g.get("/api/cameras/cam-03/stream")[1]
+    assert body["ceiling"] == {"ceiling": {"recordStream": "main", "recordSize": "2560x1440", "recordFps": 15},
+                               "written": True}
+    row = g.table.row("cam-03")
+    assert (row["recordStream"], row["recordSize"], row["recordFps"]) == ("main", "2560x1440", 15)
+    assert type(row["recordFps"]) is int                      # boto3 refuses floats (the read-back is 15.0)
+    writes = len(g.table.writes)
+    assert g.get("/api/cameras/cam-03/stream")[1]["ceiling"]["written"] is False   # unchanged: no write
+    assert len(g.table.writes) == writes
+
+
+def test_a_rate_outside_10_and_15_is_not_a_ceiling_rate(gui):
+    g = gui(rows=[{**CAM03, "recordFps": 15}], mtx=_cam03_mtx(), camera=media2("192.0.2.13", main_fps="25"))
+    g.get("/api/cameras/cam-03/stream")
+    assert "recordFps" not in g.table.row("cam-03")
+
+
+def test_switching_recording_to_sub_clears_the_clouds_sub_choice(gui):
+    holder = {}
+    rows = [{**CAM03, "recordStream": "main", "recordQuality": {"stream": "sub"}}]
+    g = holder["g"] = gui(rows=rows, mtx=_cam03_mtx(on_write=_reconnects(holder)), camera=media2("192.0.2.13"))
+    body = g.post("/api/cameras/cam-03/stream", {"stream": "sub"})[1]
+    assert body["ceiling"]["clearedCloudChoice"] is True
+    row = g.table.row("cam-03")
+    assert (row["recordStream"], row["recordSize"]) == ("sub", "800x448")
+    assert "recordQuality" not in row                         # nothing below sub (D5)
+
+
+def test_a_new_rate_on_main_keeps_the_clouds_sub_choice(gui):
+    rows = [{**CAM03, "recordStream": "main", "recordFps": 15, "recordQuality": {"stream": "sub"}}]
+    g = gui(rows=rows, mtx=_cam03_mtx(), camera=media2("192.0.2.13"), run={("ffprobe",): _ffprobe_at(10)})
+    body = g.post("/api/cameras/cam-03/stream", {"fps": 10})[1]
+    row = g.table.row("cam-03")
+    assert (row["recordFps"], row["recordQuality"]) == (10, {"stream": "sub"})
+    assert type(row["recordFps"]) is int and "clearedCloudChoice" not in body["ceiling"]

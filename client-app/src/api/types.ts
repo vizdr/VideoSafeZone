@@ -28,7 +28,39 @@ export interface Camera {
   webUrl?: string | null;
   liveView: "sub" | "recorded";
   liveVideoCodec?: VideoCodec | null;
-  tags?: string[];                             // WEB-PANEL-PLAN.md §5.1, Phase 4
+  // The web panel's per-camera settings (set-camera-settings, WEB-PANEL-PLAN.md §5.1)
+  tags?: string[];
+  schedule?: Schedule | null;
+  /** The recorded-quality ceiling, set in the admin GUI (D5): stream, picture size, frame rate. */
+  recordStream?: string | null;
+  recordSize?: string | null;
+  recordFps?: number | null;
+  /** The cloud's choice below the ceiling; null = the ceiling. */
+  recordQuality?: { stream: string } | null;
+  recordQualityActive?: { stream?: string } | null;
+  /** The streams the page may choose, the ceiling first; empty = nothing to choose. */
+  recordQualityOptions?: string[];
+}
+
+export type Day = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+
+/** One weekly entry: on these days at this time, start or stop cloud recording, or set a mode. */
+export interface ScheduleEntry {
+  days: Day[];
+  at: string;                                  // "HH:MM", 24-hour, in the schedule's time zone
+  action: string;                              // "start" | "stop" | "mode:<recordingMode>"
+}
+
+export interface Schedule {
+  tz: string;                                  // IANA name, e.g. "Europe/Berlin"
+  entries: ScheduleEntry[];
+}
+
+/** POST /cameras/settings: only the settings named are written; null or empty clears one. */
+export interface CameraSettings {
+  tags?: string[];
+  schedule?: Schedule | null;
+  recordQuality?: { stream: string } | null;
 }
 
 export type StorageTier = "STANDARD" | "STANDARD_IA" | "DEEP_ARCHIVE" | "GLACIER" | "UNKNOWN";

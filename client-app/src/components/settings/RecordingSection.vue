@@ -10,6 +10,7 @@ import { useSavedSetting, type SettingStatus } from "../../composables/useSavedS
 import { useCamerasStore } from "../../stores/cameras";
 import SettingCard from "./SettingCard.vue";
 import SettingRow from "./SettingRow.vue";
+import ScheduleCard from "./ScheduleCard.vue";
 
 const props = defineProps<{ camera: Camera }>();
 const cameras = useCamerasStore();
@@ -65,6 +66,8 @@ const outageStatus = computed<SettingStatus>(() =>
       </template>
     </SettingRow>
   </SettingCard>
+
+  <ScheduleCard :camera="camera" />
 
   <SettingCard icon="pi-wifi">
     <SettingRow title="If the internet drops" :label-for="`outage-${camera.id}`" :status="outageStatus">

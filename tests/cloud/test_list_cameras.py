@@ -66,7 +66,10 @@ def test_fields_the_page_uses(aws):
         "supportsDetection": True, "audioCapable": True, "audioEnabled": False,
         "outageBufferSec": 300, "videoCodec": "h265", "videoEncode": "camera",
         "videoCodecActive": None, "displayName": None, "detectionModes": ["motion", "human"],
-        "detectionTests": None, "webUrl": None, "liveView": "sub", "liveVideoCodec": None}
+        "detectionTests": None, "webUrl": None, "liveView": "sub", "liveVideoCodec": None,
+        # WEB-PANEL-PLAN.md §5.1, all absent from this row; no ceiling recorded yet: no choices.
+        "tags": [], "schedule": None, "recordStream": None, "recordSize": None, "recordFps": None,
+        "recordQuality": None, "recordQualityActive": None, "recordQualityOptions": []}
     assert cams["cam-01"]["recordingMode"] == "manual"          # the default
     assert cams["cam-01"]["supportsDetection"] is False         # no ONVIF: manual only
     assert (cams["cam-01"]["videoCodec"], cams["cam-01"]["videoEncode"]) == ("h264", "pi-hw")
@@ -80,3 +83,28 @@ def test_a_registry_failure_is_a_500_with_cors(aws, monkeypatch):
         raise RuntimeError("ProvisionedThroughputExceededException")
     monkeypatch.setattr(fake.tables["cameras"], "scan", broken)
     assert invoke(list_cameras)[0] == 500
+
+
+def test_the_web_panels_camera_settings_are_returned(aws):
+    # WEB-PANEL-PLAN.md §5.1: tags, schedule, the recorded-quality ceiling and choice.
+    schedule = {"tz": "Europe/Berlin", "entries": [{"days": ["mon"], "at": "18:00", "action": "start"}]}
+    rows = [{**ROWS[0], "tags": ["outdoor"], "schedule": schedule, "recordStream": "main",
+             "recordSize": "2560x1440", "recordFps": Decimal("15"), "recordQuality": {"stream": "sub"}},
+            ROWS[1]]
+    cams = {c["id"]: c for c in _list(aws, rows)}
+    c2 = cams["cam-02"]
+    assert (c2["tags"], c2["schedule"], c2["recordStream"], c2["recordSize"], c2["recordFps"]) == \
+        (["outdoor"], schedule, "main", "2560x1440", 15)
+    assert c2["recordQuality"] == {"stream": "sub"}
+    assert c2["recordQualityOptions"] == ["main", "sub"]
+    c1 = cams["cam-01"]
+    assert (c1["tags"], c1["schedule"], c1["recordQualityOptions"]) == ([], None, [])
+
+
+def test_quality_options_follow_the_ceiling():
+    opts = list_cameras.record_quality_options
+    assert opts({"onvifHost": "h", "recordStream": "main", "liveRtspUrl": "rtsp://x/sub"}) == ["main", "sub"]
+    assert opts({"onvifHost": "h", "recordStream": "main"}) == ["main"]          # no sub stream
+    assert opts({"onvifHost": "h", "recordStream": "sub"}) == ["sub"]            # nothing below sub
+    assert opts({"onvifHost": "h"}) == []                                        # ceiling not known yet
+    assert opts({"mode": "transcode", "recordStream": "main"}) == []             # USB: fixed on the Pi

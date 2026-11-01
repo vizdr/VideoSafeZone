@@ -13,6 +13,8 @@ import { useCamerasStore } from "../../stores/cameras";
 import { usePlayersStore } from "../../stores/players";
 import SettingCard from "./SettingCard.vue";
 import SettingRow from "./SettingRow.vue";
+import QualityCard from "./QualityCard.vue";
+import TagsCard from "./TagsCard.vue";
 
 const props = defineProps<{ camera: Camera }>();
 const cameras = useCamerasStore();
@@ -59,6 +61,8 @@ async function setIr(mode: IrMode, label: string): Promise<void> {
 </script>
 
 <template>
+  <TagsCard :camera="camera" />
+
   <SettingCard icon="pi-video">
     <SettingRow title="Video">
       {{ codecLabel(camera) }} · set on the camera, in the admin GUI.
@@ -72,6 +76,8 @@ async function setIr(mode: IrMode, label: string): Promise<void> {
       </p>
     </SettingRow>
   </SettingCard>
+
+  <QualityCard :camera="camera" />
 
   <SettingCard icon="pi-volume-up">
     <SettingRow title="Record microphone" :label-for="`audio-${camera.id}`" :status="audioStatus">

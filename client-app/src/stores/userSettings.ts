@@ -1,17 +1,15 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { endpoints } from "../api";
-import { errorText, type ApiResult } from "../api/client";
+import { errorText, routeMissing } from "../api/client";
 import type { UserSettings } from "../api/types";
 import type { SettingStatus } from "../composables/useSavedSetting";
 import { DEFAULT_LAYOUT, isLayoutId, type LayoutId } from "../layouts/grid";
 
-// Before cloud/provision.sh has created /me/settings, API Gateway knows no such route and answers
-// 403 "Missing Authentication Token". The page then works with the defaults and keeps a choice for
-// as long as it stays open, rather than calling every change a failure.
-function notSetUp(r: ApiResult<unknown>): boolean {
-  return r.status === 403 && /Missing Authentication Token/.test(r.data.message ?? "");
-}
+// Before cloud/provision.sh has created /me/settings, API Gateway knows no such route
+// (routeMissing). The page then works with the defaults and keeps a choice for as long as it stays
+// open, rather than calling every change a failure.
+const notSetUp = routeMissing;
 const NOT_SET_UP = "Saving to your account isn't set up yet: this applies in this browser until you leave.";
 
 /** The signed-in user's own settings (WEB-PANEL-PLAN.md D4): the Live layout and its large-cell

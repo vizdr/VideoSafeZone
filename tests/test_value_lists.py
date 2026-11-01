@@ -75,3 +75,11 @@ def test_storage_tiers_match_the_set_clip_tier_lambda():
     tiers = py_constant(ROOT / "cloud" / "lambda" / "set_clip_tier.py", "VALID_TIERS")
     fmt = ROOT / "client-app" / "src" / "clips" / "format.ts"
     assert set(re.findall(r'value: "(\w+)"', ts_block(fmt, "TIER_CHOICES"))) == tiers
+
+
+def test_schedule_days_and_modes_match_between_the_lambda_and_the_page():
+    lam = ROOT / "cloud" / "lambda" / "set_camera_settings.py"
+    sched = ROOT / "client-app" / "src" / "cameras" / "schedule.ts"
+    assert list(py_constant(lam, "DAYS")) == re.findall(r'"(\w+)"', ts_block(sched, "DAYS"))
+    # The schedule's "mode:<recordingMode>" accepts exactly set-camera-mode's modes.
+    assert py_constant(lam, "VALID_MODES") == py_constant(ROOT / "cloud" / "lambda" / "set_camera_mode.py", "VALID_MODES")

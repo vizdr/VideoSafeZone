@@ -18,6 +18,10 @@ deployed; its backend was created by the user with `bash cloud/provision.sh user
 **Phase 3 — the cutover — is done (2026-11-01):** the user checked Phases 0–2 at `/app/` and ran
 `bash cloud/deploy.sh page`; **the site's root serves the web panel**, the old page is in the deploy
 backup (byte-identical to the committed file) and `client/index.html` has left the tree.
+**Phase 4** (camera settings: tags, recorded quality, schedule) is **deployed** (2026-11-01, by the
+user): `set-camera-settings` created by `provision.sh camera-settings` (`POST /cameras/settings`
+answers 401 without a token), `list-cameras` deployed, the admin GUI restarted, `deploy.sh page`
+done; `deploy.sh status` shows every function as this tree. Not committed yet.
 
 ---
 
@@ -473,6 +477,42 @@ so).
 *Verify:* pytest; tags and schedule round-trip; a choice above the ceiling → 400; lowering the
 ceiling in the admin GUI clears the cloud choice.
 
+*Built 2026-11-01* (117 Vitest tests, 940 pytest):
+- **`set-camera-settings`** (`cloud/lambda/set_camera_settings.py`, policy
+  `cloud/iam/set-camera-settings-policy.json`): tags, schedule and `recordQuality`, each checked
+  and written on its own; an emptied one is REMOVEd rather than stored. Schedule rules: days
+  `mon`…`sun`, `HH:MM`, actions `start`/`stop`/`mode:<recordingMode>` with set-camera-mode's own
+  rules (#65), at most 50 entries, no two changes of one kind at the same moment, a zone name by
+  shape (the Pi checks it against its zone database in Phase 5 — Lambda's isn't relied on).
+  `recordQuality`: null or the ceiling clears it; `{"stream": "sub"}` only when the ceiling is
+  main and a sub stream exists; anything else 400. 30 pytest. Created by
+  `bash cloud/provision.sh camera-settings`, whose route check now takes the phrase the function
+  answers an empty call with.
+- **`list-cameras`** returns the §5.1 fields and `recordQualityOptions` (the ceiling, plus "sub"
+  when it is below; none for the USB camera or before a ceiling is known).
+- **The admin GUI writes the ceiling** (`_record_ceiling`): at registration, after a stream or
+  frame-rate switch, and on `GET …/stream` when the row differs (learnt on read, like the codec,
+  #69); a switch away from main clears a "sub" choice. Found while testing it: the camera's
+  read-back rate is a float (10.0), which boto3 refuses for DynamoDB — the fake table didn't, so a
+  test now checks the stored type (it fails without the conversion). 5 admin tests.
+- **Settings:** Tags (chips; the camera list groups by the first tag), Recorded quality (the
+  ceiling as text, the choice as a dropdown when there is one; "not applied yet" until Phase 5),
+  Camera schedule (day buttons, time, action limited to the camera's modes, a week view of the
+  recording windows with mode marks, hours per week, a warning while a Start has no Stop within
+  24 h, entries with delete; the zone is the schedule's own, or this browser's for a new one; "not
+  run yet" until Phase 5). `src/cameras/schedule.ts` holds the rules: edge-triggered windows from
+  each Start to the next Stop, wrapping Sunday into Monday. A missing route now reads "the server
+  doesn't have this route yet" instead of "Missing Authentication Token".
+- **Cross-checks:** the schedule's days and the copy of the recording modes in the new Lambda
+  (`tests/test_value_lists.py`).
+
+*Deployed 2026-11-01.* The admin GUI recorded the ceilings when the cameras' stream settings were
+opened: cam-02 (640x360), cam-03 and cam-04 (800x448) all record their **sub** stream at 15 fps, so
+no lower step exists for any of them today — the Recorded-quality card says so, and the dropdown
+appears once a camera records main. cam-01 is fixed on the Pi, as designed. The build's plugin-
+timing report (Rolldown's `bundlerTimings`, noise in `deploy.sh page` output) is switched off in
+`vite.config.ts`.
+
 ### Phase 5: The Pi side
 
 5.1 Schedule runner (D6): `adapter/schedule_runner.py`, its unit in `setup/setup-user.sh`; tests
@@ -520,6 +560,6 @@ Capacitor; multi-tenancy (revisit D4).
 - [ ] Phase 2: Pi CPU and memory with every camera live at once (§7), before 16 tiles are called usable
 - [x] Phase 3: parity audit; cutover tooling (`deploy.sh page` = web panel at the root), rehearsed
 - [x] Phase 3: the user's checks at `/app/`; `deploy.sh page` (the cutover); `client/index.html` out, docs (2026-11-01)
-- [ ] Phase 4: `set-camera-settings`, new registry fields, admin GUI ceiling
+- [x] Phase 4: `set-camera-settings`, new registry fields, admin GUI ceiling — provisioned and deployed (2026-11-01)
 - [ ] Phase 5: schedule runner, stream step, thumbnails
 - [ ] Measurements of §7 recorded here

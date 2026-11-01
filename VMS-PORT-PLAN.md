@@ -801,6 +801,8 @@ All additive; no existing field changes meaning. VMS reads none of the new succe
 | `rtspUrl` | registration, stream switch | the stream that is **recorded** | same meaning (VMS pulls it) |
 | `liveRtspUrl` *(new)* | stream switch / registration | sub stream for live view, only when ≠ `rtspUrl` | ignored |
 | `liveStream` *(new)* | when the `-live` KVS stream is created | KVS stream name for live view | ignored |
+| `tags`, `schedule`, `recordQuality` *(new, web panel)* | set-camera-settings (cloud) | camera tags; the weekly schedule; the cloud's recorded-quality choice below the ceiling (`WEB-PANEL-PLAN.md` §5.1) | ignored |
+| `recordStream`, `recordSize`, `recordFps` *(new, web panel)* | this admin GUI: registration, stream/fps switch, stream read | the recorded-quality ceiling (D5 of `WEB-PANEL-PLAN.md`); VMS's own switches don't write it, so it is relearnt on this GUI's next read | ignored |
 
 Two consequences to keep in mind: the `cameras` table is shared, so **unregistering in either
 project hides the camera in both**, and a stream switch in either project changes what the other

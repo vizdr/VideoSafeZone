@@ -51,7 +51,14 @@ export class ApiClient {
   }
 }
 
+/** API Gateway's answer for a route it doesn't have: 403 "Missing Authentication Token". Seen when
+ *  a page is deployed before cloud/provision.sh has created the route it calls. */
+export function routeMissing(res: ApiResult<unknown>): boolean {
+  return res.status === 403 && /Missing Authentication Token/.test(res.data.message ?? "");
+}
+
 /** The message to show for a failed call: the Lambda's `error`, API Gateway's `message`, else the status. */
 export function errorText(res: ApiResult<unknown>): string {
+  if (routeMissing(res)) return "the server doesn't have this route yet (cloud/provision.sh creates it)";
   return res.data.error || res.data.message || String(res.status);
 }

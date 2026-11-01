@@ -353,7 +353,9 @@ for this — systemd counts that as a failure and restarts it. `get-hls-url?view
 A DynamoDB table `cameras` (PK `cameraId`, e.g. `"cam-01"`) holds each camera's mode
 (`transcode`/`passthrough`), ONVIF credentials, RTSP URL, IR-control capability, KVS
 stream ARN, and its video-codec capabilities and choice (`videoCodecCaps`, `videoCodec`,
-`videoCodecActive`; guide §21.2). Every Lambda that needs to validate a camera ID, and `agent.py`'s MQTT
+`videoCodecActive`; guide §21.2), and the web panel's per-camera settings — `tags`, `schedule`,
+`recordQuality` (written by `set-camera-settings`) under the quality ceiling `recordStream`/
+`recordSize`/`recordFps` that the admin GUI writes (`WEB-PANEL-PLAN.md` §5.1, D5). Every Lambda that needs to validate a camera ID, and `agent.py`'s MQTT
 handler, read this table directly — there is no hardcoded allow-list anywhere. Adding a
 camera through the ONVIF admin GUI (below) makes it work everywhere (cloud client,
 MQTT control, all API routes) immediately, with no code change. IAM for

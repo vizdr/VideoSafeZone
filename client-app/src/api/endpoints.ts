@@ -1,7 +1,8 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  Camera, ClipsPage, CommandAction, HlsSession, IrMode, RecordingMode, StorageTier, UserSettings,
+  Camera, CameraSettings, ClipsPage, CommandAction, HlsSession, IrMode, RecordingMode, StorageTier,
+  UserSettings,
 } from "./types";
 
 const q = encodeURIComponent;
@@ -29,6 +30,9 @@ export function makeEndpoints(api: ApiClient) {
 
     setOutageBuffer: (cameraId: string, outageBufferSec: number) =>
       api.request("POST", "/cameras/outage-buffer", { cameraId, outageBufferSec }),
+
+    setCameraSettings: (cameraId: string, settings: CameraSettings) =>
+      api.request<{ saved?: CameraSettings }>("POST", "/cameras/settings", { cameraId, ...settings }),
 
     listClips: (camera: string, limit: number, page: number | "last") =>
       api.request<ClipsPage>("GET", `/clips?camera=${q(camera)}&limit=${limit}&page=${page}`),
