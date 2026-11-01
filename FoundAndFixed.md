@@ -16,11 +16,11 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-85 entries, from the first build (2026-08-20) through the move onto a second Pi
+86 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
-found writing the pytest suite (2026-10-28).
+found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -109,6 +109,7 @@ found writing the pytest suite (2026-10-28).
 | 83 | Start Recording could run with nothing recording; it failed only at Stop Recording | cloud page | 2026-10-25 | fixed, page not yet deployed |
 | 84 | MediaMTX's duration parser reads `500ms` as 500 minutes | outage buffer | 2026-10-28 | fixed 2026-10-28 (latent; no live decision changed) |
 | 85 | An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud | admin GUI | 2026-10-28 | fixed 2026-10-28 |
+| 86 | earlyoom killed the agent and two other services; systemd took it as a clean exit and left them down | systemd / platform | 2026-11-01 | fixed 2026-11-01 |
 
 ### What they have in common
 
@@ -1513,3 +1514,53 @@ and pass with the fix. **Live** (2026-10-28, after `onvif-admin` was restarted a
 
 **The rule:** a route that mirrors a Lambda validates its input the same way, and answers a bad
 request with a 4xx, never through a catch-all 500.
+
+---
+
+## Found during the web panel's rollout (2026-11-01)
+
+### #86 — earlyoom killed the agent and two other services; systemd took it as a clean exit and left them down
+
+**Found:** 2026-11-01, rolling out `WEB-PANEL-PLAN.md` Phase 5: the web panel showed no live
+video. **Referenced from:** `setup/setup-user.sh` (A8 and its last proof).
+
+`kvs-agent`, `kvs-outage-buffer` and `kvs-event-watcher` were `inactive (dead)` with
+`Result=success`, and their logs ended without an error. `ExecMainCode=killed, status 15`
+named the signal, and `journalctl -u earlyoom` named the sender. Between 10:39 and 10:46 CET,
+with 16 % of memory available, earlyoom (guide §1.4, #1) sent SIGTERM to 17 processes: the
+three above, `onvif-admin`, `kvs-outage-uploader`, MediaMTX three times, and desktop helpers
+(PipeWire, the portals). The agent stayed down for 1 h 17 min, so every Live and Start press
+from the page went unanswered.
+
+**Why these were killed:** the memory was VS Code Remote-SSH's server, about 1.8 GB that day,
+which #1 already measured at 1.3+ GB. earlyoom kills the process with the highest
+`oom_score`, and that score includes `oom_score_adj`. systemd's user manager runs at 100 and
+starts its services at 200; VS Code's server runs at 0, under the SSH session. So a 40 MB
+`python3` service scores about 800 and goes ahead of a 270 MB `node` process at about 710.
+Lowering the services' adjustment can't fix this: an unprivileged unit can't go below the
+manager's 100, which still ranks them above VS Code.
+
+**Why they stayed down:** systemd counts a death by SIGTERM as a clean exit, like exit code 0.
+`Restart=on-failure` therefore did nothing. MediaMTX came back only because the USB camera's
+publisher, which `Requires=` it, failed and pulled it up on its own restart.
+
+**Fix:** every long-running user unit (`kvs-mediamtx`, `kvs-camera-publish`, `kvs-agent`,
+`onvif-admin`, `kvs-event-watcher`, `kvs-outage-buffer`, `kvs-outage-uploader`) also has
+`RestartForceExitStatus=SIGTERM`. systemd never restarts a unit after `systemctl stop`,
+whatever that setting says, so stopping a service still works. A new proof in
+`setup-user.sh` fails while any of the seven lacks it. The producers (system units) are
+unchanged. Their pipeline ending already exits non-zero (#44), and a producer must never
+start itself (cost rule).
+
+**Verified** (2026-11-01, 11:57 CET): `kill -TERM` on the agent's process, as earlyoom sends
+it, brought a new agent 5 s later (`NRestarts=1`), connected to AWS IoT Core again.
+`systemctl --user stop kvs-outage-uploader` left it inactive after 7 s. The new agent ended the
+four live views on startup, which is deliberate (`stop_all_live`: no live producer outlives the
+agent that started it). The open page asked for them again and they were running 1.5 min later.
+
+**Left as is:** a killed event watcher doesn't unsubscribe. Its camera subscription lapses
+within 10 minutes (`SUB_LIFETIME`, #65), one slot meanwhile. On a Pi without the development
+tools, memory doesn't run this low.
+
+**The rule:** `Restart=on-failure` doesn't cover a kill from outside. A service the Pi needs
+also restarts after SIGTERM.

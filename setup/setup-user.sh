@@ -105,6 +105,13 @@ uunit() {  # uunit FILE -- text on stdin; rewritten only when it changed
   cat > "$tmp"
   if ! cmp -s "$tmp" "$f" 2>/dev/null; then mv "$tmp" "$f"; CHANGED=$((CHANGED + 1)); note "wrote $1"; else rm -f "$tmp"; fi
 }
+# Every long-running unit below restarts after a SIGTERM it didn't ask for. earlyoom (A1) sends
+# one when memory runs low, and systemd counts a SIGTERM death as a clean exit, so
+# Restart=on-failure alone left the agent, the outage buffer and the event watcher down until
+# someone noticed (FoundAndFixed #86). `systemctl stop` is never followed by a restart, whatever
+# RestartForceExitStatus= says. The producers (system units, setup-system.sh) are left as they
+# are: a producer stays stopped unless something says otherwise (cost rule).
+KILLED='RestartForceExitStatus=SIGTERM'
 uunit kvs-camera-init.service <<EOF
 [Unit]
 Description=Lock the USB camera's exposure/WB/focus before streaming starts
@@ -134,6 +141,8 @@ ExecStart=$VMS_HOME/mediamtx/mediamtx
 # FoundAndFixed #31, #32). '-': no registry and no cache must not stop MediaMTX itself.
 ExecStartPost=-$VENV/bin/python3 $VMS_HOME/adapter/sync_mediamtx_paths.py
 Restart=on-failure
+# earlyoom's SIGTERM is a clean exit to systemd: restart anyway (FoundAndFixed #86)
+$KILLED
 RestartSec=5
 
 [Install]
@@ -153,6 +162,8 @@ Type=simple
 WorkingDirectory=$VMS_HOME/adapter/bin
 ExecStart=$VMS_HOME/adapter/bin/publish-cam01.sh
 Restart=on-failure
+# earlyoom's SIGTERM is a clean exit to systemd: restart anyway (FoundAndFixed #86)
+$KILLED
 RestartSec=5
 
 [Install]
@@ -169,6 +180,8 @@ Type=simple
 WorkingDirectory=$3
 ExecStart=$VENV/bin/python3 -u $4
 Restart=on-failure
+# earlyoom's SIGTERM is a clean exit to systemd: restart anyway (FoundAndFixed #86)
+$KILLED
 RestartSec=5
 
 [Install]
@@ -274,4 +287,7 @@ proof "project mediamtx.yml untouched"        git -C "$VMS_HOME" diff --quiet --
 proof "AWS CLI installed"                     "$HOME/.local/bin/aws" --version
 proof "user units valid"                      systemd-analyze --user verify "$UNITS/kvs-agent.service" "$UNITS/kvs-mediamtx.service" "$UNITS/netwatch.service"
 proof "no unit path still says \$VMS_HOME or ~" bash -c "! grep -hE 'ExecStart|WorkingDirectory' $UNITS/*.service | grep -qE '\\\$|~'"
+proof "a service killed by earlyoom comes back (FoundAndFixed #86)" bash -c \
+  "for u in kvs-mediamtx kvs-camera-publish kvs-agent onvif-admin kvs-event-watcher kvs-outage-buffer kvs-outage-uploader; do
+     systemctl --user show -p RestartForceExitStatus --value \$u | grep -qw TERM || { echo \"\$u: no restart after SIGTERM\"; exit 1; }; done"
 verdict "setup-user.sh"

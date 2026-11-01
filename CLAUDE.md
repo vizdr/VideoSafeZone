@@ -152,6 +152,9 @@ FoundAndFixed.md #79), `kvs-outage-buffer` +
 (every minute: runs the web panel's camera schedules, `adapter/schedule_runner.py`) and
 `kvs-thumbnails.timer` (every 10 min: one frame per camera for the web panel, `adapter/thumbnails.py`).
 
+The long-running user units also carry `RestartForceExitStatus=SIGTERM`: earlyoom kills with
+SIGTERM, which systemd otherwise counts as a clean exit and never restarts (FoundAndFixed.md #86).
+
 A unit in one manager **cannot** `Requires=`/`After=` a unit in the other — they're
 independent systemd instances; a cross-manager `Requires=` fails with "Unit not found"
 (FoundAndFixed.md #12).
