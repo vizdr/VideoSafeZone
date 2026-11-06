@@ -1369,7 +1369,8 @@ aws lambda create-function --function-name publish-cmd \
 
 ```bash
 POOL_ID=$(aws cognito-idp create-user-pool --pool-name kvs-demo-users \
-  --region eu-central-1 --auto-verified-attributes email --query 'UserPool.Id' --output text)
+  --region eu-central-1 --auto-verified-attributes email \
+  --admin-create-user-config AllowAdminCreateUserOnly=true --query 'UserPool.Id' --output text)
 
 CLIENT_ID=$(aws cognito-idp create-user-pool-client --user-pool-id "$POOL_ID" \
   --client-name kvs-demo-web-client \
@@ -1379,7 +1380,11 @@ CLIENT_ID=$(aws cognito-idp create-user-pool-client --user-pool-id "$POOL_ID" \
 
 `--no-generate-secret` matters — a browser client can't keep a client secret
 confidential, so this app client is deliberately public (the security boundary is the
-username/password + the resulting short-lived JWT, same model as any SPA).
+username/password + the resulting short-lived JWT, same model as any SPA). That boundary holds
+only while nobody can make their own username and password: `AllowAdminCreateUserOnly=true`
+closes self sign-up, which AWS leaves open by default — without it anyone could call `SignUp`
+with the public client ID and reach every camera (FoundAndFixed.md #87; an existing pool is
+closed with `cloud/close-signup.sh`).
 
 A test user, created and confirmed non-interactively for a demo (a real deployment would
 use self-registration or an admin invite flow instead):

@@ -43,7 +43,13 @@ fixes and features (written in VMS as `SUCCESSOR-PLAN.md`): its decisions D1–D
 the VMS→successor bug-number mapping (this repository's #52–#75 = VMS's #51–#74); its
 "Applicability" section says how far the round got. `WEB-PANEL-PLAN.md` is the plan for
 rebuilding the cloud client as a Vue app with panels (`client-app/`): decisions D1–D8, phases,
-progress — read it before touching either client. `PYTEST.md` records how the pytest suite
+progress — read it before touching either client. `DEALER-PANEL-PLAN.md` is the plan for
+accounts, roles and tenancy and the dealer / system consoles (a PostgreSQL directory on the shared
+RDS instance, a user pool of this repository's own, role claims checked by every Lambda, billing as
+fakes): decisions D1–D19, all settled 2026-11-06 — among them D11–D14 (several adapters, §4b) and
+D15–D19 (adapter activation with a Cloud ID, adding cameras from the web page, the sign-in and
+Account pages, a tariff plan per adapter, §4c) — phases and what was found in the account — read it before touching sign-in, roles, the directory,
+or anything that assumes a single adapter. `PYTEST.md` records how the pytest suite
 was introduced, step by step, its safety guards and the phases still to come — read it before
 adding tests. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are earlier material and
 may be stale relative to the current guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this

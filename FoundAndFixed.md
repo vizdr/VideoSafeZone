@@ -16,11 +16,12 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-86 entries, from the first build (2026-08-20) through the move onto a second Pi
+87 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
-found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01).
+found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
+planning the dealer panel (2026-11-06).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -110,6 +111,7 @@ found writing the pytest suite (2026-10-28); #86 during the web panel's rollout 
 | 84 | MediaMTX's duration parser reads `500ms` as 500 minutes | outage buffer | 2026-10-28 | fixed 2026-10-28 (latent; no live decision changed) |
 | 85 | An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud | admin GUI | 2026-10-28 | fixed 2026-10-28 |
 | 86 | earlyoom killed the agent and two other services; systemd took it as a clean exit and left them down | systemd / platform | 2026-11-01 | fixed 2026-11-01 |
+| 87 | The user pool allowed self sign-up: anyone could make an account and reach every camera | Cognito / setup | 2026-11-06 | fixed 2026-11-06 |
 
 ### What they have in common
 
@@ -1564,3 +1566,38 @@ tools, memory doesn't run this low.
 
 **The rule:** `Restart=on-failure` doesn't cover a kill from outside. A service the Pi needs
 also restarts after SIGTERM.
+
+### #87 — The user pool allowed self sign-up: anyone could make an account and reach every camera
+
+**Found:** 2026-11-06, reading the AWS account read-only while planning the dealer panel
+(`DEALER-PANEL-PLAN.md` §2). **Status:** fixed 2026-11-06.
+**Referenced from:** `DEALER-PANEL-PLAN.md` (§2, Phase 0.1), `cloud/close-signup.sh`, guide §8.2.
+
+`describe-user-pool` on `kvs-demo-users` shows `AdminCreateUserConfig.AllowAdminCreateUserOnly =
+false`, no Lambda triggers, and email as an auto-verified attribute. The app clients have no
+secret, and their IDs are in the pages' JavaScript by design (guide §8.2). So anyone can call
+`SignUp` with a client ID, confirm the code sent to an address they own, and sign in with
+`USER_PASSWORD_AUTH`. The API Gateway authorizers of `kvs-demo-api` and VMS's `pir-api` both accept
+any ID token from this pool, and no camera Lambda checks who the caller is. Such an account can
+watch every camera live, play and delete clips, and start or stop the producers (the cost rule,
+guide §1.2). Not exercised: trying it would have created a user in a pool shared with VMS.
+
+**Cause:** guide §8.2 creates the pool with `create-user-pool` and no `--admin-create-user-config`,
+and AWS's default is to allow self sign-up. The section notes that "a real deployment would use
+self-registration or an admin invite flow", but the pool was never closed for the demo.
+
+**Fix:** `cloud/close-signup.sh` sets `AllowAdminCreateUserOnly=true` and
+passes back every other current setting, because `update-user-pool` resets any setting it isn't
+given to its default. It compares the pool before and after, proves the switch with a refused
+sign-up on each app client, and lists the users. Its dry run (2026-11-06) found one user,
+`demo-viewer`, the one guide §8.2 creates: nobody had signed up. Guide §8.2 now creates the pool
+closed, and the new pool in `DEALER-PANEL-PLAN.md` D1 is created closed.
+
+**Verified** (2026-11-06, run by the user at 20:30 CET; the proof repeated by Claude): the pool's
+description before and after differs only in `AllowAdminCreateUserOnly`, false → true (copies in
+`~/.local/state/vms-deploy-backups/20261106T193012Z-cognito/`); a sign-up on each app client,
+`kvs-demo-web-client` and VMS's `pir-web`, is refused with "SignUp is not permitted"; the one user
+is still `demo-viewer`.
+
+**The rule:** a public app client is safe only when sign-up is closed, or when the API checks
+more than "the token came from this pool".
