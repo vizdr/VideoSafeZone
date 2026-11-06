@@ -1,0 +1,7 @@
+# The RDS certificate bundle for eu-central-1, shipped in the vsz-pg layer as rds-ca/bundle.pem: the
+# functions verify the database's certificate and hostname against it (vsz_db_admin.tls_context).
+# Three roots: Amazon RDS eu-central-1 Root CA RSA2048 G1 (the instance's, rds-ca-rsa2048-g1),
+# RSA4096 G1 and ECC384 G1. Checked 2026-11-06. provision.sh downloads it and refuses a file whose
+# sha256 differs: when AWS changes the bundle, look at the new roots, then update the line below.
+url https://truststore.pki.rds.amazonaws.com/eu-central-1/eu-central-1-bundle.pem
+sha256 56a0cae044b6cc433971d964347401692a92ea0294e392753a3ebdaee54d8b84

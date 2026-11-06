@@ -752,6 +752,30 @@ bash cloud/provision.sh thumbnails                # camera thumbnails: two polic
 
 After that, `deploy.sh lambda user-settings` updates the function's code like any other.
 
+### The directory database (accounts, roles, dealers)
+
+The directory lives in its own database, `videosafezone`, on the account's PostgreSQL instance
+(`database-coursera-iot`, shared with another project; `DEALER-PANEL-PLAN.md` D2, D3). Only
+`vsz-db-admin`, a function inside the VPC, reaches it. Once:
+
+```bash
+bash cloud/provision.sh directory-db --dry-run    # what it would create, changing nothing
+bash cloud/provision.sh directory-db              # layer, security group, role, function; then the
+                                                  # database's bootstrap, migrations, status
+```
+
+It adds one inbound rule to the database's existing security group `rds-lambda-2` (tcp 5432 from
+`vsz-db-client`) and says so; nothing else that exists is changed. The bootstrap reads the master
+user's password from Secrets Manager on this machine and hands it to the function once; after that
+every login is an IAM token. Afterwards:
+
+```bash
+bash cloud/deploy.sh db-status                    # server, our database, roles, migrations applied
+bash cloud/deploy.sh lambda vsz-db-admin          # ships new files from cloud/db/migrations/ ...
+bash cloud/deploy.sh db-migrate --dry-run         # ... lists what would be applied ...
+bash cloud/deploy.sh db-migrate                   # ... and applies it, each file in one transaction
+```
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

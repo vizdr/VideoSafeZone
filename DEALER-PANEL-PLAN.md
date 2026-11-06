@@ -14,7 +14,8 @@ adding cameras from the web page, the sign-in page, the Account page, a tariff p
 the user's requirements, §4c), as proposed, with two changes from the user: the screens say
 VideoSafeZone (D17), and the Account page has no Opt-ins for now (D18).
 **Progress:** Phase 0.1 (sign-up closed, #87 fixed) and 0.3 (deletion protection and IAM
-authentication on the database) done 2026-11-06, run by the user. Next: Phase 1.
+authentication on the database) done 2026-11-06, run by the user. **Phase 1 built and tested
+2026-11-06** (not provisioned yet: `bash cloud/provision.sh directory-db`, run by the user).
 
 ---
 
@@ -165,7 +166,9 @@ PostgreSQL; `user-settings` stays in DynamoDB.
   synchronous invoke. It exposes a fixed list of operations (`list_customers`, `save_plan`, …),
   each taking the caller ("actor") and enforcing the scope in its own `WHERE` clauses, with
   parameters only — no SQL text crosses the invoke. Only Cognito (source ARN = the pool) and
-  `vsz-directory-api`'s role may invoke it. Reserved concurrency 10 caps its connections.
+  `vsz-directory-api`'s role may invoke it. Its role's `CONNECTION LIMIT` caps its connections.
+  (Reserved concurrency was the plan; found in Phase 1: the account's total Lambda concurrency is
+  10, and AWS keeps all 10 unreserved, so no function here can reserve any — §9.)
 - **`vsz-directory-api`** (outside the VPC) serves `/directory/*`: checks the caller's claims,
   calls the Cognito admin API, reads the camera registry, and asks `vsz-directory` for everything
   in PostgreSQL. CORS headers on every answer, errors included (#8).
@@ -515,7 +518,10 @@ each has its own set of cameras and its own, independent plan.
 
 ## 5. Data model (PostgreSQL, schema `vsz`)
 
-First migration, `cloud/db/migrations/001_directory.sql` — the shape, not the final text:
+First migration, `cloud/db/migrations/001_directory.sql` — the shape, not the final text. **The
+migration file is authoritative** (built 2026-11-06): it also holds the triggers that keep the rules
+below, `plan.interval` became `billing_interval` (`interval` is a type name in SQL), and the seeds
+include the platform's own dealer, "Direct" (D15).
 
 ```sql
 CREATE TABLE org (                        -- platform → dealers → customers
@@ -639,9 +645,12 @@ is the platform; a `system_*` membership points at the platform, `dealer` at a d
 customer roles at a customer, which has exactly one holder (D18); staff have exactly one membership
 and no customer one; a share names a camera on one of the account's own adapters (checked against
 the registry when it is made), for a `customer_user` of that account; an adapter allocated to a dealer is activated only at a site of one of that dealer's customers (D15), and an
-activation's site belongs to its customer (D19). `vsz_app`
-gets `SELECT, INSERT, UPDATE` on these tables (`DELETE` on none — rows are
-closed or disabled, not removed) and `INSERT` only on `audit_event`.
+activation's site belongs to its customer (D19). The database keeps them itself — constraints,
+triggers, grants — so a bug in the code above can't break them. `vsz_app` gets `SELECT, INSERT,
+UPDATE` where rows change, `DELETE` only where D18 removes rows (a cancelled invitation, a
+membership, a share, old activation attempts; the price list, which the owner replaces), only
+`SELECT, INSERT` on plan versions, invoice lines and the audit log, and nothing on
+`vsz.schema_migrations`.
 
 **Price list seed:** placeholder numbers marked as such, with storage durations 7 / 30 / 90 days
 (requirements §3); the owner sets the real prices. Videoloft's retail figures are in
@@ -865,11 +874,36 @@ organisation, the price-list placeholders.
 1.4 **Tests against a real PostgreSQL** in `tests_db/`, a separate pytest root with its own
 `conftest.py` — the main suite's network guard stays exactly as it is. In CI, a `postgres:18`
 service container; on the Pi, skipped unless `VSZ_TEST_PG_DSN` is set. Migrations apply from empty
-twice (idempotent), the scope rules hold (dealer A can't read dealer B's customers through any
-operation), constraint violations are refused. `PYTEST.md` gets the step.
+twice (idempotent), constraint violations are refused. `PYTEST.md` gets the step. (The scope rules
+of operations — dealer A can't read dealer B's customers — come with the operations, Phase 2.)
 
 *Verify:* `provision.sh directory-db --dry-run`, then for real; `vsz-db-admin` reports the applied
 migrations; `SHOW max_connections` and the other project's database list recorded here.
+
+*Built 2026-11-06* (1003 offline pytest, 27 tests_db; not provisioned):
+- **1.1** `cloud/layers/vsz-pg/requirements.txt`: pg8000 1.31.5, scramp 1.4.6, asn1crypto 1.5.1,
+  python-dateutil 2.9.0.post0, six 1.17.0 — each hash-pinned, each months old when chosen (pg8000
+  1.31.6 and python-dateutil 4.0.0 were days old and were passed over). `rds-ca.txt` pins the
+  eu-central-1 bundle (three roots, the instance's `rds-ca-rsa2048-g1` among them) by sha256.
+  `provision.sh pg-layer` builds the same bytes every time (checked: two builds, one hash), so it
+  publishes only when the files change.
+- **1.2** `cloud/lambda/vsz_db_admin.py` (actions `status`, `bootstrap`, `migrate`). TLS is its own
+  context with the CA bundle and the hostname checked — pg8000's default would skip verification
+  and even fall back to plain text. One migration run at a time through a PostgreSQL advisory
+  lock, since reserved concurrency isn't available (above). `cloud/iam/vsz-db-admin-policy.json`:
+  `rds-db:connect` as `vsz_migrator` on this instance only; the managed
+  `AWSLambdaVPCAccessExecutionRole` for its network interfaces and logs.
+  `cloud/package.sh` (sourced by both scripts) says what a package holds — for `vsz-db-admin`, its
+  migrations too — and `deploy.sh` now compares every file of a package (every existing function
+  still reads "this tree"). New: `deploy.sh db-status`, `deploy.sh db-migrate [--dry-run]`, which
+  refuses unless the live package equals this tree.
+- **1.3** `001_directory.sql`, the whole §5 model with its triggers and grants. Phase 6's "migration
+  002" isn't needed for the adapter columns: they are in 001.
+- **1.4** `tests_db/` (27) and `tests/cloud/test_db_admin.py` (31); CI job `db`. Proved to catch
+  regressions; found one bug before any deploy (a trigger variable that shadowed the table name).
+- **Dry run against the account:** `provision.sh directory-db --dry-run` lists the layer, the
+  security group `vsz-db-client`, the one rule added to `rds-lambda-2`, the role, the function in
+  the three subnets, then the bootstrap, migrations and status — and changes nothing.
 
 ### Phase 2: Identity
 
@@ -933,7 +967,7 @@ a version's price is the server's.
 
 ### Phase 6: Adapters — Cloud IDs and activation (§4c D15)
 
-6.1 Directory: migration 002 (the adapter columns, `activation_attempt`); operations to generate
+6.1 Directory: (the adapter columns and `activation_attempt` are in migration 001); operations to generate
 (the code made and hashed in `vsz-directory`, the key in its environment), allocate, activate (the
 rules and the rate limit of D15), release, revoke and issue a new code. `tests_db/` for every rule:
 a wrong code, a used code, another dealer's adapter, the sixth attempt in an hour.
@@ -1036,6 +1070,9 @@ of its own if the shared instance's availability becomes the limit.
   lighter path for the trigger.
 - What the instance does to sign-in during its maintenance window and minor-version upgrades.
 - `max_connections` on the micro instance against the other project's use.
+- **The account's Lambda concurrency is 10 in total** (found in Phase 1), for every function at
+  once — the camera API, the directory, the other projects. Enough for a demo; before real
+  customers, ask AWS for the quota to be raised (Service Quotas, "Concurrent executions").
 - Cognito's default email limit against how many invitations (and email-change codes) a demo
   sends in a day.
 - The ID token's size with many shares (100 × about 21 characters) against API Gateway's header
@@ -1049,7 +1086,8 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 0.2: D1–D10 settled with the user (2026-11-06, all as proposed)
 - [x] D11–D14 (several adapters, §4b), D15–D19 (§4c) and the amendments to D1, D4, D6 settled with the user (2026-11-06)
 - [x] Phase 0.3: deletion protection and IAM auth on `database-coursera-iot` (2026-11-06, no restart)
-- [ ] Phase 1: layer, `vsz-db-admin`, bootstrap, migration 001, `tests_db/` in CI
+- [x] Phase 1: layer, `vsz-db-admin`, migration 001, `tests_db/` in CI — built and tested (2026-11-06)
+- [ ] Phase 1: provisioned (`provision.sh directory-db`, the user) and its *Verify* recorded
 - [ ] Phase 2: `vsz-users`, `vsz-directory` + trigger, seed, the sign-in page, Account details
 - [ ] Phase 3: `adapterId`, tenant checks report → enforce, pool switch
 - [ ] Phase 4: directory API, System console

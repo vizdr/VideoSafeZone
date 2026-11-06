@@ -8,6 +8,13 @@
 #                                                     Phase 4): role, function, route, CORS, stage
 #   bash cloud/provision.sh thumbnails                camera thumbnails (Phase 5.3): a policy for the
 #                                                     Pi's role and for list-cameras', its BUCKET
+#   bash cloud/provision.sh pg-layer                  the vsz-pg Lambda layer (pg8000 + RDS CA bundle,
+#                                                     cloud/layers/vsz-pg), published when this tree's
+#                                                     build differs from the newest version
+#   bash cloud/provision.sh directory-db              the directory database (DEALER-PANEL-PLAN.md
+#                                                     Phase 1): pg-layer, security group vsz-db-client,
+#                                                     role and function vsz-db-admin in the VPC; then the
+#                                                     database's bootstrap (once), migrations, status
 #
 # deploy.sh replaces the code of functions that exist; this creates what doesn't exist yet -- and
 # only that. Every step looks first and leaves an existing resource as it is, so a second run
@@ -18,6 +25,9 @@
 #   - The policy that goes up is the file in cloud/iam/, nothing typed here.
 #   - Done means verified: the new route answers through API Gateway (CORS preflight, the Cognito
 #     authorizer, and the function behind it via test-invoke).
+#   - One exception to "nothing that exists is modified", said aloud when it happens: directory-db
+#     adds one inbound rule to the database's existing security group rds-lambda-2 (tcp 5432 from
+#     vsz-db-client). Adding a rule removes nothing; the other project's rules stay as they are.
 #
 # Needs the operator's AWS CLI, logged in to the account below (aws login --remote).
 set -euo pipefail
@@ -31,6 +41,10 @@ AUTHORIZER_NAME=CognitoAuthorizer
 LAMBDA_DIR="$VMS_HOME/cloud/lambda"
 IAM_DIR="$VMS_HOME/cloud/iam"
 BASIC_EXECUTION=arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+VPC_EXECUTION=arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+DB_INSTANCE=database-coursera-iot            # shared with another project (DEALER-PANEL-PLAN.md §2)
+DB_NAME=videosafezone
+LAYER_DIR="$VMS_HOME/cloud/layers/vsz-pg"
 
 AWS="$(command -v aws || echo "$HOME/.local/bin/aws")"
 aws() { "$AWS" --region "$REGION" "$@"; }
@@ -42,6 +56,8 @@ DRY=0 ARGS=()
 for a in "$@"; do case "$a" in --dry-run) DRY=1 ;; *) ARGS+=("$a") ;; esac; done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# shellcheck source=cloud/package.sh
+. "$VMS_HOME/cloud/package.sh"
 CHANGED=0                                   # anything created: the stage needs a new deployment
 
 preflight() {
@@ -67,8 +83,8 @@ ensure_table() {   # ensure_table NAME HASH_KEY
   [ "$DRY" -eq 1 ] || aws dynamodb wait table-exists --table-name "$1"
 }
 
-ensure_role() {    # ensure_role ROLE INLINE_POLICY_NAME POLICY_FILE
-  local role=$1 pname=$2 file="$IAM_DIR/$3"
+ensure_role() {    # ensure_role ROLE INLINE_POLICY_NAME POLICY_FILE [MANAGED_POLICY_ARN]
+  local role=$1 pname=$2 file="$IAM_DIR/$3" managed=${4:-$BASIC_EXECUTION}
   [ -e "$file" ] || die "no $file"
   if aws iam get-role --role-name "$role" >/dev/null 2>&1; then
     say "role $role: exists, left as is"
@@ -80,8 +96,8 @@ ensure_role() {    # ensure_role ROLE INLINE_POLICY_NAME POLICY_FILE
   fi
   create "role $role (trust: cloud/iam/lambda-trust.json)" aws iam create-role --role-name "$role" \
     --assume-role-policy-document "file://$IAM_DIR/lambda-trust.json"
-  create "  its CloudWatch Logs access (AWSLambdaBasicExecutionRole)" aws iam attach-role-policy \
-    --role-name "$role" --policy-arn "$BASIC_EXECUTION"
+  create "  its CloudWatch Logs access (${managed##*/})" aws iam attach-role-policy \
+    --role-name "$role" --policy-arn "$managed"
   create "  its inline policy $pname (cloud/iam/$3)" aws iam put-role-policy --role-name "$role" \
     --policy-name "$pname" --policy-document "file://$file"
 }
@@ -266,9 +282,189 @@ provision_thumbnails() {
   say "verified: both policies attached, list-cameras knows the bucket"
 }
 
+# --- the directory database (DEALER-PANEL-PLAN.md Phase 1, D2, D3) ---------------------------------
+
+# This tree's vsz-pg layer as $TMP/vsz-pg.zip, the same bytes on every build of the same files (so
+# "already published" can be told by its hash); sets LAYER_SHA as Lambda reports it (base64 sha256).
+build_pg_layer() {
+  local dir="$TMP/layer" py url sum
+  py="$VMS_HOME/venv-adapter/bin/python"; [ -x "$py" ] || py=python3
+  mkdir -p "$dir/python" "$dir/rds-ca"
+  (cd "$TMP" && "$py" -I -m pip install --quiet --disable-pip-version-check --no-deps --only-binary=:all: \
+     --require-hashes --no-compile --target "$dir/python" -r "$LAYER_DIR/requirements.txt") ||
+    die "pip couldn't fetch the layer's packages with their pinned hashes"
+  url=$(awk '$1 == "url" {print $2}' "$LAYER_DIR/rds-ca.txt")
+  sum=$(awk '$1 == "sha256" {print $2}' "$LAYER_DIR/rds-ca.txt")
+  curl -fsS -o "$dir/rds-ca/bundle.pem" "$url" || die "couldn't download the RDS CA bundle: $url"
+  [ "$(sha256sum < "$dir/rds-ca/bundle.pem" | cut -d' ' -f1)" = "$sum" ] ||
+    die "the RDS CA bundle at $url isn't the one in cloud/layers/vsz-pg/rds-ca.txt -- look at its roots, then update the sha256 there"
+  python3 - "$dir" "$TMP/vsz-pg.zip" <<'PY'
+import os, sys, zipfile
+root, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w") as z:          # sorted, fixed dates and modes: same files, same bytes
+    for base, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        for name in sorted(files):
+            path = os.path.join(base, name)
+            info = zipfile.ZipInfo(os.path.relpath(path, root), date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr, info.compress_type = 0o644 << 16, zipfile.ZIP_DEFLATED
+            with open(path, "rb") as f:
+                z.writestr(info, f.read())
+PY
+  LAYER_SHA=$(openssl dgst -sha256 -binary "$TMP/vsz-pg.zip" | base64)
+}
+
+ensure_pg_layer() {   # sets LAYER_ARN: the newest vsz-pg version, published first if this build differs
+  local latest live
+  build_pg_layer
+  latest=$(aws lambda list-layer-versions --layer-name vsz-pg --query 'LayerVersions[0].LayerVersionArn' --output text 2>/dev/null | sed 's/^None$//')
+  if [ -n "$latest" ]; then
+    live=$(aws lambda get-layer-version-by-arn --arn "$latest" --query Content.CodeSha256 --output text)
+    if [ "$live" = "$LAYER_SHA" ]; then say "layer vsz-pg: $latest is this tree's build"; LAYER_ARN=$latest; return; fi
+    say "layer vsz-pg: $latest differs from this tree's build"
+  fi
+  if [ "$DRY" -eq 1 ]; then say "would publish layer vsz-pg (pg8000 and its packages, the RDS CA bundle; sha256 $LAYER_SHA)"; LAYER_ARN="(new)"; return; fi
+  LAYER_ARN=$(aws lambda publish-layer-version --layer-name vsz-pg \
+    --description "pg8000 + RDS CA bundle eu-central-1 (cloud/layers/vsz-pg)" \
+    --zip-file "fileb://$TMP/vsz-pg.zip" --compatible-runtimes python3.13 --compatible-architectures arm64 \
+    --query LayerVersionArn --output text)
+  say "published layer $LAYER_ARN"
+}
+
+ensure_sg() {         # ensure_sg NAME VPC DESCRIPTION -- prints its id (messages go to stderr)
+  local id
+  id=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=$1" "Name=vpc-id,Values=$2" \
+    --query 'SecurityGroups[0].GroupId' --output text | sed 's/^None$//')
+  if [ -n "$id" ]; then say "security group $1: exists ($id), left as is" >&2; echo "$id"; return; fi
+  if [ "$DRY" -eq 1 ]; then say "would create security group $1 in $2 (no inbound rules)" >&2; echo "(new)"; return; fi
+  id=$(aws ec2 create-security-group --group-name "$1" --vpc-id "$2" --description "$3" --query GroupId --output text)
+  say "created security group $1 ($id): no inbound rules" >&2
+  echo "$id"
+}
+
+ensure_db_ingress() { # ensure_db_ingress DB_SG CLIENT_SG -- the one rule added to an existing group
+  local has
+  if [ "$2" != "(new)" ]; then
+    has=$(aws ec2 describe-security-groups --group-ids "$1" \
+      --query 'SecurityGroups[0].IpPermissions[?FromPort==`5432`].UserIdGroupPairs[].GroupId' --output text)
+    if grep -qw -- "$2" <<<"$has"; then say "rds-lambda-2 ($1): tcp 5432 from vsz-db-client is there"; return; fi
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    say "would ADD to rds-lambda-2 ($1), the database's existing group, one inbound rule: tcp 5432 from vsz-db-client (nothing else changes)"
+    return
+  fi
+  aws ec2 authorize-security-group-ingress --group-id "$1" --ip-permissions \
+    "IpProtocol=tcp,FromPort=5432,ToPort=5432,UserIdGroupPairs=[{GroupId=$2,Description=VideoSafeZone directory functions}]" >/dev/null
+  say "added to rds-lambda-2 ($1): tcp 5432 from vsz-db-client ($2)"
+}
+
+ensure_db_admin_function() {   # SG SUBNETS HOST PORT -- vsz-db-admin, in the VPC, with the layer
+  local sg=$1 subnets=$2 host=$3 port=$4 name=vsz-db-admin conf i
+  if conf=$(aws lambda get-function-configuration --function-name "$name" --output json 2>/dev/null); then
+    say "function $name: exists, left as is (bash cloud/deploy.sh lambda $name updates its code)"
+    python3 - "$conf" "$LAYER_ARN" "$sg" <<'PY'
+import json, sys
+conf, layer, sg = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+layers = [l["Arn"] for l in conf.get("Layers", [])]
+if layer != "(new)" and layer not in layers:
+    print(f"!! vsz-db-admin uses {layers or 'no layer'}, not {layer} -- to switch: aws lambda "
+          f"update-function-configuration --function-name vsz-db-admin --layers {layer}", file=sys.stderr)
+if sg != "(new)" and sg not in conf.get("VpcConfig", {}).get("SecurityGroupIds", []):
+    print(f"!! vsz-db-admin isn't in the security group {sg}", file=sys.stderr)
+PY
+    return
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    say "would create function $name: in the VPC (vsz-db-client; subnets $subnets), layer vsz-pg, 256 MB, 60 s, DB_HOST=$host"
+    return
+  fi
+  package_lambda "$name" "$TMP/$name.zip"
+  say "creating function $name in the VPC (a minute or two: Lambda attaches it to the subnets)"
+  for i in $(seq 1 12); do      # a new role takes a few seconds before Lambda may assume it and use EC2
+    if aws lambda create-function --function-name "$name" --runtime python3.13 --architectures arm64 \
+         --handler vsz_db_admin.lambda_handler --role "arn:aws:iam::$ACCOUNT:role/vsz-db-admin-role" \
+         --memory-size 256 --timeout 60 --zip-file "fileb://$TMP/$name.zip" --layers "$LAYER_ARN" \
+         --vpc-config "SubnetIds=$subnets,SecurityGroupIds=$sg" \
+         --environment "Variables={DB_HOST=$host,DB_PORT=$port,DB_NAME=$DB_NAME}" >/dev/null 2>"$TMP/err"; then
+      break
+    fi
+    grep -qE "cannot be assumed|does not have permissions|CreateNetworkInterface" "$TMP/err" && [ "$i" -lt 12 ] ||
+      die "create-function: $(cat "$TMP/err")"
+    sleep 5
+  done
+  aws lambda wait function-active-v2 --function-name "$name"
+  # No reserved concurrency: the account's total is 10 and AWS keeps all 10 unreserved. One
+  # migration at a time is the function's own advisory lock instead.
+}
+
+# Status first; only a database that isn't set up yet gets the bootstrap -- and only then is the
+# master password read, from Secrets Manager here on the operator's machine (the function can't).
+db_bootstrap_if_needed() {
+  local secret
+  printf '{"action": "status"}\n' > "$TMP/status-event.json"
+  if invoke_db_admin "$TMP/status-event.json" > "$TMP/status-answer" 2>&1; then
+    say "database: set up already -- bootstrap skipped"; return
+  fi
+  grep -q '"bootstrapped": false' "$TMP/status-answer" ||
+    { cat "$TMP/status-answer"; die "vsz-db-admin can't use the database -- see above"; }
+  secret=$(aws secretsmanager list-secrets \
+    --query "SecretList[?starts_with(Name, 'rds-db-credentials/$DB_INSTANCE/')].Name" --output text)
+  [ -n "$secret" ] && [ "$(wc -w <<<"$secret")" -eq 1 ] ||
+    die "expected exactly one secret rds-db-credentials/$DB_INSTANCE/..., found: ${secret:-none}"
+  say "bootstrap: the master user's credentials from $secret go to vsz-db-admin once, in a 0600 file"
+  ( umask 077
+    aws secretsmanager get-secret-value --secret-id "$secret" --query SecretString --output text > "$TMP/master.json"
+    python3 -c 'import json, sys
+s = json.load(open(sys.argv[1]))
+json.dump({"action": "bootstrap", "masterUser": s["username"], "masterPassword": s["password"]}, open(sys.argv[2], "w"))' \
+      "$TMP/master.json" "$TMP/bootstrap-event.json" )
+  rm -f -- "$TMP/master.json"
+  if ! invoke_db_admin "$TMP/bootstrap-event.json"; then
+    rm -f -- "$TMP/bootstrap-event.json"
+    die "the bootstrap failed -- see above (it never changes the master user)"
+  fi
+  rm -f -- "$TMP/bootstrap-event.json"
+}
+
+provision_directory_db() {
+  local facts host port vpc dbi iam dbsgs subnets rdssg sg
+  facts=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" --query \
+    'DBInstances[0].[Endpoint.Address, Endpoint.Port, DBSubnetGroup.VpcId, DbiResourceId, IAMDatabaseAuthenticationEnabled]' \
+    --output text) || die "no RDS instance $DB_INSTANCE"
+  read -r host port vpc dbi iam <<<"$facts"
+  subnets=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
+    --query 'DBInstances[0].DBSubnetGroup.Subnets[].SubnetIdentifier' --output text | tr '\t' ',')
+  dbsgs=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
+    --query 'DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' --output text)
+  [ "$iam" = True ] || die "IAM database authentication is off on $DB_INSTANCE -- DEALER-PANEL-PLAN.md Phase 0.3 first"
+  grep -q "dbuser:$dbi/vsz_migrator" "$IAM_DIR/vsz-db-admin-policy.json" ||
+    die "cloud/iam/vsz-db-admin-policy.json doesn't name $dbi, this instance's resource id"
+  rdssg=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=rds-lambda-2" "Name=vpc-id,Values=$vpc" \
+    --query 'SecurityGroups[0].GroupId' --output text)
+  grep -qw -- "$rdssg" <<<"$dbsgs" || die "the security group rds-lambda-2 ($rdssg) isn't attached to $DB_INSTANCE"
+  say "database: $DB_INSTANCE ($host:$port) in $vpc; its group for Lambdas: rds-lambda-2 ($rdssg)"
+  ensure_pg_layer
+  sg=$(ensure_sg vsz-db-client "$vpc" "VideoSafeZone functions that reach the directory database")
+  ensure_db_ingress "$rdssg" "$sg"
+  ensure_role vsz-db-admin-role vsz-db-admin vsz-db-admin-policy.json "$VPC_EXECUTION"
+  ensure_db_admin_function "$sg" "$subnets" "$host" "$port"
+  if [ "$DRY" -eq 1 ]; then
+    say "would then: set the database up if it isn't (the master password from Secrets Manager, sent once), apply the migrations, show the status"
+    say "dry run: nothing was changed"; return
+  fi
+  db_bootstrap_if_needed
+  printf '{"action": "migrate"}\n' > "$TMP/migrate-event.json"
+  invoke_db_admin "$TMP/migrate-event.json" || die "the migrations failed -- see above"
+  printf '{"action": "status"}\n' > "$TMP/status-event.json"
+  invoke_db_admin "$TMP/status-event.json" || die "status failed -- see above"
+  say "verified: vsz-db-admin reaches the database over verified TLS as vsz_migrator with an IAM token, and the migrations are applied"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
   thumbnails)      preflight; provision_thumbnails ;;
-  *) sed -n '2,11p' "$0"; exit 1 ;;
+  pg-layer)        preflight; ensure_pg_layer; [ "$DRY" -eq 0 ] || say "dry run: nothing was changed" ;;
+  directory-db)    preflight; provision_directory_db ;;
+  *) sed -n '2,17p' "$0"; exit 1 ;;
 esac

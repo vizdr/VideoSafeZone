@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LogInToTheDirectoryDatabaseAsTheMigrator",
+      "Effect": "Allow",
+      "Action": "rds-db:connect",
+      "Resource": "arn:aws:rds-db:eu-central-1:596633517506:dbuser:db-Q7RAH2QP3QX72G5EYQJHIIGZCM/vsz_migrator"
+    }
+  ]
+}

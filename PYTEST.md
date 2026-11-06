@@ -448,6 +448,50 @@ and is now covered by the tests above. A live round trip needs either the operat
 `live-stop` for a camera nobody watches: it only writes a 0 deadline and stops a live unit that
 isn't running.
 
+## tests_db — the directory's SQL against a real PostgreSQL
+
+Added 2026-11-06 with `DEALER-PANEL-PLAN.md` Phase 1. The directory (users, roles, dealers,
+plans) lives in PostgreSQL, and its rules are kept by the database itself: constraints, triggers
+and grants in `cloud/db/migrations/`. A fake can't check those, so they run against a real server.
+
+- **A suite of its own, `tests_db/`**, beside `tests/`, never inside it: `tests/conftest.py` blocks
+  every network connection, and these need exactly one — to a throwaway server. The main suite's
+  guard stays as it is. Plain `pytest` doesn't collect `tests_db/` (`testpaths = tests`).
+- **The server is given, never found:** `VSZ_TEST_PG_DSN` (a superuser on a server made for the
+  tests). Without it every test is skipped; an address at `amazonaws.com` is refused, so the
+  account's instance can't be hit by mistake.
+- **Where it runs:** CI's `db` job, with a `postgres:18` service container (the RDS instance's
+  major version). On the Pi, `bash tests_db/run-local.sh`: it makes a cluster in a temporary
+  directory on `127.0.0.1` and a free port, runs the tests, and removes it again. It needs the
+  server binaries (`sudo apt install postgresql-17`, then `sudo systemctl disable --now postgresql`
+  so the packaged server doesn't run all the time, or `PG_BIN=` pointing at unpacked ones) and
+  pg8000 in `venv-adapter`:
+  `venv-adapter/bin/python -m pip install --require-hashes --no-deps -r cloud/layers/vsz-pg/requirements.txt`
+  — the same pinned file the `vsz-pg` Lambda layer is built from. (Built here first with
+  Debian's own packages unpacked into a scratch directory, no install: PostgreSQL 17.11.)
+- **What the session builds:** a stand-in for RDS's `rds_iam` role, `vsz-db-admin`'s bootstrap
+  of the test database (twice: it must be repeatable), test-only passwords for the two roles (IAM
+  tokens on RDS), the migrations (twice). Each test then works **as `vsz_app`**, the role the
+  directory's code will use, inside a transaction that is rolled back.
+- **Helpers are `tests_db/dbhelpers.py`**, imported by name. `from conftest import …` would pick
+  up `tests/conftest.py` first, through `pythonpath`, and install the main suite's guards.
+- **What it checks (27 tests):** the bootstrap (roles IAM-only with their connection limits, the
+  database owned by the migrator and closed to every other role, no lasting SET option for the
+  master user); the runner (each file once, a failing one rolled back whole, a changed one
+  refused); and every rule of the schema — who sits under whom, which role fits which
+  organisation, staff in one organisation only, one holder per account, one open activation per
+  adapter at a site of its customer, a dealer's adapters only for its customers, shares only
+  within an account and ended by a release, plan versions and the audit log never edited, and
+  every table readable by `vsz_app` and none by `PUBLIC`.
+- **Proved to catch regressions:** granting `vsz_app` UPDATE on plans turns two tests red;
+  dropping the bootstrap's `REVOKE SET OPTION` turns one red here and two in
+  `tests/cloud/test_db_admin.py`. They found one bug before anything was deployed: a trigger
+  variable named `org` that PostgreSQL couldn't tell from the table `vsz.org`.
+
+The Lambda's decisions around the SQL — which names may reach SQL text, when the runner
+refuses, verified TLS, the IAM token, the master password never returned — are tested offline in
+the main suite, `tests/cloud/test_db_admin.py` (31 tests, a fake connection).
+
 ## Found while writing the tests
 
 **#84 (fixed): `mediamtx_api._dur_secs("500ms")` returned 30 000 s.** It parsed one character at a
@@ -519,7 +563,8 @@ strict `xfail`, then fixed the same day at the user's request.
   job (`client-app/README.md`). Its value lists are compared with the Lambdas' from here,
   `tests/test_value_lists.py`.
 - **AWS itself.** IAM, the deployed Lambdas, IoT rules. `cloud/deploy.sh status` and
-  LAUNCH Part C still verify those.
+  LAUNCH Part C still verify those. The directory's SQL is the exception that runs against a real
+  server — a throwaway one, in `tests_db/` (above).
 
 ---
 

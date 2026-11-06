@@ -9,6 +9,8 @@
 #   bash cloud/deploy.sh all                       lambdas, then page
 #   bash cloud/deploy.sh rollback lambda NAME      put back the copy saved before the last deploy
 #   bash cloud/deploy.sh rollback page | app
+#   bash cloud/deploy.sh db-status                 the directory database, as vsz-db-admin sees it
+#   bash cloud/deploy.sh db-migrate                apply new migrations (cloud/db/migrations/) through it
 #   ... --dry-run   say what would happen, change nothing
 #   ... --force     deploy over live code that matches neither this tree nor git HEAD
 #
@@ -22,6 +24,9 @@
 #     working tree that still has it; `rollback` uses these copies.
 #   - `clip-to-s3` is also VMS's: its event shape and clip rows must stay backward compatible.
 #   - One file per function, zipped fresh in a temporary directory (never the tracked .zip files).
+#     vsz-db-admin also carries cloud/db/migrations/*.sql (cloud/package.sh), and every file of a
+#     package counts when live code is compared. `db-migrate` applies them -- only from a live
+#     package equal to this tree, so it never runs older migrations than the ones committed here.
 #   - The page goes up with `Cache-Control: no-cache, must-revalidate`: stale clients after a
 #     deploy (FoundAndFixed #11), and CloudFront revalidates, so an upload is live at once.
 #   - Done means verified: after each deploy the live code is downloaded again and compared with
@@ -69,6 +74,8 @@ set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+# shellcheck source=cloud/package.sh
+. "$VMS_HOME/cloud/package.sh"
 
 preflight() {
   [ -x "$AWS" ] || die "no AWS CLI (bash setup/setup-user.sh installs it)"
@@ -86,13 +93,29 @@ live_lambda() {   # live_lambda NAME DIR -- the deployed package, unpacked into 
   (cd "$2" && unzip -oq live.zip)
 }
 
-# same | head | OTHER: live code is this tree / only git HEAD's version / neither
+live_migrations() { (cd "$1" && ls -1 migrations/*.sql 2>/dev/null | LC_ALL=C sort) || true; }
+head_migrations() {   # the migrations git HEAD's package of NAME would carry
+  [ "$1" = vsz-db-admin ] || return 0
+  git -C "$VMS_HOME" ls-tree --name-only HEAD cloud/db/migrations/ 2>/dev/null | grep '\.sql$' |
+    sed 's|^cloud/db/||' | LC_ALL=C sort || true
+}
+
+# same | head | OTHER: live code is this tree / only git HEAD's version / neither. Every file of the
+# package counts (cloud/package.sh), and so does a migration that only one side has.
 compare_lambda() {
-  local name=$1 dir="$TMP/live-$1" py; py=$(basename "$(file_of "$1")")
+  local name=$1 dir="$TMP/live-$1" py f tree=same head=head
+  py=$(basename "$(file_of "$1")")
   live_lambda "$name" "$dir"
-  if cmp -s "$dir/$py" "$(file_of "$name")"; then echo same
-  elif git -C "$VMS_HOME" show "HEAD:cloud/lambda/$py" 2>/dev/null | cmp -s - "$dir/$py"; then echo head
-  else echo OTHER; fi
+  [ "$(live_migrations "$dir")" = "$(package_files "$name" | grep '^migrations/' || true)" ] || tree=""
+  while IFS= read -r f; do
+    cmp -s "$dir/$f" "$VMS_HOME/$(package_source "$f")" || tree=""
+  done < <(package_files "$name")
+  if [ -n "$tree" ]; then echo same; return; fi
+  [ "$(live_migrations "$dir")" = "$(head_migrations "$name")" ] || head=""
+  for f in "$py" $(head_migrations "$name"); do
+    git -C "$VMS_HOME" show "HEAD:$(package_source "$f")" 2>/dev/null | cmp -s - "$dir/$f" || head=""
+  done
+  if [ -n "$head" ]; then echo head; else echo OTHER; fi
 }
 
 # The commit holding FILE as a committed version of the old single-file page, or nothing.
@@ -155,14 +178,36 @@ deploy_lambda() {
   for s in "${SHARED_WITH_VMS[@]}"; do
     [ "$name" != "$s" ] || warn "$name is also used by VMS: its event shape and clip rows must stay backward compatible"
   done
-  if [ "$DRY" -eq 1 ]; then say "$name: would deploy $(basename "$py") (live: $(describe "$state"))"; return 0; fi
+  if [ "$DRY" -eq 1 ]; then say "$name: would deploy $(package_files "$name" | tr '\n' ' ')(live: $(describe "$state"))"; return 0; fi
   mkdir -p "$BACKUPS/$STAMP"
   cp "$TMP/live-$name/live.zip" "$BACKUPS/$STAMP/$name.zip"
-  (cd "$TMP" && cp "$py" . && zip -qX "$name.zip" "$(basename "$py")")
+  package_lambda "$name" "$TMP/$name.zip"
   aws lambda update-function-code --function-name "$name" --zip-file "fileb://$TMP/$name.zip" --query LastModified --output text >/dev/null
   aws lambda wait function-updated --function-name "$name"
   [ "$(compare_lambda "$name")" = same ] || die "$name: deployed, but the live code doesn't match the tree"
   say "$name: deployed and verified (previous copy: $BACKUPS/$STAMP/$name.zip)"
+  [ "$name" != vsz-db-admin ] || say "$name: its migrations are applied by: bash cloud/deploy.sh db-migrate"
+}
+
+# The directory database through vsz-db-admin (DEALER-PANEL-PLAN.md Phase 1): status, or the
+# migrations its live package carries.
+db_command() {        # db_command status | migrate
+  local event="$TMP/db-event.json" state
+  aws lambda get-function-configuration --function-name vsz-db-admin >/dev/null 2>&1 ||
+    die "vsz-db-admin doesn't exist yet: bash cloud/provision.sh directory-db"
+  case "$1" in
+    status) printf '{"action": "status"}\n' > "$event" ;;
+    migrate)
+      state=$(compare_lambda vsz-db-admin)
+      if [ "$DRY" -eq 1 ]; then
+        [ "$state" = same ] || warn "vsz-db-admin's live package isn't this tree: this lists the live package's migrations"
+        printf '{"action": "migrate", "dryRun": true}\n' > "$event"
+      else
+        [ "$state" = same ] || die "vsz-db-admin's live package isn't this tree ($(describe "$state")): bash cloud/deploy.sh lambda vsz-db-admin first -- the package carries the migrations"
+        printf '{"action": "migrate"}\n' > "$event"
+      fi ;;
+  esac
+  invoke_db_admin "$event"
 }
 
 content_type() {
@@ -331,5 +376,7 @@ case "${1:-}" in
   app)      preflight; deploy_web app ;;
   all)      preflight; for n in $(all_functions); do deploy_lambda "$n"; done; deploy_web "" ;;
   rollback) preflight; shift; rollback "$@" ;;
-  *) sed -n '2,16p' "$0"; exit 1 ;;
+  db-status)  preflight; db_command status ;;
+  db-migrate) preflight; db_command migrate ;;
+  *) sed -n '2,18p' "$0"; exit 1 ;;
 esac

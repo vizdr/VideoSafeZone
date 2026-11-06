@@ -111,6 +111,7 @@ bash cloud/deploy.sh status                       # live = this tree? = git HEAD
 bash cloud/deploy.sh lambda get-hls-url --dry-run # then without --dry-run
 bash cloud/deploy.sh lambdas                      # every function whose live code differs
 bash cloud/provision.sh user-settings --dry-run   # a new feature's table/role/function/routes, created once
+bash cloud/deploy.sh db-migrate --dry-run         # the directory database's migrations (cloud/db/migrations/)
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -218,7 +219,11 @@ the DynamoDB registry: cam-01 has to start while AWS is unreachable.
 ```bash
 venv-adapter/bin/python -m pytest              # everything, a few seconds
 venv-adapter/bin/python -m pytest tests/cloud  # one folder; -k <name> for one test
+bash tests_db/run-local.sh                     # the directory's SQL, on a throwaway PostgreSQL
 ```
+`tests_db/` is a separate suite (PYTEST.md, tests_db): the directory's migrations and rules
+against a real PostgreSQL — a throwaway server only, given by `VSZ_TEST_PG_DSN`, never the
+account's. CI runs it on PostgreSQL 18; it is skipped wherever no server is given.
 `tests/conftest.py` sets up the guards before any project module is imported. It gives
 `config.py` a fake identity (`tests/fixtures/adapter.env`) and boto3 fake keys. It blocks
 outbound network use and every command but ctypes' read-only probes (`systemctl`, `sudo`,
