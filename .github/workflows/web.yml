@@ -5,11 +5,13 @@
 # cloud/deploy.sh, run by hand (CLAUDE.md).
 name: web
 
+# The plan prices shared with the server's tests (tests/fixtures/pricing-cases.json, read by
+# client-app/tests/pricing.spec.ts) count as the web panel's too.
 on:
   push:
-    paths: ["client-app/**", ".github/workflows/web.yml"]
+    paths: ["client-app/**", "tests/fixtures/pricing-cases.json", ".github/workflows/web.yml"]
   pull_request:
-    paths: ["client-app/**", ".github/workflows/web.yml"]
+    paths: ["client-app/**", "tests/fixtures/pricing-cases.json", ".github/workflows/web.yml"]
   workflow_dispatch:
 
 permissions:

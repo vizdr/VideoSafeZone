@@ -469,9 +469,11 @@ def op_list_dealers(con, actor, args):
              "customers": int(r[6]), "users": int(r[7]), "adapters": int(r[8])} for r in rows]
 
 
-def _dealer_fields(args, partial):
+def _org_fields(args, partial, what="dealer", keys=(("name", 200), ("email", 254), ("phone", 40))):
+    """The organisation fields given in args, trimmed and checked; blank text clears a field.
+    `partial`: an update, where only the fields given change."""
     out = {}
-    for key, limit in (("name", 200), ("email", 254), ("phone", 40)):
+    for key, limit in keys:
         if key in args:
             value = args[key]
             if value is not None and not isinstance(value, str):
@@ -487,7 +489,7 @@ def _dealer_fields(args, partial):
     if out.get("email") and not EMAIL.match(out["email"]):
         raise DirectoryError("give a valid email address")
     if ("name" in out or not partial) and not out.get("name"):
-        raise DirectoryError("give the dealer's name")
+        raise DirectoryError(f"give the {what}'s name")
     return out
 
 
@@ -498,7 +500,7 @@ def _name_taken(con, name, but=None):
 
 def op_create_dealer(con, actor, args):
     require(actor, *SYSTEM)
-    f = _dealer_fields(args, partial=False)
+    f = _org_fields(args, partial=False)
     if _name_taken(con, f["name"]):
         raise DirectoryError(f"there is a dealer called {f['name']} already", 409)
     dealer = con.run("INSERT INTO vsz.org (kind, parent_id, name, email, phone) "
@@ -513,7 +515,7 @@ def op_update_dealer(con, actor, args):
     dealer = an_id(args.get("id"), "dealer id")
     if not con.run("SELECT 1 FROM vsz.org WHERE id = CAST(:d AS uuid) AND kind = 'dealer'", d=dealer):
         raise DirectoryError("no such dealer", 404)
-    f = _dealer_fields(args, partial=True)
+    f = _org_fields(args, partial=True)
     if not f:
         raise DirectoryError("nothing to change")
     if f.get("name") and _name_taken(con, f["name"], but=dealer):
@@ -525,19 +527,38 @@ def op_update_dealer(con, actor, args):
 
 
 def op_list_customers(con, actor, args):
+    """Customers in the actor's scope, each with its holder, its adapters' Thing names (the API
+    counts their cameras in the registry) and its plans added up (D19)."""
     require(actor, "dealer", *SYSTEM)
     dealer = actor["org"] if actor["role"] == "dealer" else args.get("dealerId")
     if dealer is not None and actor["role"] != "dealer":
         an_id(dealer, "dealer id")
     rows = con.run(
         "SELECT c.id, c.name, c.reference, c.status, c.created_at, d.id, d.name, "
-        "(SELECT count(*) FROM vsz.adapter_activation a WHERE a.customer_id = c.id AND a.released_at IS NULL), "
-        "(SELECT count(*) FROM vsz.membership m WHERE m.org_id = c.id) "
+        "(SELECT count(*) FROM vsz.membership m WHERE m.org_id = c.id), "
+        "(SELECT json_build_object('email', u.email, 'status', u.status) FROM vsz.membership m "
+        " JOIN vsz.app_user u ON u.id = m.user_id WHERE m.org_id = c.id AND m.role = 'customer') "
         "FROM vsz.org c JOIN vsz.org d ON d.id = c.parent_id WHERE c.kind = 'customer' "
         "AND (CAST(:d AS uuid) IS NULL OR d.id = CAST(:d AS uuid)) ORDER BY lower(c.name)",
         d=None if dealer is None else str(dealer))
-    return [{"id": r[0], "name": r[1], "reference": r[2], "status": r[3], "createdAt": r[4],
-             "dealer": {"id": r[5], "name": r[6]}, "adapters": int(r[7]), "users": int(r[8])} for r in rows]
+    activations = [] if not rows else con.run(
+        "SELECT act.customer_id, act.id, a.thing_name FROM vsz.adapter_activation act "
+        "JOIN vsz.adapter a ON a.id = act.adapter_id WHERE act.released_at IS NULL "
+        "AND act.customer_id = ANY(CAST(:c AS uuid[])) ORDER BY a.thing_name",
+        c=[str(r[0]) for r in rows])
+    plans = _current_plans(con, [a[1] for a in activations])
+    currency = _setting(con, "currency")
+    out = []
+    for r in rows:
+        mine = [a for a in activations if a[0] == r[0]]
+        counted = [plans[a[1]] for a in mine if a[1] in plans and plans[a[1]]["effectiveStatus"] in BILLED]
+        holder = r[8] if isinstance(r[8], dict) or r[8] is None else json.loads(r[8])
+        out.append({"id": r[0], "name": r[1], "reference": r[2], "status": r[3], "createdAt": r[4],
+                    "dealer": {"id": r[5], "name": r[6]}, "users": int(r[7]), "holder": holder,
+                    "adapters": len(mine), "things": [a[2] for a in mine],
+                    "inPlans": sum(p["cameras"] for p in counted),
+                    "centsMonth": sum(p["centsMonth"] for p in counted), "currency": currency})
+    return out
 
 
 def op_list_adapters(con, actor, args):
@@ -549,7 +570,8 @@ def op_list_adapters(con, actor, args):
         "FROM vsz.adapter a LEFT JOIN vsz.org d ON d.id = a.dealer_id "
         "LEFT JOIN vsz.adapter_activation act ON act.adapter_id = a.id AND act.released_at IS NULL "
         "LEFT JOIN vsz.org c ON c.id = act.customer_id LEFT JOIN vsz.site s ON s.id = act.site_id "
-        "WHERE CAST(:d AS uuid) IS NULL OR a.dealer_id = CAST(:d AS uuid) ORDER BY a.thing_name",
+        "WHERE CAST(:d AS uuid) IS NULL OR a.dealer_id = CAST(:d AS uuid) OR c.parent_id = CAST(:d AS uuid) "
+        "ORDER BY a.thing_name",
         d=None if dealer is None else str(dealer))
     return [{"id": r[0], "thingName": r[1], "status": r[2], "label": r[3], "lastSeenAt": r[4], "createdAt": r[5],
              "dealer": {"id": r[6], "name": r[7]} if r[6] else None,
@@ -647,14 +669,23 @@ def op_user_action(con, actor, args):
     return {"userId": user_id, "email": email, "sub": sub, "status": status}
 
 
-def op_get_pricing(con, actor, args):
-    require(actor, "dealer", *SYSTEM)
+def _pricing(con):
     prices = [{"resolution": r, "recording": c, "retentionDays": d, "centsMonth": cents, "currency": cur}
               for r, c, d, cents, cur in con.run(
                   "SELECT resolution, recording, retention_days, cents_month, currency FROM vsz.price_camera "
                   "ORDER BY array_position(ARRAY['2mp','4mp','8mp'], resolution), recording DESC, retention_days")]
     settings = {k: v for k, v in con.run("SELECT key, value FROM vsz.price_setting ORDER BY key")}
     return {"prices": prices, "settings": settings}
+
+
+def _setting(con, key):
+    rows = con.run("SELECT value FROM vsz.price_setting WHERE key = :k", k=key)
+    return rows[0][0] if rows else None
+
+
+def op_get_pricing(con, actor, args):
+    require(actor, "dealer", *SYSTEM)
+    return _pricing(con)
 
 
 def op_put_pricing(con, actor, args):
@@ -695,6 +726,340 @@ def op_put_pricing(con, actor, args):
     return {"prices": len(got)}
 
 
+# --- the dealer portal (Phase 5, §7.1, D19): customers, a plan per adapter, its history -------------
+
+CLASSES = [(r, c) for r in RESOLUTIONS for c in RECORDINGS]
+INTERVALS = ("monthly", "annual")
+BILLED = ("trial", "active")                          # what a customer's total adds up
+TIMEZONE = re.compile(r"^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$")
+ADDRESS = ("line1", "line2", "city", "postcode", "country")
+
+
+def price_plan(prices, discount_percent, lines, retention_days, interval):
+    """A plan's price for its period, in cents (D9): each camera at the price list's monthly price
+    for its class at the plan's storage duration; a year is twelve months less the annual
+    discount, rounded to the cent. The page computes the same for its preview
+    (client-app/src/pricing.ts); tests/fixtures/pricing-cases.json keeps the two the same."""
+    table = {(p["resolution"], p["recording"], p["retentionDays"]): p["centsMonth"] for p in prices}
+    monthly = 0
+    for line in lines:
+        if line["quantity"]:
+            key = (line["resolution"], line["recording"], retention_days)
+            if key not in table:
+                raise DirectoryError(f"the price list has no price for {key[0]} {key[1]} at {retention_days} days")
+            monthly += line["quantity"] * table[key]
+    if interval == "monthly":
+        return monthly
+    return (monthly * 12 * (100 - discount_percent) + 50) // 100
+
+
+def _effective_status(status, trial_ends_at):
+    """A trial whose end has passed is an active plan: the stored version doesn't change with time."""
+    if status == "trial" and trial_ends_at is not None and trial_ends_at <= datetime.datetime.now(datetime.timezone.utc):
+        return "active"
+    return status
+
+
+def _plan_rows(con, where, **params):
+    """Plan versions with their lines and who saved them, newest first."""
+    rows = con.run(
+        "SELECT p.id, p.activation_id, p.version, p.status, p.retention_days, p.billing_interval, "
+        "p.cents_period, p.currency, p.trial_ends_at, p.created_at, u.email "
+        f"FROM vsz.plan p LEFT JOIN vsz.app_user u ON u.id = p.created_by WHERE {where} "
+        "ORDER BY p.activation_id, p.version DESC", **params)
+    lines = {}
+    for plan_id, r, c, q in [] if not rows else con.run("SELECT plan_id, resolution, recording, quantity FROM vsz.plan_line "
+                                    "WHERE plan_id = ANY(CAST(:ids AS uuid[]))", ids=[str(x[0]) for x in rows]):
+        lines.setdefault(plan_id, {})[(r, c)] = q
+    out = []
+    for pid, act, version, status, days, interval, cents, cur, trial_ends, created, by in rows:
+        mine = lines.get(pid, {})
+        effective = _effective_status(status, trial_ends)
+        out.append({
+            "id": pid, "activationId": act, "version": version, "status": status, "effectiveStatus": effective,
+            "retentionDays": days, "interval": interval, "centsPeriod": cents, "currency": cur,
+            "centsMonth": 0 if effective not in BILLED else cents if interval == "monthly" else (cents + 6) // 12,
+            "trialEndsAt": trial_ends, "createdAt": created, "createdBy": by,
+            "lines": [{"resolution": r, "recording": c, "quantity": mine.get((r, c), 0)} for r, c in CLASSES],
+            "cameras": sum(mine.values())})
+    return out
+
+
+def _current_plans(con, activation_ids):
+    """{activation id: its newest plan version}."""
+    if not activation_ids:
+        return {}
+    current = {}
+    for plan in _plan_rows(con, "p.activation_id = ANY(CAST(:a AS uuid[]))", a=[str(a) for a in activation_ids]):
+        current.setdefault(plan["activationId"], plan)
+    return current
+
+
+def _customer(con, actor, customer_id):
+    """(id, name, dealer id) of a customer the actor may manage (D6): a dealer its own, owners and
+    administrators any. Another dealer's customer is "no such customer", as one that doesn't exist."""
+    require(actor, "dealer", *SYSTEM)
+    rows = con.run("SELECT id, name, parent_id FROM vsz.org WHERE id = CAST(:c AS uuid) AND kind = 'customer'",
+                   c=an_id(customer_id, "customer id"))
+    if not rows or actor["role"] == "dealer" and rows[0][2] != actor["org"]:
+        raise DirectoryError("no such customer", 404)
+    return rows[0]
+
+
+def _activation(con, actor, adapter_id, lock=False):
+    """(activation id, customer id) of the adapter's open activation, at a customer the actor may
+    manage. `lock` holds the activation until the transaction ends, so two saves of a plan can't
+    both take the same version number."""
+    require(actor, "dealer", *SYSTEM)
+    rows = con.run("SELECT act.id, act.customer_id, c.parent_id FROM vsz.adapter_activation act "
+                   "JOIN vsz.org c ON c.id = act.customer_id "
+                   "WHERE act.adapter_id = CAST(:a AS uuid) AND act.released_at IS NULL"
+                   + (" FOR UPDATE OF act" if lock else ""), a=an_id(adapter_id, "adapter id"))
+    if not rows or actor["role"] == "dealer" and rows[0][2] != actor["org"]:
+        raise DirectoryError("no activated adapter with that id", 404)
+    return rows[0][0], rows[0][1]
+
+
+def _site_fields(site):
+    if not isinstance(site, dict):
+        raise DirectoryError("give the customer's first site: its name and time zone")
+    name, tz = site.get("name"), site.get("timezone")
+    name = name.strip() if isinstance(name, str) else ""
+    if not 1 <= len(name) <= 100:
+        raise DirectoryError("give the site's name (up to 100 characters)")
+    if not isinstance(tz, str) or len(tz) > 64 or not TIMEZONE.match(tz):
+        raise DirectoryError("give the site's time zone, such as Europe/Berlin")
+    return name, tz
+
+
+CUSTOMER_KEYS = (("name", 200), ("reference", 100), ("email", 254), ("phone", 40))
+
+
+def op_create_customer(con, actor, args):
+    """A customer with its first site (§7.1). A dealer's own; owners and administrators name the
+    dealer. Inviting its holder is the API's next step (an invitation, as any other)."""
+    require(actor, "dealer", *SYSTEM)
+    if actor["role"] == "dealer":
+        dealer = actor["org"]
+    else:
+        dealer = an_id(args.get("dealerId"), "dealer id")
+        if not con.run("SELECT 1 FROM vsz.org WHERE id = CAST(:d AS uuid) AND kind = 'dealer'", d=dealer):
+            raise DirectoryError("no such dealer", 404)
+    f = _org_fields({k: v for k, v in args.items() if k != "status"}, partial=False, what="customer",
+                    keys=CUSTOMER_KEYS)
+    site_name, tz = _site_fields(args.get("site"))
+    customer = con.run("INSERT INTO vsz.org (kind, parent_id, name, reference, email, phone) "
+                       "VALUES ('customer', CAST(:d AS uuid), :n, :r, :e, :p) RETURNING id",
+                       d=str(dealer), n=f["name"], r=f.get("reference"), e=f.get("email"), p=f.get("phone"))[0][0]
+    site = con.run("INSERT INTO vsz.site (customer_id, name, timezone) VALUES (:c, :n, :t) RETURNING id",
+                   c=customer, n=site_name, t=tz)[0][0]
+    audit(con, actor, "create_customer", "org", customer, {"name": f["name"], "dealerId": str(dealer)})
+    return {"id": customer, "siteId": site}
+
+
+def op_get_customer(con, actor, args):
+    cid = _customer(con, actor, args.get("id"))[0]
+    name, ref, email, phone, status, created, dealer_id, dealer = con.run(
+        "SELECT c.name, c.reference, c.email, c.phone, c.status, c.created_at, d.id, d.name "
+        "FROM vsz.org c JOIN vsz.org d ON d.id = c.parent_id WHERE c.id = :c", c=cid)[0]
+    holder = con.run("SELECT u.id, u.email, u.name, u.status FROM vsz.membership m JOIN vsz.app_user u "
+                     "ON u.id = m.user_id WHERE m.org_id = :c AND m.role = 'customer'", c=cid)
+    return {
+        "id": cid, "name": name, "reference": ref, "email": email, "phone": phone, "status": status,
+        "createdAt": created, "dealer": {"id": dealer_id, "name": dealer},
+        "sites": [{"id": i, "name": n, "timezone": t} for i, n, t in con.run(
+            "SELECT id, name, timezone FROM vsz.site WHERE customer_id = :c ORDER BY lower(name)", c=cid)],
+        "holder": {"id": holder[0][0], "email": holder[0][1], "name": holder[0][2], "status": holder[0][3]}
+        if holder else None,
+        "users": int(con.run("SELECT count(*) FROM vsz.membership WHERE org_id = :c", c=cid)[0][0]),
+        "adapters": int(con.run("SELECT count(*) FROM vsz.adapter_activation WHERE customer_id = :c "
+                                "AND released_at IS NULL", c=cid)[0][0]),
+    }
+
+
+def op_update_customer(con, actor, args):
+    """Name, reference, contact; suspend (its people can't sign in) or reactivate."""
+    cid = _customer(con, actor, args.get("id"))[0]
+    f = _org_fields({k: v for k, v in args.items() if k != "id"}, partial=True, what="customer", keys=CUSTOMER_KEYS)
+    if not f:
+        raise DirectoryError("nothing to change")
+    sets = ", ".join(f"{k} = :{k}" for k in f)
+    con.run(f"UPDATE vsz.org SET {sets}, updated_at = now() WHERE id = :c", c=cid, **f)
+    audit(con, actor, "update_customer", "org", cid, f)
+    return {"id": cid, "changed": sorted(f)}
+
+
+def op_customer_adapters(con, actor, args):
+    """The customer's adapters, each with its current plan, and the plans added up (D19). The API
+    adds each adapter's cameras from the registry, which this function can't reach."""
+    cid, name, _ = _customer(con, actor, args.get("id"))
+    rows = con.run(
+        "SELECT act.id, a.id, a.thing_name, a.label, a.last_seen_at, act.name, act.activated_at, s.id, s.name, "
+        "s.timezone FROM vsz.adapter_activation act JOIN vsz.adapter a ON a.id = act.adapter_id "
+        "JOIN vsz.site s ON s.id = act.site_id WHERE act.customer_id = :c AND act.released_at IS NULL "
+        "ORDER BY lower(s.name), lower(coalesce(act.name, '')), a.thing_name", c=cid)
+    plans = _current_plans(con, [r[0] for r in rows])
+    adapters = [{"id": r[1], "activationId": r[0], "thingName": r[2], "label": r[3], "lastSeenAt": r[4],
+                 "name": r[5], "activatedAt": r[6], "site": {"id": r[7], "name": r[8], "timezone": r[9]},
+                 "plan": plans.get(r[0])} for r in rows]
+    billed = [a["plan"] for a in adapters if a["plan"] and a["plan"]["effectiveStatus"] in BILLED]
+    return {"customer": {"id": cid, "name": name}, "adapters": adapters,
+            "total": {"adapters": len(adapters), "centsMonth": sum(p["centsMonth"] for p in billed),
+                      "cameras": sum(p["cameras"] for p in billed), "currency": _setting(con, "currency")}}
+
+
+def _plan_lines(given):
+    """The six lines of a plan (class x recording), from what the page sent; a class not given is 0."""
+    if not isinstance(given, list):
+        raise DirectoryError("give lines: a quantity per camera class")
+    got = {}
+    for line in given:
+        if not isinstance(line, dict):
+            raise DirectoryError("each line is {resolution, recording, quantity}")
+        key, q = (line.get("resolution"), line.get("recording")), line.get("quantity")
+        if key not in CLASSES or key in got:
+            raise DirectoryError(f"unexpected or repeated camera class: {key}")
+        if not isinstance(q, int) or isinstance(q, bool) or not 0 <= q <= 100:
+            raise DirectoryError(f"{key[0]} {key[1]}: a whole number of cameras from 0 to 100")
+        got[key] = q
+    return [{"resolution": r, "recording": c, "quantity": got.get((r, c), 0)} for r, c in CLASSES]
+
+
+def _new_version(con, actor, act, current, status, lines, days, interval, cents, currency):
+    version = current["version"] + 1 if current else 1
+    trial_ends = current["trialEndsAt"] if current else None
+    plan = con.run("INSERT INTO vsz.plan (activation_id, version, status, retention_days, billing_interval, "
+                   "cents_period, currency, trial_ends_at, created_by) "
+                   "VALUES (:a, :v, :s, :d, :i, :c, :cur, :t, :u) RETURNING id",
+                   a=act, v=version, s=status, d=days, i=interval, c=cents, cur=currency, t=trial_ends,
+                   u=actor["user_id"])[0][0]
+    for line in lines:
+        con.run("INSERT INTO vsz.plan_line (plan_id, resolution, recording, quantity) VALUES (:p, :r, :c, :q)",
+                p=plan, r=line["resolution"], c=line["recording"], q=line["quantity"])
+    return version
+
+
+def _check_based_on(args, current):
+    """The version the page edited must still be the newest: two people editing one plan don't
+    overwrite each other unseen."""
+    based = args.get("basedOn")
+    if based is None:
+        return
+    if not isinstance(based, int) or isinstance(based, bool) or based != (current["version"] if current else 0):
+        raise DirectoryError(f"the plan was changed meanwhile (now version {current['version'] if current else 0}): "
+                             "reload it", 409)
+
+
+def op_put_plan(con, actor, args):
+    """A new version of the adapter's plan, priced by the server from the price list (D9, D19). A
+    price the page sends is ignored. During the trial the plan stays a trial."""
+    act, _ = _activation(con, actor, args.get("adapterId"), lock=True)
+    current = _current_plans(con, [act]).get(act)
+    _check_based_on(args, current)
+    lines = _plan_lines(args.get("lines"))
+    pricing = _pricing(con)
+    days, interval = args.get("retentionDays"), args.get("interval")
+    if isinstance(days, bool) or days not in pricing["settings"].get("retention_days", []):
+        raise DirectoryError("retentionDays: one of the price list's storage durations, "
+                             + ", ".join(map(str, pricing["settings"].get("retention_days", []))))
+    if interval not in INTERVALS:
+        raise DirectoryError("interval must be monthly or annual")
+    cents = price_plan(pricing["prices"], int(pricing["settings"].get("annual_discount_percent", 0)),
+                       lines, days, interval)
+    trial = current and current["trialEndsAt"] and _effective_status("trial", current["trialEndsAt"]) == "trial"
+    status = "trial" if trial else "active"
+    if (current and current["effectiveStatus"] == status and current["lines"] == lines
+            and current["retentionDays"] == days and current["interval"] == interval):
+        return {"changed": False, "plan": current}
+    version = _new_version(con, actor, act, current, status, lines, days, interval, cents,
+                           pricing["settings"].get("currency", "EUR"))
+    audit(con, actor, "put_plan", "adapter_activation", act, {"version": version, "centsPeriod": cents})
+    return {"changed": True, "plan": _current_plans(con, [act])[act]}
+
+
+def op_cancel_plan(con, actor, args):
+    """Cancel subscription (D10: a plan status, nothing more): a new version, cancelled, at no charge."""
+    act, _ = _activation(con, actor, args.get("adapterId"), lock=True)
+    current = _current_plans(con, [act]).get(act)
+    _check_based_on(args, current)
+    if not current or current["status"] in ("cancelled", "ended"):
+        raise DirectoryError("this adapter has no plan to cancel", 409)
+    version = _new_version(con, actor, act, current, "cancelled", current["lines"], current["retentionDays"],
+                           current["interval"], 0, current["currency"])
+    audit(con, actor, "cancel_plan", "adapter_activation", act, {"version": version})
+    return {"changed": True, "plan": _current_plans(con, [act])[act]}
+
+
+def op_plan_history(con, actor, args):
+    """Every version of the adapter's plan at its current customer, newest first (§7.1)."""
+    act, _ = _activation(con, actor, args.get("adapterId"))
+    thing, name, site = con.run("SELECT a.thing_name, act.name, s.name FROM vsz.adapter_activation act "
+                                "JOIN vsz.adapter a ON a.id = act.adapter_id JOIN vsz.site s ON s.id = act.site_id "
+                                "WHERE act.id = :a", a=act)[0]
+    return {"adapter": {"thingName": thing, "name": name, "site": site},
+            "plans": _plan_rows(con, "p.activation_id = :a", a=act)}
+
+
+def op_customer_users(con, actor, args):
+    """The customer's people: the holder first, then its Super Admins and users (D18), with whether
+    the actor may disable, reset or re-invite each (may_manage)."""
+    cid = _customer(con, actor, args.get("id"))[0]
+    rows = con.run(
+        "SELECT u.id, u.email, u.name, u.status, u.last_sign_in_at, m.role FROM vsz.membership m "
+        "JOIN vsz.app_user u ON u.id = m.user_id WHERE m.org_id = :c "
+        "ORDER BY array_position(ARRAY['customer','customer_admin','customer_user'], m.role), lower(u.email)", c=cid)
+    out = []
+    for uid, email, name, status, last, role in rows:
+        others = con.run("SELECT org_id, role FROM vsz.membership WHERE user_id = :u", u=uid)
+        out.append({"id": uid, "email": email, "name": name, "status": status, "lastSignInAt": last, "role": role,
+                    "manageable": uid != actor["user_id"] and all(may_manage(con, actor, o, r) for o, r in others)})
+    return out
+
+
+def _address(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - set(ADDRESS):
+        raise DirectoryError("address: " + ", ".join(ADDRESS))
+    out = {}
+    for key in ADDRESS:
+        v = value.get(key)
+        if v is not None and not isinstance(v, str):
+            raise DirectoryError(f"address {key} must be text")
+        v = (v or "").strip()
+        if len(v) > 200:
+            raise DirectoryError(f"address {key} is too long")
+        if v:
+            out[key] = v
+    return out or None
+
+
+def op_get_dealer(con, actor, args):
+    """The dealer's own company details (Dealer details, §7.1)."""
+    require(actor, "dealer")
+    name, email, phone, address, created = con.run(
+        "SELECT name, email, phone, address, created_at FROM vsz.org WHERE id = :d", d=actor["org"])[0]
+    return {"id": actor["org"], "name": name, "email": email, "phone": phone,
+            "address": address if isinstance(address, dict) or address is None else json.loads(address),
+            "createdAt": created}
+
+
+def op_update_own_dealer(con, actor, args):
+    require(actor, "dealer")
+    f = _org_fields({k: v for k, v in args.items() if k != "status"}, partial=True)
+    if "address" in args:
+        f["address"] = _address(args["address"])
+    if not f:
+        raise DirectoryError("nothing to change")
+    if f.get("name") and _name_taken(con, f["name"], but=str(actor["org"])):
+        raise DirectoryError(f"there is a dealer called {f['name']} already", 409)
+    params = {k: (json.dumps(v) if k == "address" and v is not None else v) for k, v in f.items()}
+    sets = ", ".join(f"{k} = CAST(:{k} AS jsonb)" if k == "address" else f"{k} = :{k}" for k in f)
+    con.run(f"UPDATE vsz.org SET {sets}, updated_at = now() WHERE id = :d", d=actor["org"], **params)
+    audit(con, actor, "update_own_dealer", "org", actor["org"], {k: v for k, v in f.items() if k != "address"})
+    return {"id": actor["org"], "changed": sorted(f)}
+
+
 # name: (function, writes) -- a writing operation runs in one transaction
 USER_OPS = {
     "me": (op_me, False), "overview": (op_overview, False),
@@ -704,6 +1069,12 @@ USER_OPS = {
     "invite_user": (op_invite_user, True), "link_sub": (op_link_sub, True),
     "cancel_invite": (op_cancel_invite, True), "user_action": (op_user_action, True),
     "get_pricing": (op_get_pricing, False), "put_pricing": (op_put_pricing, True),
+    # the dealer portal (Phase 5)
+    "create_customer": (op_create_customer, True), "get_customer": (op_get_customer, False),
+    "update_customer": (op_update_customer, True), "customer_adapters": (op_customer_adapters, False),
+    "customer_users": (op_customer_users, False), "put_plan": (op_put_plan, True),
+    "cancel_plan": (op_cancel_plan, True), "plan_history": (op_plan_history, False),
+    "get_dealer": (op_get_dealer, False), "update_own_dealer": (op_update_own_dealer, True),
 }
 
 

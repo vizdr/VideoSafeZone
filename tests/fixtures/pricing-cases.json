@@ -1,0 +1,277 @@
+{
+ "about": "Plan prices (DEALER-PANEL-PLAN.md D9, D19): read by tests/cloud/test_pricing.py for the server's price_plan (cloud/lambda/vsz_directory.py) and by client-app/tests/pricing.spec.ts for the page's preview (client-app/src/pricing.ts), so the two can't drift. cents is the price for the plan's period; null means the price list has no price for a camera on the plan.",
+ "annualDiscountPercent": 10,
+ "prices": [
+  {
+   "resolution": "2mp",
+   "recording": "motion",
+   "retentionDays": 7,
+   "centsMonth": 333
+  },
+  {
+   "resolution": "2mp",
+   "recording": "motion",
+   "retentionDays": 30,
+   "centsMonth": 499
+  },
+  {
+   "resolution": "2mp",
+   "recording": "continuous",
+   "retentionDays": 7,
+   "centsMonth": 517
+  },
+  {
+   "resolution": "2mp",
+   "recording": "continuous",
+   "retentionDays": 30,
+   "centsMonth": 789
+  },
+  {
+   "resolution": "4mp",
+   "recording": "motion",
+   "retentionDays": 7,
+   "centsMonth": 337
+  },
+  {
+   "resolution": "4mp",
+   "recording": "motion",
+   "retentionDays": 30,
+   "centsMonth": 560
+  },
+  {
+   "resolution": "4mp",
+   "recording": "continuous",
+   "retentionDays": 7,
+   "centsMonth": 550
+  },
+  {
+   "resolution": "4mp",
+   "recording": "continuous",
+   "retentionDays": 30,
+   "centsMonth": 880
+  },
+  {
+   "resolution": "8mp",
+   "recording": "motion",
+   "retentionDays": 7,
+   "centsMonth": 500
+  },
+  {
+   "resolution": "8mp",
+   "recording": "motion",
+   "retentionDays": 30,
+   "centsMonth": 800
+  },
+  {
+   "resolution": "8mp",
+   "recording": "continuous",
+   "retentionDays": 7,
+   "centsMonth": 700
+  },
+  {
+   "resolution": "8mp",
+   "recording": "continuous",
+   "retentionDays": 30,
+   "centsMonth": 1120
+  }
+ ],
+ "cases": [
+  {
+   "name": "nothing on the plan, monthly",
+   "lines": [],
+   "retentionDays": 30,
+   "interval": "monthly",
+   "cents": 0
+  },
+  {
+   "name": "nothing on the plan, annual",
+   "lines": [
+    {
+     "resolution": "4mp",
+     "recording": "motion",
+     "quantity": 0
+    }
+   ],
+   "retentionDays": 7,
+   "interval": "annual",
+   "cents": 0
+  },
+  {
+   "name": "one 2MP motion camera, 7 days, monthly",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "motion",
+     "quantity": 1
+    }
+   ],
+   "retentionDays": 7,
+   "interval": "monthly",
+   "cents": 333
+  },
+  {
+   "name": "annual: 333 x 12 less 10 % is 3596.4, rounded down",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "motion",
+     "quantity": 1
+    }
+   ],
+   "retentionDays": 7,
+   "interval": "annual",
+   "cents": 3596
+  },
+  {
+   "name": "annual: 337 x 12 less 10 % is 3639.6, rounded up",
+   "lines": [
+    {
+     "resolution": "4mp",
+     "recording": "motion",
+     "quantity": 1
+    }
+   ],
+   "retentionDays": 7,
+   "interval": "annual",
+   "cents": 3640
+  },
+  {
+   "name": "a mix at 30 days, monthly: 2 x 789 + 3 x 560 + 1120",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "continuous",
+     "quantity": 2
+    },
+    {
+     "resolution": "4mp",
+     "recording": "motion",
+     "quantity": 3
+    },
+    {
+     "resolution": "8mp",
+     "recording": "continuous",
+     "quantity": 1
+    }
+   ],
+   "retentionDays": 30,
+   "interval": "monthly",
+   "cents": 4378
+  },
+  {
+   "name": "the same mix, annual: 4378 x 12 less 10 % is 47282.4",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "continuous",
+     "quantity": 2
+    },
+    {
+     "resolution": "4mp",
+     "recording": "motion",
+     "quantity": 3
+    },
+    {
+     "resolution": "8mp",
+     "recording": "continuous",
+     "quantity": 1
+    }
+   ],
+   "retentionDays": 30,
+   "interval": "annual",
+   "cents": 47282
+  },
+  {
+   "name": "the most a plan holds: 100 of every class, 30 days, monthly",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "motion",
+     "quantity": 100
+    },
+    {
+     "resolution": "2mp",
+     "recording": "continuous",
+     "quantity": 100
+    },
+    {
+     "resolution": "4mp",
+     "recording": "motion",
+     "quantity": 100
+    },
+    {
+     "resolution": "4mp",
+     "recording": "continuous",
+     "quantity": 100
+    },
+    {
+     "resolution": "8mp",
+     "recording": "motion",
+     "quantity": 100
+    },
+    {
+     "resolution": "8mp",
+     "recording": "continuous",
+     "quantity": 100
+    }
+   ],
+   "retentionDays": 30,
+   "interval": "monthly",
+   "cents": 464800
+  },
+  {
+   "name": "no annual discount: twelve months",
+   "lines": [
+    {
+     "resolution": "8mp",
+     "recording": "motion",
+     "quantity": 1
+    }
+   ],
+   "retentionDays": 7,
+   "interval": "annual",
+   "annualDiscountPercent": 0,
+   "cents": 6000
+  },
+  {
+   "name": "the largest annual discount, 50 %",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "continuous",
+     "quantity": 3
+    }
+   ],
+   "retentionDays": 7,
+   "interval": "annual",
+   "annualDiscountPercent": 50,
+   "cents": 9306
+  },
+  {
+   "name": "a storage duration the price list doesn't have: no price",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "motion",
+     "quantity": 1
+    }
+   ],
+   "retentionDays": 90,
+   "interval": "monthly",
+   "cents": null
+  },
+  {
+   "name": "a class left at 0 needs no price at that duration",
+   "lines": [
+    {
+     "resolution": "2mp",
+     "recording": "motion",
+     "quantity": 0
+    }
+   ],
+   "retentionDays": 90,
+   "interval": "monthly",
+   "cents": 0
+  }
+ ]
+}

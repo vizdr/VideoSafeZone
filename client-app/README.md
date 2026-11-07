@@ -38,6 +38,8 @@ build at `/app/index.html`, a preview to look at first.
 | `src/clips/format.ts`, `src/components/events/` | Events: the clip list and its player |
 | `src/stores/`, `src/views/`, `src/components/` | Pinia stores and the Vue screens |
 | `src/auth/roles.ts`, `src/views/system/`, `src/composables/useLoad.ts` | what each role sees and where it lands; the System console (`/directory/*`, DEALER-PANEL-PLAN.md Phase 4) |
+| `src/views/dealer/`, `src/components/dealer/`, `src/dealer/` | the dealer portal (DEALER-PANEL-PLAN.md Phase 5): customers, a plan per adapter, plan history, cameras, people |
+| `src/pricing.ts` | a plan's price for the editor's preview; the server's `price_plan` is tested against the same vectors (`../tests/fixtures/pricing-cases.json`) |
 | `src/theme.ts` | the OpenVue preset: Aura, sky accent, slate dark surfaces |
 | `tests/` | Vitest; `camera-controller.spec.ts` keeps the FoundAndFixed fixes the player carries |
 

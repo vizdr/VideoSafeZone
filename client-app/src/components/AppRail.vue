@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { useRoute } from "vue-router";
 import type { Role } from "../api/types";
-import { CAMERA_ROLES, DEALER_ROLES, SYSTEM_ROLES } from "../auth/roles";
+import { CAMERA_ROLES, PORTAL_ROLES, SYSTEM_ROLES } from "../auth/roles";
 import { useAuthStore } from "../stores/auth";
 
 // Live, Events, Settings for whoever has cameras; Dealer portal for dealers; System for owners and
@@ -12,7 +12,7 @@ const ALL = [
   { name: "live", label: "Live", icon: "pi-video", roles: CAMERA_ROLES },
   { name: "events", label: "Events", icon: "pi-history", roles: CAMERA_ROLES },
   { name: "settings", label: "Settings", icon: "pi-cog", roles: CAMERA_ROLES },
-  { name: "dealer", label: "Dealer portal", icon: "pi-briefcase", roles: DEALER_ROLES },
+  { name: "dealer", label: "Dealer portal", icon: "pi-briefcase", roles: PORTAL_ROLES },
   { name: "system", label: "System", icon: "pi-sitemap", roles: SYSTEM_ROLES },
 ] as const;
 

@@ -114,6 +114,7 @@ bash cloud/provision.sh user-settings --dry-run   # a new feature's table/role/f
 bash cloud/deploy.sh db-migrate --dry-run         # the directory database's migrations (cloud/db/migrations/)
 bash cloud/provision.sh identity --dry-run        # the user pool vsz-users and its trigger vsz-directory
 bash cloud/provision.sh directory --dry-run       # the directory API /directory/* (vsz-directory-api)
+bash cloud/provision.sh portal --dry-run          # the dealer portal's registry read for vsz-directory-api
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -447,8 +448,12 @@ read-only) and per account (Live view). The old page's player logic lives on, be
 unchanged, in `src/player/camera-controller.ts`, with its FoundAndFixed fixes under test. What a
 signed-in person sees follows their role (`DEALER-PANEL-PLAN.md` D6, D7): owners and administrators
 also get the **System console** (`src/views/system/`: dealers, customers, users, adapters, the
-price list, over `/directory/*`), dealers their portal instead of the camera pages. The page only
-hides; `vsz-directory` decides every call again from the database.
+price list, over `/directory/*`), and dealers, owners and administrators the **Dealer portal**
+(`src/views/dealer/`: customers, a plan per adapter priced as it is edited, plan history, cameras,
+people) — dealers instead of the camera pages. The page only hides; `vsz-directory` decides every
+call again from the database. A plan's price is computed twice, by the page for the preview
+(`src/pricing.ts`) and by the server when saved (`price_plan`, the stored figure), and both are
+tested against `tests/fixtures/pricing-cases.json`: change one, change both.
 
 `adapter/onvif-admin/` — a small local Flask app, LAN-only, no login, run directly on the
 Pi. It exists because **WS-Discovery is UDP multicast and only works from a process on

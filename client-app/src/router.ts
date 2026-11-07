@@ -6,7 +6,7 @@
 // customer's first load doesn't carry them. The API checks every call again -- this is convenience.
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from "vue-router";
 import type { Role } from "./api/types";
-import { CAMERA_ROLES, DEALER_ROLES, SYSTEM_ROLES, homeFor } from "./auth/roles";
+import { CAMERA_ROLES, DEALER_ROLES, PORTAL_ROLES, SYSTEM_ROLES, homeFor } from "./auth/roles";
 import LoginView from "./views/LoginView.vue";
 import ShellLayout from "./views/ShellLayout.vue";
 import LiveView from "./views/LiveView.vue";
@@ -31,8 +31,35 @@ export function makeRoutes(role: () => Role | null): RouteRecordRaw[] {
         { path: "settings/live-view", name: "settings-live", component: LiveViewSettings, meta: cameras },
         { path: "settings/:cameraId?/:section?", name: "settings", component: SettingsView, meta: cameras },
         { path: "account", name: "account", component: AccountView },   // DEALER-PANEL-PLAN.md D18
-        { path: "dealer", name: "dealer", component: () => import("./views/DealerHome.vue"),
-          meta: { roles: DEALER_ROLES } },
+        {
+          // The dealer portal (DEALER-PANEL-PLAN.md §7.1, D7): dealers, and owners and administrators
+          // across every dealer. A dealer's own details are the dealer's.
+          path: "dealer",
+          component: () => import("./views/dealer/PortalView.vue"),
+          meta: { roles: PORTAL_ROLES },
+          children: [
+            { path: "", name: "dealer", redirect: { name: "dealer-customers" } },
+            { path: "customers", name: "dealer-customers", component: () => import("./views/dealer/PortalCustomers.vue") },
+            {
+              path: "customers/:customerId",
+              component: () => import("./views/dealer/CustomerView.vue"),
+              children: [
+                { path: "", name: "dealer-customer",
+                  redirect: to => ({ name: "dealer-plan", params: { customerId: to.params.customerId } }) },
+                { path: "plan/:adapterId?", name: "dealer-plan", component: () => import("./views/dealer/CustomerPlan.vue") },
+                { path: "history/:adapterId?", name: "dealer-history", component: () => import("./views/dealer/CustomerHistory.vue") },
+                { path: "cameras", name: "dealer-cameras", component: () => import("./views/dealer/CustomerCameras.vue") },
+                { path: "users", name: "dealer-users", component: () => import("./views/dealer/CustomerUsers.vue") },
+                { path: "details", name: "dealer-customer-details", component: () => import("./views/dealer/CustomerDetails.vue") },
+              ],
+            },
+            { path: "adapters", name: "dealer-adapters", component: () => import("./views/system/SystemAdapters.vue") },
+            { path: "billing", name: "dealer-billing", component: () => import("./views/dealer/DealerBilling.vue") },
+            { path: "pricing", name: "dealer-pricing", component: () => import("./views/system/SystemPricing.vue") },
+            { path: "details", name: "dealer-details", component: () => import("./views/dealer/DealerDetails.vue"),
+              meta: { roles: DEALER_ROLES } },
+          ],
+        },
         {
           path: "system",
           component: () => import("./views/system/SystemView.vue"),

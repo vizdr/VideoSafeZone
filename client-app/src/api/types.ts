@@ -133,6 +133,11 @@ export interface Dealer {
 export interface CustomerSummary {
   id: string; name: string; reference: string | null; status: OrgStatus; createdAt: string;
   dealer: { id: string; name: string }; adapters: number; users: number;
+  holder: { email: string; status: DirectoryUser["status"] } | null;
+  /** The adapters' Thing names; registered: their cameras in the registry (null: couldn't be read). */
+  things: string[]; registered: number | null;
+  /** Cameras in the current plans, and the plans' monthly total (trial and active ones). */
+  inPlans: number; centsMonth: number; currency: string;
 }
 
 export interface AdapterSummary {
@@ -156,3 +161,66 @@ export interface Pricing {
 
 export type UserAction = "disable" | "enable" | "reset-password" | "resend-invite";
 
+
+// --- the dealer portal (DEALER-PANEL-PLAN.md Phase 5, §7.1, D19) -------------------------------------
+
+export type Resolution = Price["resolution"];
+export type RecordingClass = Price["recording"];
+export type BillingInterval = "monthly" | "annual";
+export type PlanStatus = "trial" | "active" | "cancelled" | "ended";
+export interface PlanLine { resolution: Resolution; recording: RecordingClass; quantity: number }
+
+export interface Plan {
+  id: string; version: number; status: PlanStatus;
+  /** A trial whose end has passed is an active plan. */
+  effectiveStatus: PlanStatus;
+  retentionDays: number; interval: BillingInterval;
+  /** The price for the period, set by the server; centsMonth: what it is a month (0 unless billed). */
+  centsPeriod: number; centsMonth: number; currency: string;
+  trialEndsAt: string | null; createdAt: string; createdBy: string | null;
+  lines: PlanLine[]; cameras: number;
+}
+
+export interface InventoryCamera {
+  id: string; name: string | null; codec: string; size: string | null;
+  class: Resolution | null; recordingMode: string; recording: RecordingClass; thumbnailAt: string | null;
+}
+
+export interface CustomerAdapter {
+  id: string; activationId: string; thingName: string; label: string | null; name: string | null;
+  lastSeenAt: string | null; activatedAt: string; site: { id: string; name: string; timezone: string };
+  plan: Plan | null;
+  /** From the registry; null when it couldn't be read. byClass keys: "4mp/motion". */
+  cameras: InventoryCamera[] | null;
+  actual: { total: number; byClass: Record<string, number>; unclassified: number } | null;
+}
+
+export interface CustomerAdapters {
+  customer: { id: string; name: string };
+  adapters: CustomerAdapter[];
+  total: { adapters: number; centsMonth: number; cameras: number; currency: string };
+  registryError?: string;
+}
+
+export interface CustomerDetail {
+  id: string; name: string; reference: string | null; email: string | null; phone: string | null;
+  status: OrgStatus; createdAt: string; dealer: { id: string; name: string };
+  sites: Array<{ id: string; name: string; timezone: string }>;
+  holder: { id: string; email: string; name: string | null; status: DirectoryUser["status"] } | null;
+  users: number; adapters: number;
+}
+
+export interface NewCustomer {
+  name: string; reference?: string; email?: string; phone?: string; dealerId?: string;
+  site: { name: string; timezone: string }; holder?: { email: string; name?: string };
+}
+
+export interface CustomerPerson {
+  id: string; email: string; name: string | null; status: DirectoryUser["status"];
+  lastSignInAt: string | null; role: MemberRole; manageable: boolean;
+}
+
+export interface Address { line1?: string; line2?: string; city?: string; postcode?: string; country?: string }
+export interface DealerDetails {
+  id: string; name: string; email: string | null; phone: string | null; address: Address | null; createdAt: string;
+}

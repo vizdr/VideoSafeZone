@@ -18,8 +18,9 @@ authentication on the database) done 2026-11-06, run by the user. **Phase 1 done
 built and tested, provisioned by the user (`provision.sh directory-db`), verified. **Phase 2 done
 2026-11-07**: provisioned by the user and verified, the trigger's cold start included (1.09 s,
 FoundAndFixed.md #89). **Phase 3 done 2026-11-07**: the tenant check enforces and is verified,
-and `kvs-demo-api` accepts only `vsz-users`. **Phase 4 built 2026-11-07** (the directory API and
-the System console), tested, not yet deployed. Next: its deploy and *Verify*, then Phase 5.
+and `kvs-demo-api` accepts only `vsz-users`. **Phase 4 done 2026-11-07**: the directory API and the
+System console, deployed and verified by the user. **Phase 5 built 2026-11-07** (the dealer
+portal), tested, not yet deployed. Next: its deploy and *Verify*, then Phase 6.
 
 ---
 
@@ -1112,6 +1113,9 @@ sets a password, lands on the dealer portal (empty); as owner, the Users tab can
   against a faked API). Each was broken on purpose once — the router's role check, an owner's
   roles, the cents, `may_give`, `may_manage` — and turned red.
 
+*Deployed 2026-11-07* by the user (`deploy.sh lambda vsz-directory`, `provision.sh directory`,
+`deploy.sh page`); the user reports the *Verify* above passes.
+
 ### Phase 5: Dealer portal
 
 The screens of §7.1 and their routes: customers, per-adapter plans with live price and the
@@ -1123,6 +1127,60 @@ shared vectors.
 customer's plan for `adapter-01` (its history shows both versions with the price). Activating an
 adapter for the new customer waits for Phase 6. `tests_db/`: a plan belongs to one activation;
 a version's price is the server's.
+
+*Built 2026-11-07* (1300 offline pytest, 91 tests_db, 218 Vitest):
+- **The routes** (§6, on `vsz-directory-api`): `GET/POST customers`, `GET/PATCH customers/<id>`,
+  `GET customers/<id>/adapters`, `GET customers/<id>/users`, `PUT adapters/<id>/plan`,
+  `POST adapters/<id>/plan/cancel`, `GET adapters/<id>/plans`, `GET/PATCH dealer`. Two of §6's
+  are folded in: `customers/<id>/adapters` carries each adapter's cameras and plan vs. actual, so
+  `customers/<id>/cameras` isn't a route of its own, and an adapter's current plan comes with it
+  (no `GET adapters/<id>/plan`). A customer's holder is invited with `POST customers` (`holder`)
+  or `POST users`, as any invitation; adding Super Admins and users stays the holder's (Phase 9).
+- **The camera registry is read by `vsz-directory-api`**, since `vsz-directory`, in the VPC
+  without a NAT, can't reach DynamoDB: one scan, `ProjectionExpression` naming only the portal's
+  fields (no address, user or password ever reaches the function), unregistered rows left out;
+  the thumbnails' times by `HeadObject`, never the picture (D5). Its role gets this through
+  `provision.sh portal` (`cloud/iam/vsz-directory-api-inventory-policy.json`, and `THUMB_BUCKET`).
+  A registry that can't be read leaves the counts out and says so; the rest of the answer stands.
+  A camera's class comes from its picture size (`recordSize`; ≤ 2.1 Mpx 2 MP, ≤ 4.2 Mpx 4 MP,
+  else 8 MP — unknown when the row has none, as `cam-01`'s), its recording from its mode (`manual`
+  → continuous, the detection modes → motion).
+- **Plans** (D9, D19): every save is a new version of the adapter's activation's plan, priced by
+  the server (`price_plan`; a price the page sends is ignored), its six lines stored whole; the
+  activation row is locked while a version is added, and `basedOn` (the version the page edited)
+  must still be the newest, or 409. Saving the same plan again adds nothing. A plan saved during
+  the trial stays a trial (its end carried over); a trial whose end has passed reads as active
+  (`effectiveStatus`). *Cancel subscription* is a version with status `cancelled` at no charge;
+  saving a plan starts it again. A customer's total adds up its trial and active plans, an annual
+  one as a twelfth of its year.
+- **The price, twice, kept the same:** `price_plan` (Python) and `pricePlan` (`client-app/src/
+  pricing.ts`) are both tested against `tests/fixtures/pricing-cases.json` (12 cases: rounding
+  both ways, the largest plan, no discount and the largest, a missing price). The web job now also
+  runs when that file changes.
+- **The portal** (`client-app/src/views/dealer/`): tabs Customers · Cloud adapters · Billing ·
+  Pricing · Dealer details (a dealer's own). The customer list (search, status; holder, adapters,
+  cameras in plans / registered, the monthly total) and *New customer* (first site with its time
+  zone, optional holder); per customer Plan (adapter picker, cameras per class with what the
+  registry counts beside each, storage, payment, the price as it is edited, plan vs. actual, the
+  customer's total, Save plan, Cancel subscription after asking), Plan history (who, when, what
+  changed, price), Cameras (by adapter, no pictures), Users (the holder invited if there is none;
+  disable, enable, reset, resend where `may_manage` allows), Details (contact, suspend /
+  reactivate, sites). Billing shows each customer's total with the demo banner and no payment
+  fields; invoices come with Phase 8. **Owners and administrators open the portal too** (D7): the
+  rail shows it beside System, its list spans every dealer with a filter, *New customer* asks for
+  the dealer (Direct first), and System → Customers is the same list.
+- **Tests:** `tests_db/test_portal.py` (28): another dealer's customer is "no such customer" on
+  every route, a customer and its first site, suspension signing its people out, versions priced
+  by the server, a stale edit refused, the same plan saved twice, what a plan may hold, cancel
+  and subscribe again, a trial that has ended, **a plan belongs to one activation** (released, the
+  plan is history; at the next customer it starts at version 1), the customer total, a dealer's own
+  details. `tests/cloud/test_directory_api.py` (+34): each route with its path, the registry
+  counts across pages, plan vs. actual and the classes, a credential never read, an unreadable
+  registry, a holder's invitation and its refusal. `tests/cloud/test_pricing.py` and
+  `client-app/tests/pricing.spec.ts` (the shared vectors); `client-app/tests/portal.spec.ts` (28).
+  Broken on purpose once each, turning red: a dealer opening another's customer, the page's price
+  stored, no `basedOn` check, the annual discount dropped (both sides), the scan's field list
+  dropped, the registry's second page dropped, `basedOn` always 0, the portal for dealers only.
 
 ### Phase 6: Adapters — Cloud IDs and activation (§4c D15)
 
@@ -1257,8 +1315,9 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 3: `deploy.sh tenancy old-pool-off` (2026-11-07)
 - [ ] Later: delete the old app client `kvs-demo-web-client` from `kvs-demo-users` (unused since the switch)
 - [x] Phase 4: directory API, System console — built and tested (2026-11-07)
-- [ ] Phase 4: deployed (`deploy.sh lambda vsz-directory`, `provision.sh directory`, `deploy.sh page`) and its *Verify* recorded
-- [ ] Phase 5: Dealer portal
+- [x] Phase 4: deployed (`deploy.sh lambda vsz-directory`, `provision.sh directory`, `deploy.sh page`) and verified by the user (2026-11-07)
+- [x] Phase 5: Dealer portal — built and tested (2026-11-07)
+- [ ] Phase 5: deployed (`deploy.sh lambda vsz-directory`, `lambda vsz-directory-api`, `provision.sh portal`, `deploy.sh page`) and its *Verify* recorded
 - [ ] Phase 6: Adapters — Cloud IDs, activation, release, last seen
 - [ ] Phase 7: Adding cameras from the web page (allocated IDs, per-Pi filtering)
 - [ ] Phase 8: Billing seam with fakes

@@ -492,7 +492,11 @@ and grants in `cloud/db/migrations/`. A fake can't check those, so they run agai
   Phase 4 (63 tests), also its operations for signed-in people, each asked as a demo person
   (`tests_db/test_directory_ops.py`): who may see which list, who may invite whom and manage whom
   (D6), dealers created once by name, an invitation linked or cancelled, reset only for the signed
-  in and resend only for the invited, the price list replaced whole or refused.
+  in and resend only for the invited, the price list replaced whole or refused. Since Phase 5 (91
+  tests), the dealer portal's (`tests_db/test_portal.py`): another dealer's customer refused as
+  unknown, plan versions priced by the server, a stale edit refused, a plan belonging to one
+  adapter activation, the customer totals. Their shared helpers, `ask` and `refused_op`, are in
+  `tests_db/dbhelpers.py`.
 - **Proved to catch regressions:** granting `vsz_app` UPDATE on plans turns two tests red;
   dropping the bootstrap's `REVOKE SET OPTION` turns one red here and two in
   `tests/cloud/test_db_admin.py`. They found one bug before anything was deployed: a trigger

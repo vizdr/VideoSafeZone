@@ -117,3 +117,42 @@ def demo_spec():
                  "members": [{"email": e["suspended"], "role": "customer"}]},
             ]}],
     }
+
+
+# --- asking vsz-directory's operations as a demo person (Phase 4 on) --------------------------------
+
+def _directory():
+    from loaders import load_lambda               # cached: one module for the whole run
+    return load_lambda("vsz_directory")
+
+
+def ask(app, op, who, **args):
+    """vsz-directory's operation `op`, asked as the demo person `who`, as the handler would: the
+    person resolved from the database, the result as JSON carries it."""
+    directory = _directory()
+    fn, _ = directory.USER_OPS[op]
+    actor = directory.resolve_actor(app, {"kind": "user", "sub": SUBS[who]})
+    return directory.jsonable(fn(app, actor, args))
+
+
+def refused_op(app, op, who, expect, **args):
+    """The operation must be refused with HTTP status `expect`, as the handler would answer; the transaction goes on."""
+    directory = _directory()
+    app.run("SAVEPOINT op")
+    try:
+        ask(app, op, who, **args)
+    except directory.DirectoryError as exc:
+        app.run("ROLLBACK TO SAVEPOINT op")
+        assert exc.status == expect, f"{who} {op}: {exc.status} {exc.args[0]}"
+        return exc.args[0]
+    except Exception as exc:                           # a rule the database keeps
+        app.run("ROLLBACK TO SAVEPOINT op")
+        state = directory.sql_state(exc)
+        assert (409 if state == "23505" else 400 if state in ("23514", "23503") else 500) == expect, exc
+        return str(exc)
+    app.run("RELEASE SAVEPOINT op")
+    pytest.fail(f"{who} was allowed {op}")
+
+
+def dealer_id(app, name="Demo dealer"):
+    return str(one(app, "SELECT id FROM vsz.org WHERE kind = 'dealer' AND name = :n", n=name))

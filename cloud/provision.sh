@@ -24,6 +24,9 @@
 #   bash cloud/provision.sh directory                 the directory API (DEALER-PANEL-PLAN.md Phase 4):
 #                                                     function vsz-directory-api, /directory/{proxy+} (ANY,
 #                                                     Cognito authorizer) and its CORS preflight, stage
+#   bash cloud/provision.sh portal                    the dealer portal's camera inventory (DEALER-PANEL-PLAN.md
+#                                                     Phase 5): vsz-directory-api reads the cameras table and
+#                                                     the thumbnails' times; checked as the demo dealer
 #   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
 #                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
 #                                                     on every function with the check, vsz-users beside
@@ -776,6 +779,54 @@ PY
   say "verified: /directory answers (CORS preflight, authorizer, vsz-directory-api, vsz-directory)"
 }
 
+# --- the dealer portal's camera inventory (DEALER-PANEL-PLAN.md Phase 5, D5) -----------------------
+
+# The portal's customer list counts each customer's cameras, and its Cameras page lists them, from
+# the registry -- read by vsz-directory-api, outside the VPC. Its role gets a read of the cameras
+# table (Scan) and the thumbnails' times (s3:GetObject on thumbs/, for HeadObject), and the function
+# learns the evidence bucket, as list-cameras did (provision_thumbnails).
+provision_portal() {
+  local bucket url
+  aws lambda get-function-configuration --function-name vsz-directory-api >/dev/null 2>&1 ||
+    die "no function vsz-directory-api: bash cloud/provision.sh directory first"
+  bucket=$(aws lambda get-function-configuration --function-name record-clip \
+    --query 'Environment.Variables.BUCKET' --output text)
+  [ -n "$bucket" ] && [ "$bucket" != None ] || die "record-clip has no BUCKET: can't tell the evidence bucket"
+  grep -q "arn:aws:s3:::$bucket/thumbs/" "$IAM_DIR/vsz-directory-api-inventory-policy.json" ||
+    die "cloud/iam/vsz-directory-api-inventory-policy.json doesn't name $bucket"
+  ensure_inline_policy vsz-directory-api-role camera-inventory vsz-directory-api-inventory-policy.json
+  ensure_env vsz-directory-api THUMB_BUCKET "$bucket"
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  # Done means the demo dealer's customer list carries camera counts through API Gateway. A new
+  # inline policy takes a few seconds to apply, so a missing count is asked again for a while.
+  url="https://$API.execute-api.$REGION.amazonaws.com/$STAGE/directory/customers"
+  python3 - "$url" "$DEMO_FILE" "$REGION" "$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
+      --query "UserPoolClients[?ClientName=='$CLIENT_NAME'].ClientId" --output text)" <<'PY' || die "the demo dealer's customer list has no camera counts -- is vsz-directory-api's new code deployed? (bash cloud/deploy.sh lambda vsz-directory-api)"
+import json, sys, time, urllib.error, urllib.request
+url, demo, region, client = sys.argv[1:5]
+pw = dict(line.split() for line in open(demo) if line.strip())["demo-dealer@example.com"]
+auth = urllib.request.Request(f"https://cognito-idp.{region}.amazonaws.com/", data=json.dumps({
+    "AuthFlow": "USER_PASSWORD_AUTH", "ClientId": client,
+    "AuthParameters": {"USERNAME": "demo-dealer@example.com", "PASSWORD": pw}}).encode(),
+    headers={"Content-Type": "application/x-amz-json-1.1",
+             "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"})
+token = json.load(urllib.request.urlopen(auth, timeout=30))["AuthenticationResult"]["IdToken"]
+for attempt in range(8):
+    try:
+        rows = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": token}), timeout=30))
+    except urllib.error.HTTPError as e:
+        print(f"GET /directory/customers as demo-dealer: {e.code} {e.read().decode()[:200]}", file=sys.stderr)
+        sys.exit(1)
+    if rows and all(r.get("registered") is not None for r in rows):
+        for r in rows:
+            print(f"  {r['name']}: {r['adapters']} adapter(s), {r['registered']} camera(s) registered, {r['inPlans']} in plans")
+        sys.exit(0)
+    time.sleep(5)
+sys.exit(1)
+PY
+  say "verified: the portal counts cameras from the registry (vsz-directory-api's camera-inventory policy)"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -786,5 +837,6 @@ case "${1:-}" in
   directory-seed)  preflight; shift; provision_directory_seed "${1:-}" ;;
   tenancy)         preflight; provision_tenancy ;;
   directory)       preflight; provision_directory ;;
-  *) sed -n '2,30p' "$0"; exit 1 ;;
+  portal)          preflight; find_pool; provision_portal ;;
+  *) sed -n '2,33p' "$0"; exit 1 ;;
 esac

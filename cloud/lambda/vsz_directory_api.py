@@ -11,6 +11,16 @@ one of vsz-directory's operations; invitations and account changes also go to Co
   POST  /directory/users                      {email, name?, orgId, role} -- an invitation
   POST  /directory/users/<id>/disable | enable | reset-password | resend-invite
   PUT   /directory/pricing                    {prices: [...], settings: {...}}
+  The dealer portal (Phase 5):
+  POST  /directory/customers                  {name, reference?, email?, phone?, dealerId?,
+                                               site: {name, timezone}, holder?: {email, name?}}
+  GET   /directory/customers/<id> · PATCH     details · {name?, reference?, email?, phone?, status?}
+  GET   /directory/customers/<id>/adapters    each adapter's plan, cameras and plan vs. actual; the total
+  GET   /directory/customers/<id>/users       the customer's people
+  PUT   /directory/adapters/<id>/plan         {lines, retentionDays, interval, basedOn} -- a new version
+  POST  /directory/adapters/<id>/plan/cancel  {basedOn}
+  GET   /directory/adapters/<id>/plans        the plan's history at its current customer
+  GET   /directory/dealer · PATCH             the dealer's own details
 
 An invitation: vsz-directory adds the person, invited, with their membership; Cognito creates the
 user and emails a temporary password (AdminCreateUser); the new sub goes back to the directory. If
@@ -18,11 +28,18 @@ Cognito refuses, the directory's row is taken back out. A disable is the directo
 the sign-in trigger refuses a disabled person at their next token, whatever Cognito says -- then
 Cognito's, with every session signed out.
 
+The camera registry (DynamoDB `cameras`) is read here, since vsz-directory, inside the VPC,
+can't reach it: the customer list's camera counts and each adapter's cameras (D5: name, codec,
+picture size, recording mode, when the last thumbnail was taken -- never the picture, never a
+credential: the scan reads only the fields below). A registry that can't be read leaves those out
+and says so; the rest of the answer stands.
+
 Every answer carries CORS headers, errors included (FoundAndFixed.md #8).
 """
 import json
 import os
 import re
+from datetime import timezone
 
 import boto3
 from botocore.exceptions import ClientError
@@ -30,6 +47,10 @@ from botocore.exceptions import ClientError
 REGION = os.environ["AWS_REGION"]
 POOL_ID = os.environ.get("POOL_ID", "")
 DIRECTORY = os.environ.get("DIRECTORY_FUNCTION", "vsz-directory")
+CAMERAS_TABLE = os.environ.get("CAMERAS_TABLE", "cameras")
+THUMB_BUCKET = os.environ.get("THUMB_BUCKET", "")       # the evidence bucket: thumbs/<cameraId>.jpg
+# The only registry fields read -- no credential is among them (no rtspUrl, onvifPassword, ...).
+REGISTRY_FIELDS = "cameraId, adapterId, unregisteredAt, displayName, videoCodec, videoCodecDefault, recordSize, recordingMode"
 CORS = {"Access-Control-Allow-Origin": "*"}
 ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 ACTIONS = {"disable": "disable", "enable": "enable", "reset-password": "reset", "resend-invite": "resend"}
@@ -41,7 +62,17 @@ ROUTES = [
     ("GET", "dealers", "list_dealers"),
     ("POST", "dealers", "create_dealer"),
     ("PATCH", f"dealers/(?P<id>{ID})", "update_dealer"),
-    ("GET", "customers", "list_customers"),
+    ("GET", "customers", "customers"),
+    ("POST", "customers", "create_customer"),
+    ("GET", f"customers/(?P<id>{ID})", "get_customer"),
+    ("PATCH", f"customers/(?P<id>{ID})", "update_customer"),
+    ("GET", f"customers/(?P<id>{ID})/adapters", "customer_adapters"),
+    ("GET", f"customers/(?P<id>{ID})/users", "customer_users"),
+    ("PUT", f"adapters/(?P<adapterId>{ID})/plan", "put_plan"),
+    ("POST", f"adapters/(?P<adapterId>{ID})/plan/cancel", "cancel_plan"),
+    ("GET", f"adapters/(?P<adapterId>{ID})/plans", "plan_history"),
+    ("GET", "dealer", "get_dealer"),
+    ("PATCH", "dealer", "update_own_dealer"),
     ("GET", "adapters", "list_adapters"),
     ("GET", "users", "list_users"),
     ("POST", "users", "invite"),
@@ -49,7 +80,7 @@ ROUTES = [
     ("GET", "pricing", "get_pricing"),
     ("PUT", "pricing", "put_pricing"),
 ]
-CREATED = {"create_dealer", "invite"}
+CREATED = {"create_dealer", "invite", "create_customer"}
 
 
 class Refused(Exception):
@@ -122,6 +153,127 @@ def account(sub, user_id, action):
     return {"userId": done["userId"], "status": done["status"]}
 
 
+# --- the camera registry, for the portal's counts and inventory (D5) ---------------------------------
+
+def registry_cameras():
+    """Every registered camera's portal fields (REGISTRY_FIELDS), unregistered ones left out."""
+    table = boto3.resource("dynamodb", region_name=REGION).Table(CAMERAS_TABLE)
+    rows, kwargs = [], {"ProjectionExpression": REGISTRY_FIELDS}
+    while True:
+        page = table.scan(**kwargs)
+        rows += page.get("Items", [])
+        if "LastEvaluatedKey" not in page:
+            return [r for r in rows if not r.get("unregisteredAt")]
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+def size_class(size):
+    """A picture size's camera class (§7.1): up to 2.1 Mpx 2 MP, up to 4.2 Mpx 4 MP, else 8 MP."""
+    m = re.fullmatch(r"(\d+)x(\d+)", str(size or ""))
+    if not m:
+        return None
+    pixels = int(m.group(1)) * int(m.group(2))
+    return "2mp" if pixels <= 2_100_000 else "4mp" if pixels <= 4_200_000 else "8mp"
+
+
+def recording_class(mode):
+    """Started and stopped by hand, a camera records all the time it runs; the detection modes
+    record on events. A hint for plan vs. actual, not a rule (§7.1)."""
+    return "continuous" if (mode or "manual") == "manual" else "motion"
+
+
+def thumbnail_times(camera_ids):
+    """{cameraId: when its last thumbnail was taken} -- the time only, never the picture (D5)."""
+    if not THUMB_BUCKET:
+        return {}
+    s3 = boto3.client("s3", region_name=REGION)
+    out = {}
+    for cid in camera_ids:
+        try:
+            head = s3.head_object(Bucket=THUMB_BUCKET, Key=f"thumbs/{cid}.jpg")
+        except Exception:  # noqa: BLE001 -- no thumbnail yet, or not readable: no time
+            continue
+        out[cid] = head["LastModified"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return out
+
+
+def inventory(things):
+    """{thing: [camera]} for these adapters' cameras, sorted by camera ID."""
+    rows = sorted((r for r in registry_cameras() if r.get("adapterId") in set(things)), key=lambda r: r["cameraId"])
+    taken = thumbnail_times([r["cameraId"] for r in rows])
+    out = {t: [] for t in things}
+    for r in rows:
+        out[r["adapterId"]].append({
+            "id": r["cameraId"], "name": r.get("displayName"),
+            "codec": r.get("videoCodec") or r.get("videoCodecDefault") or "h264",
+            "size": r.get("recordSize"), "class": size_class(r.get("recordSize")),
+            "recordingMode": r.get("recordingMode") or "manual",
+            "recording": recording_class(r.get("recordingMode")), "thumbnailAt": taken.get(r["cameraId"])})
+    return out
+
+
+def actual(cameras):
+    """What is on the adapter, counted as a plan counts: by class/recording; a camera whose picture
+    size isn't known is counted apart."""
+    by_class = {}
+    for c in cameras:
+        if c["class"]:
+            key = f"{c['class']}/{c['recording']}"
+            by_class[key] = by_class.get(key, 0) + 1
+    return {"total": len(cameras), "byClass": by_class, "unclassified": sum(1 for c in cameras if not c["class"])}
+
+
+def registry_trouble(exc):
+    return f"the camera registry couldn't be read ({error_code(exc)}): camera counts are left out"
+
+
+def customers(sub, args):
+    """The customer list, each with the cameras registered on its adapters."""
+    rows = call_directory("list_customers", sub, args)
+    try:
+        counts = {}
+        for r in registry_cameras():
+            counts[r.get("adapterId")] = counts.get(r.get("adapterId"), 0) + 1
+    except Exception as exc:  # noqa: BLE001 -- the list stands without the counts
+        print(json.dumps({"registry": registry_trouble(exc)}))
+        counts = None
+    for c in rows:
+        c["registered"] = None if counts is None else sum(counts.get(t, 0) for t in c.get("things", []))
+    return rows
+
+
+def customer_adapters(sub, args):
+    """The customer's adapters, each with its plan (the directory's), its cameras and plan vs. actual."""
+    out = call_directory("customer_adapters", sub, args)
+    try:
+        cams = inventory([a["thingName"] for a in out["adapters"]])
+    except Exception as exc:  # noqa: BLE001
+        out["registryError"] = registry_trouble(exc)
+        cams = None
+    for a in out["adapters"]:
+        a["cameras"] = None if cams is None else cams[a["thingName"]]
+        a["actual"] = None if cams is None else actual(a["cameras"])
+    return out
+
+
+def create_customer(sub, body):
+    """A customer and its first site; then, if one is given, its holder's invitation. A refused
+    invitation leaves the customer created and says why, so the holder can be invited again."""
+    holder = body.get("holder")
+    made = call_directory("create_customer", sub, {k: v for k, v in body.items() if k != "holder"})
+    out = {"id": made["id"], "siteId": made["siteId"]}
+    if isinstance(holder, dict) and str(holder.get("email") or "").strip():
+        try:
+            out["holder"] = invite(sub, {"email": holder["email"], "name": holder.get("name"),
+                                         "orgId": made["id"], "role": "customer"})
+        except Refused as r:
+            out["holderError"] = r.message
+    return out
+
+
+SPECIAL = {"customers": customers, "customer_adapters": customer_adapters, "create_customer": create_customer}
+
+
 def lambda_handler(event, context):
     try:
         event = event or {}
@@ -147,14 +299,16 @@ def lambda_handler(event, context):
                 allowed.append(route_method)
                 continue
             params = m.groupdict()
+            args = {**{k: v for k, v in query.items() if k == "dealerId"}, **params} if method == "GET" \
+                else {**body, **params}
             if what == "invite":
                 result = invite(sub, body)
             elif what == "account":
                 result = account(sub, params["userId"], params["action"])
-            elif method == "GET":
-                result = call_directory(what, sub, {**{k: v for k, v in query.items() if k == "dealerId"}})
+            elif what in SPECIAL:
+                result = SPECIAL[what](sub, args)
             else:
-                result = call_directory(what, sub, {**body, **params})
+                result = call_directory(what, sub, args)
             return answer(201 if what in CREATED else 200, result)
         if allowed:
             return answer(405, {"error": f"{method} isn't allowed here: {', '.join(sorted(set(allowed)))}"})

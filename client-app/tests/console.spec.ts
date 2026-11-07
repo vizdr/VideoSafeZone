@@ -39,7 +39,8 @@ const NORTH = { id: "d-1", name: "North", email: "sales@north.example", phone: n
                 createdAt: "2026-11-01T10:00:00Z", customers: 2, users: 1, adapters: 3 };
 const SOUTH = { ...NORTH, id: "d-2", name: "South", email: null, status: "suspended" as const, customers: 0 };
 const ACME = { id: "c-1", name: "Acme", reference: "A-7", status: "active" as const, createdAt: "2026-11-02T10:00:00Z",
-               dealer: { id: "d-1", name: "North" }, adapters: 1, users: 2 };
+               dealer: { id: "d-1", name: "North" }, adapters: 1, users: 2, holder: null, things: ["adapter-01"],
+               registered: 3, inPlans: 4, centsMonth: 2240, currency: "EUR" };
 
 function signIn(role: Role, email = "me@example.test") {
   fake.session.claims = { vsz_role: role };
@@ -66,7 +67,7 @@ beforeEach(() => {
 
 describe("where each role lands", () => {
   it.each([
-    ["dealer", "dealer"], ["system_owner", "system-overview"], ["system_admin", "live"], ["customer", "live"],
+    ["dealer", "dealer-customers"], ["system_owner", "system-overview"], ["system_admin", "live"], ["customer", "live"],
   ] as const)("%s starts on %s", async (role, name) => {
     const router = makeRouter(() => true, () => role);
     await router.push("/");
@@ -76,8 +77,9 @@ describe("where each role lands", () => {
   });
 
   it.each([
-    ["dealer", "/live/cam-01", "dealer"], ["dealer", "/system/users", "dealer"], ["dealer", "/settings", "dealer"],
-    ["system_owner", "/live", "system-overview"], ["system_owner", "/dealer", "system-overview"],
+    ["dealer", "/live/cam-01", "dealer-customers"], ["dealer", "/system/users", "dealer-customers"],
+    ["dealer", "/settings", "dealer-customers"],
+    ["system_owner", "/live", "system-overview"], ["system_owner", "/dealer/details", "system-overview"],
     ["customer", "/system/pricing", "live"], ["customer", "/dealer", "live"],
   ] as const)("%s asking for %s is sent home", async (role, path, name) => {
     const router = makeRouter(() => true, () => role);
@@ -104,8 +106,8 @@ describe("the rail, role by role", () => {
   it.each([
     ["customer", ["Live", "Events", "Settings", "Account", "Exit"]],
     ["dealer", ["Dealer portal", "Account", "Exit"]],
-    ["system_owner", ["System", "Account", "Exit"]],
-    ["system_admin", ["Live", "Events", "Settings", "System", "Account", "Exit"]],
+    ["system_owner", ["Dealer portal", "System", "Account", "Exit"]],
+    ["system_admin", ["Live", "Events", "Settings", "Dealer portal", "System", "Account", "Exit"]],
   ] as const)("%s sees %j", async (role, labels) => {
     signIn(role);
     const router = makeRouter(() => true, () => role);
@@ -203,12 +205,14 @@ describe("Dealers", () => {
 });
 
 describe("Customers", () => {
-  it("lists every customer and filters by dealer", async () => {
+  it("is the dealer portal's list, across every dealer, filtered by one", async () => {
     e.listDealers.mockReturnValue(ok([NORTH, SOUTH]));
     e.listCustomers.mockReturnValue(ok([ACME]));
     const w = await mountTab(SystemCustomers, "/system/customers");
     expect(e.listCustomers).toHaveBeenCalledWith(undefined);
-    expect(w.find(".console-table tbody tr").text()).toContain("AcmeA-7North");
+    const row = w.find("[data-test=customer-Acme]");
+    expect(row.text()).toContain("North");                               // the dealer column, for staff
+    expect(row.find("a").attributes("href")).toBe("#/dealer/customers/c-1/plan");
     await w.find("[data-test=dealer-filter]").setValue("d-2");
     await flushPromises();
     expect(e.listCustomers).toHaveBeenLastCalledWith("d-2");

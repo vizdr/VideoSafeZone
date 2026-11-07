@@ -6,6 +6,8 @@ import type { Role } from "../api/types";
  *  without vsz_role (the old pool, before the switch) is treated as before. */
 export const CAMERA_ROLES: ReadonlyArray<Role | null> = ["customer", "system_admin", null];
 export const DEALER_ROLES: ReadonlyArray<Role | null> = ["dealer"];
+/** The dealer portal (D7): dealers, and owners and administrators across every dealer. */
+export const PORTAL_ROLES: ReadonlyArray<Role | null> = ["dealer", "system_owner", "system_admin"];
 export const SYSTEM_ROLES: ReadonlyArray<Role | null> = ["system_owner", "system_admin"];
 
 /** Where a role lands after signing in: a dealer on the portal (D7), an owner on the System

@@ -1,8 +1,9 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  AdapterSummary, Camera, CameraSettings, ClipsPage, CommandAction, CustomerSummary, Dealer, DirectoryUser,
-  HlsSession, IrMode, Me, MemberRole, Overview, Price, Pricing, RecordingMode, StorageTier, UserAction,
+  AdapterSummary, Address, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
+  CustomerDetail, CustomerPerson, CustomerSummary, Dealer, DealerDetails, DirectoryUser, HlsSession, IrMode, Me,
+  MemberRole, NewCustomer, Overview, Plan, PlanLine, Price, Pricing, RecordingMode, StorageTier, UserAction,
   UserSettings,
 } from "./types";
 
@@ -75,6 +76,28 @@ export function makeEndpoints(api: ApiClient) {
     getPricing: () => api.request<Pricing>("GET", "/directory/pricing"),
     putPricing: (prices: Price[], settings: Pick<Pricing["settings"], "retention_days" | "annual_discount_percent" | "trial_days">) =>
       api.request<{ prices: number }>("PUT", "/directory/pricing", { prices, settings }),
+
+    // The dealer portal (DEALER-PANEL-PLAN.md Phase 5).
+    createCustomer: (customer: NewCustomer) =>
+      api.request<{ id: string; siteId: string; holder?: { userId: string; invited: string }; holderError?: string }>(
+        "POST", "/directory/customers", customer),
+    getCustomer: (id: string) => api.request<CustomerDetail>("GET", `/directory/customers/${q(id)}`),
+    updateCustomer: (id: string, change: Partial<Pick<CustomerDetail, "name" | "reference" | "email" | "phone">
+                                                & { status: "active" | "suspended" }>) =>
+      api.request<{ id: string; changed: string[] }>("PATCH", `/directory/customers/${q(id)}`, change),
+    customerAdapters: (id: string) => api.request<CustomerAdapters>("GET", `/directory/customers/${q(id)}/adapters`),
+    customerUsers: (id: string) => api.request<CustomerPerson[]>("GET", `/directory/customers/${q(id)}/users`),
+    /** basedOn: the version edited -- the server refuses (409) if another was saved meanwhile. */
+    putPlan: (adapterId: string, plan: { lines: PlanLine[]; retentionDays: number; interval: BillingInterval; basedOn: number }) =>
+      api.request<{ changed: boolean; plan: Plan }>("PUT", `/directory/adapters/${q(adapterId)}/plan`, plan),
+    cancelPlan: (adapterId: string, basedOn: number) =>
+      api.request<{ changed: boolean; plan: Plan }>("POST", `/directory/adapters/${q(adapterId)}/plan/cancel`, { basedOn }),
+    planHistory: (adapterId: string) =>
+      api.request<{ adapter: { thingName: string; name: string | null; site: string }; plans: Plan[] }>(
+        "GET", `/directory/adapters/${q(adapterId)}/plans`),
+    getDealer: () => api.request<DealerDetails>("GET", "/directory/dealer"),
+    updateOwnDealer: (change: Partial<Pick<DealerDetails, "name" | "email" | "phone">> & { address?: Address | null }) =>
+      api.request<{ id: string; changed: string[] }>("PATCH", "/directory/dealer", change),
   };
 }
 

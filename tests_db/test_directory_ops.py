@@ -7,7 +7,7 @@ its own customers' holders and manage their people; the customer side nothing he
 """
 import pytest
 
-from dbhelpers import SUBS, demo_spec, one, platform
+from dbhelpers import SUBS, ask, dealer_id, demo_spec, one, platform, refused_op
 from loaders import load_lambda
 
 directory = load_lambda("vsz_directory")
@@ -17,34 +17,6 @@ directory = load_lambda("vsz_directory")
 def demo(app):
     directory.operator_seed(app, demo_spec())
     return app
-
-
-def ask(app, op, who, **args):
-    fn, _ = directory.USER_OPS[op]
-    actor = directory.resolve_actor(app, {"kind": "user", "sub": SUBS[who]})
-    return directory.jsonable(fn(app, actor, args))
-
-
-def refused_op(app, op, who, status, **args):
-    """The operation must be refused with `status`, as the handler would answer; the transaction goes on."""
-    app.run("SAVEPOINT op")
-    try:
-        ask(app, op, who, **args)
-    except directory.DirectoryError as exc:
-        app.run("ROLLBACK TO SAVEPOINT op")
-        assert exc.status == status, f"{who} {op}: {exc.status} {exc.args[0]}"
-        return exc.args[0]
-    except Exception as exc:                           # a rule the database keeps
-        app.run("ROLLBACK TO SAVEPOINT op")
-        state = directory.sql_state(exc)
-        assert (409 if state == "23505" else 400 if state in ("23514", "23503") else 500) == status, exc
-        return str(exc)
-    app.run("RELEASE SAVEPOINT op")
-    pytest.fail(f"{who} was allowed {op}")
-
-
-def dealer_id(app, name="Demo dealer"):
-    return str(one(app, "SELECT id FROM vsz.org WHERE kind = 'dealer' AND name = :n", n=name))
 
 
 # --- who is asking ---------------------------------------------------------------------------------

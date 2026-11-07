@@ -827,6 +827,23 @@ bash cloud/deploy.sh page                         # the System console and the d
 and `GET /directory/me` as the demo owner answers `system_owner`. Afterwards `deploy.sh lambda
 vsz-directory-api` ships a change to the API like any other function.
 
+### The dealer portal
+
+The portal (`DEALER-PANEL-PLAN.md` Phase 5) adds directory operations and routes, and lets
+`vsz-directory-api` read the camera registry for its camera counts — `vsz-directory`, inside the
+VPC, can't reach DynamoDB. In this order, once:
+
+```bash
+bash cloud/deploy.sh lambda vsz-directory         # customers, plans, history, the dealer's details
+bash cloud/deploy.sh lambda vsz-directory-api     # their routes, and the registry read
+bash cloud/provision.sh portal --dry-run          # what it would add, changing nothing
+bash cloud/provision.sh portal                    # the registry and thumbnail-time read, THUMB_BUCKET
+bash cloud/deploy.sh page                         # the portal's pages
+```
+
+`provision.sh portal` checks itself as the demo dealer: its customer list must carry camera counts
+from the registry.
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the
