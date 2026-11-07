@@ -1,7 +1,7 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  ActivationRequest, Activation, AdapterChange, AdapterSummary, Address, NewAdapters, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
+  ActivationRequest, Activation, CameraRequest, CameraScan, AdapterChange, AdapterSummary, Address, NewAdapters, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
   CustomerDetail, CustomerPerson, CustomerSummary, Dealer, DealerDetails, DirectoryUser, HlsSession, IrMode, Me,
   MemberRole, NewCustomer, Overview, Plan, PlanLine, Price, Pricing, RecordingMode, StorageTier, UserAction,
   UserSettings,
@@ -98,6 +98,16 @@ export function makeEndpoints(api: ApiClient) {
     getDealer: () => api.request<DealerDetails>("GET", "/directory/dealer"),
     updateOwnDealer: (change: Partial<Pick<DealerDetails, "name" | "email" | "phone">> & { address?: Address | null }) =>
       api.request<{ id: string; changed: string[] }>("PATCH", "/directory/dealer", change),
+
+    // Adding and removing cameras through the adapter (DEALER-PANEL-PLAN.md Phase 7, D16).
+    scanForCameras: (thing: string) => api.request<{ requestId: string }>("POST", `/adapters/${q(thing)}/discover`),
+    cameraScan: (thing: string) => api.request<CameraScan>("GET", `/adapters/${q(thing)}/discovery`),
+    addCamera: (thing: string, req: { endpointRef: string; xaddr: string; user: string; password: string; displayName?: string }) =>
+      api.request<{ requestId: string }>("POST", `/adapters/${q(thing)}/cameras`, req),
+    cameraRequest: (thing: string, requestId: string) =>
+      api.request<CameraRequest>("GET", `/adapters/${q(thing)}/cameras/requests/${q(requestId)}`),
+    removeCamera: (thing: string, cameraId: string) =>
+      api.request<{ cameraId: string }>("POST", `/adapters/${q(thing)}/cameras/${q(cameraId)}/remove`),
 
     // Adapters (DEALER-PANEL-PLAN.md Phase 6, D15).
     generateAdapters: (count: number, label?: string, dealerId?: string) =>

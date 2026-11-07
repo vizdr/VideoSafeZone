@@ -1,4 +1,4 @@
-import json, os, subprocess, threading, time
+import json, os, re, subprocess, threading, time
 from datetime import datetime, timezone
 
 from awscrt import mqtt
@@ -8,6 +8,8 @@ import activation
 import aws_state
 import config
 import camera_control
+import camera_registration
+import onvif_discovery
 from aws_device_creds import get_session
 
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
@@ -17,6 +19,14 @@ THING   = config.THING_NAME
 CMD_T   = f"{config.TOPIC_PREFIX}/cmd"
 STATE_T = f"{config.TOPIC_PREFIX}/state"
 CONFIG_T = f"{config.TOPIC_PREFIX}/config"   # retained: whether the adapter is activated (D15)
+# Adding cameras from the web page (DEALER-PANEL-PLAN.md D16): what a scan found, and how a camera
+# request is going. IoT rules store both for the page, with the Thing name from the topic -- the
+# Thing policy keeps each Pi to its own topics, so no Pi can answer for another.
+DISCOVERY_T    = f"{config.TOPIC_PREFIX}/discovery"
+REGISTRATION_T = f"{config.TOPIC_PREFIX}/registration"
+REQUESTS_TABLE = "camera-requests"     # the Lambda adapter-cameras' requests, password included
+DISCOVERY_SEC  = 5
+REQUEST_ID_RE  = re.compile(r"^[0-9a-f-]{8,64}$")
 
 # Camera existence/capabilities come from the "cameras" DynamoDB registry, not a
 # hardcoded set/dict -- the same registry the local ONVIF admin GUI (adapter/onvif-admin)
@@ -101,6 +111,13 @@ def stop_all_live():
 def on_message(topic, payload, **kwargs):
     msg = json.loads(payload)
     cmd = msg.get("action")
+    if cmd in ("discover", "register"):
+        # About the adapter, not one camera; seconds to minutes of work, so not in MQTT's callback,
+        # where Start and Stop presses would wait behind it.
+        threading.Thread(target=adapter_command, args=(msg,), daemon=True).start()
+        return
+    if cmd == "unregister" and not msg.get("camera"):
+        return                                 # never the cam-01 default below
     camera = msg.get("camera", "cam-01")   # older clients/messages omit this -- default cam-01
 
     cam_item = get_cameras_table().get_item(Key={"cameraId": camera}).get("Item")
@@ -110,6 +127,11 @@ def on_message(topic, payload, **kwargs):
     # still name it, and the MQTT session is shared with VMS: refuse everything but Stop.
     if camera_control.is_unregistered(cam_item) and cmd not in ("stop", "live-stop"):
         print(f"agent: ignoring {cmd!r} for unregistered {camera}", flush=True)
+        return
+    # Another adapter's camera, or one released from this one (D12, D15): not this Pi's to start,
+    # light or point anywhere. Stop stays possible -- its producer may still run here.
+    if not camera_control.is_mine(cam_item) and cmd not in ("stop", "live-stop"):
+        print(f"agent: ignoring {cmd!r} for {camera}: not this adapter's camera", flush=True)
         return
 
     if cmd == "start" and not camera_control.has_producer(camera):
@@ -135,6 +157,8 @@ def on_message(topic, payload, **kwargs):
         conn.publish(topic=STATE_T,
                      payload=json.dumps({"camera": camera, "streaming": cmd == "start"}),
                      qos=mqtt.QoS.AT_LEAST_ONCE)
+    elif cmd == "unregister":
+        threading.Thread(target=unregister_camera, args=(camera,), daemon=True).start()
     elif cmd == "ir" and cam_item.get("hasIrControl"):
         mode = msg.get("mode")
         try:
@@ -146,6 +170,122 @@ def on_message(topic, payload, **kwargs):
             conn.publish(topic=STATE_T,
                          payload=json.dumps({"camera": camera, "irError": str(e)}),
                          qos=mqtt.QoS.AT_LEAST_ONCE)
+
+# --- Adding and removing cameras from the web page (DEALER-PANEL-PLAN.md D16) ---------------------
+#
+# The browser can't reach the customer's LAN, and WS-Discovery works only on it: the page asks this
+# agent, over its own outbound MQTT session. `discover` scans and publishes what it found; `register`
+# carries only a request's ID -- the password waits in the camera-requests table, read here and
+# never sent over MQTT -- and registers the camera exactly as the admin GUI does
+# (camera_registration); `unregister` is the admin GUI's Unregister.
+
+def _now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _publish(topic, payload):
+    conn.publish(topic=topic, payload=json.dumps(payload), qos=mqtt.QoS.AT_LEAST_ONCE)
+
+
+def agent_env():
+    """camera_registration's collaborators, as the admin GUI's (app._registration_env)."""
+    table = get_cameras_table()
+    return camera_registration.Env(
+        table=table, kinesisvideo=lambda: get_session().client("kinesisvideo"),
+        provision=camera_registration.provision, wait_for_flowing=camera_registration.wait_for_flowing,
+        read_detection=camera_registration.read_detection,
+        record_detection=lambda camera_id, dmap, item=None, web_url=None: camera_registration.record_detection(
+            table, camera_id, dmap, item=item, web_url=web_url))
+
+
+def discover_devices(table):
+    """What WS-Discovery finds on this LAN, each device marked against the registry: added here (its
+    camera ID), removed here (unregistered: adding it brings it back), another adapter's, or new."""
+    rows, kw = [], {"ProjectionExpression": "cameraId, adapterId, onvifEndpointRef, unregisteredAt, releasedFrom, displayName"}
+    while True:
+        page = table.scan(**kw)
+        rows += page["Items"]
+        if "LastEvaluatedKey" not in page:
+            break
+        kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    devices = []
+    for svc in onvif_discovery.scan(timeout=DISCOVERY_SEC):
+        xaddrs, epr = svc.getXAddrs(), svc.getEPR()
+        scopes = [x.getValue() if hasattr(x, "getValue") else str(x) for x in svc.getScopes()]
+        known = [r for r in rows if epr and r.get("onvifEndpointRef") == epr]
+        here = next((r for r in known if camera_control.is_mine(r)), None)
+        state = ("removed" if camera_control.is_unregistered(here) else "added") if here else \
+            ("elsewhere" if known else None)
+        host, port = onvif_discovery.xaddr_host_port(xaddrs[0]) if xaddrs else (None, None)
+        device = {"endpointRef": epr, "xaddr": xaddrs[0] if xaddrs else None, "host": host, "port": port,
+                  "name": camera_registration.scope_value(scopes, "name"),
+                  "hardware": camera_registration.scope_value(scopes, "hardware"), "state": state}
+        if here:
+            device.update(cameraId=here["cameraId"], displayName=here.get("displayName"))
+        devices.append(device)
+    return devices
+
+
+def run_discovery(request_id):
+    try:
+        out = {"requestId": request_id, "at": _now(), "devices": discover_devices(get_cameras_table())}
+    except Exception as e:  # noqa: BLE001 -- the page is waiting: tell it
+        out = {"requestId": request_id, "at": _now(), "devices": [], "error": f"{type(e).__name__}: {e}"}
+    _publish(DISCOVERY_T, out)
+
+
+def run_registration(request_id):
+    """One camera request from the page. The first progress message replaces the request in its table
+    (the IoT rule writes the whole item), so the password leaves it as soon as it was read here."""
+    def report(status, **fields):
+        _publish(REGISTRATION_T, {"requestId": request_id, "status": status, "at": _now(), **fields})
+
+    try:
+        req = get_session().resource("dynamodb").Table(REQUESTS_TABLE).get_item(
+            Key={"requestId": request_id}).get("Item")
+    except Exception as e:  # noqa: BLE001
+        return report("failed", error=f"the request couldn't be read ({type(e).__name__})")
+    if not req or req.get("thing") != THING or not req.get("xaddr") or not req.get("user"):
+        return report("failed", error="no such request for this adapter")
+    report("registering")
+    try:
+        details = onvif_discovery.enrich_sync(req["xaddr"], req["user"], req.get("password") or "")
+    except Exception as e:  # noqa: BLE001
+        return report("failed", error=f"the camera didn't answer with that login ({type(e).__name__})")
+    body = camera_registration.body_from_discovery(req, details)
+    if not body["streamUri"]:
+        return report("failed", error="the camera reports no video stream")
+    table = get_cameras_table()
+    existing = camera_registration.mine_by_endpoint(table, req.get("endpointRef"))
+    if existing and not camera_control.is_unregistered(existing):
+        return report("failed", error=f"this camera is added already, as {existing['cameraId']}",
+                      cameraId=existing["cameraId"])
+    if existing:
+        body["cameraId"] = existing["cameraId"]     # removed here before: Re-register brings it back
+    try:
+        payload, status = camera_registration.register(body, agent_env())
+    except Exception as e:  # noqa: BLE001
+        return report("failed", error=f"{type(e).__name__}: {e}")
+    if status in (200, 201):
+        report("done", cameraId=payload["cameraId"], reactivated=bool(payload.get("reactivated")))
+    else:
+        report("failed", error=payload.get("error", f"HTTP {status}"))
+
+
+def adapter_command(msg):
+    request_id = msg.get("requestId")
+    if not isinstance(request_id, str) or not REQUEST_ID_RE.match(request_id):
+        print(f"agent: {msg.get('action')} without a valid requestId: ignored", flush=True)
+        return
+    print(f"agent: {msg['action']} ({request_id})", flush=True)
+    (run_discovery if msg["action"] == "discover" else run_registration)(request_id)
+
+
+def unregister_camera(camera):
+    payload, status = camera_registration.unregister(get_cameras_table(), camera)
+    _publish(STATE_T, {"camera": camera, "unregistered": status == 200,
+                       **({"error": payload["error"]} if "error" in payload else {})})
+
 
 # --- AWS reachability, published for the outage buffer (adapter/outage_buffer.py) ------
 #
@@ -197,7 +337,8 @@ def on_connection_resumed(connection, return_code, session_present, **kwargs):
 
 def on_config(topic, payload, **kwargs):
     """The retained config message (Phase 6.3): whether this adapter is activated, for the admin
-    GUI (activation.py). A message that isn't one is logged and ignored."""
+    GUI (activation.py). A message that isn't one is logged and ignored. Not activated -- released
+    or revoked (D15) -- also stops what pushes for cameras that aren't this adapter's any more."""
     try:
         state = activation.save(payload)
     except ValueError as e:
@@ -205,6 +346,36 @@ def on_config(topic, payload, **kwargs):
         return
     print(f"agent: the cloud says this adapter is {'activated' if state['activated'] else 'not activated'}",
           flush=True)
+    if not state["activated"]:
+        threading.Thread(target=stop_released_producers, daemon=True).start()
+
+
+def stop_released_producers():
+    """After a release (D15) the adapter's camera rows lose adapterId, so no customer reaches them --
+    and nobody would press Stop: their producers would push to KVS, unattended, until someone found
+    them (the cost rule, guide §1.2). Every producer and live view this Pi has for a camera that
+    isn't its own is stopped. Stopping is always allowed (D12)."""
+    try:
+        table, rows, kw = get_cameras_table(), [], {}
+        while True:
+            page = table.scan(**kw)
+            rows += page["Items"]
+            if "LastEvaluatedKey" not in page:
+                break
+            kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    except Exception as e:  # noqa: BLE001 -- AWS unreachable: the next config message tries again
+        print(f"agent: couldn't read the registry to stop released cameras: {e}", flush=True)
+        return
+    for row in rows:
+        camera = row["cameraId"]
+        if camera_control.is_mine(row) or not camera_control.has_producer(camera):
+            continue
+        print(f"agent: {camera} isn't this adapter's any more: stopping its producer", flush=True)
+        camera_control.set_stream(camera, False)
+        try:
+            set_live(camera, False)
+        except Exception as e:  # noqa: BLE001
+            print(f"agent: live view of {camera} not stopped: {e}", flush=True)
 
 
 def _heartbeat_loop():

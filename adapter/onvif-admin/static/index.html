@@ -259,7 +259,8 @@ function renderDevice(d, i) {
     <p><button onclick="toggleForm(${i})">${existingId ? `Re-register ${esc(camLabel(existingId))}` : "Register this camera"}</button>
        <button onclick="dismissDevice(this)" title="Hide this scan result. Nothing is changed; Scan LAN shows it again.">Cancel</button></p>
     <div id="form-${i}" class="register-form">
-      <label>Camera ID (e.g. cam-03) <input id="cid-${i}" placeholder="cam-03" value="${esc(existingId || "")}" ${existingId ? "readonly" : ""}></label>
+      ${existingId ? `<label>Camera ID <input id="cid-${i}" value="${esc(existingId)}" readonly></label>`
+                   : `<div class="meta">Camera ID: the next free one, given at registration.</div>`}
       <label title="What both pages show, beside the ID. Letters, digits, space, - _ . -- up to 32. Changeable later in the table.">Name (optional, e.g. Kitchen)
         <input id="fname-${i}" maxlength="32" placeholder="Kitchen" value="${esc(cameraNames[existingId] || "")}"></label>
       <label>ONVIF host <input id="host-${i}" value="${esc(host)}"></label>
@@ -348,7 +349,8 @@ async function register(i) {
     const result = await api("/api/cameras", {
       method: "POST",
       body: JSON.stringify({
-        cameraId: document.getElementById(`cid-${i}`).value.trim(),
+        // A new camera gets the next free ID from the server (DEALER-PANEL-PLAN.md D11).
+        cameraId: document.getElementById(`cid-${i}`) ? document.getElementById(`cid-${i}`).value.trim() : undefined,
         displayName: document.getElementById(`fname-${i}`).value.trim(),   // "" clears it
         host: document.getElementById(`host-${i}`).value.trim(),
         port: document.getElementById(`port-${i}`).value.trim(),
@@ -369,7 +371,7 @@ async function register(i) {
     const prod = result.producer && result.producer !== "unchanged" ? ` Producer: ${result.producer}.` : "";
     statusEl.textContent = (result.reactivated
       ? `re-registered -- ${camLabel(result.cameraId)} is back in both GUIs. Its KVS push is stopped: Start Remote when wanted.`
-      : result.updated ? "re-registered -- details updated." : "registered.") + prod + fpsText;
+      : result.updated ? "re-registered -- details updated." : `registered as ${result.cameraId}.`) + prod + fpsText;
     loadCameras();
   } catch (e) {
     statusEl.textContent = e.message;

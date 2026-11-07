@@ -2,7 +2,6 @@ import boto3, os, json
 
 REGION = os.environ["AWS_REGION"]
 THING  = os.environ.get("THING_NAME", "adapter-01")
-CMD_T  = f"adapter/{THING}/cmd"
 ALLOWED_IR_MODES = {"AUTO", "ON", "OFF"}
 
 CORS = {"Access-Control-Allow-Origin": "*"}
@@ -112,13 +111,14 @@ def lambda_handler(event, context):
                 }
             payload["mode"] = mode
 
-        # One shared command topic for the whole adapter (not one topic per camera) --
-        # the camera field inside the payload is what agent.py uses to route to the
-        # right systemd unit (kvs-cam01.service vs kvs-cam02.service) or ONVIF client.
-        # The IoT policy's existing adapter/adapter-01/* wildcard already covers this
-        # without changes.
+        # One command topic per adapter (not per camera) -- the camera field inside the payload
+        # is what agent.py uses to route to the right systemd unit or ONVIF client. The adapter
+        # is the camera's own, adapterId (DEALER-PANEL-PLAN.md D16, A5): with several adapters a
+        # command must reach the Pi that serves the camera. A row without one -- an
+        # administrator's alone (D4) -- goes where every command went before, THING_NAME's.
         iot_data = boto3.client("iot-data", region_name=REGION)
-        iot_data.publish(topic=CMD_T, qos=1, payload=json.dumps(payload))
+        iot_data.publish(topic=f"adapter/{cam_item.get('adapterId') or THING}/cmd", qos=1,
+                         payload=json.dumps(payload))
 
         return {
             "statusCode": 200,

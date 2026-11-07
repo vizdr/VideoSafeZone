@@ -71,7 +71,8 @@ def test_fields_the_page_uses(aws):
         "tags": [], "schedule": None, "recordStream": None, "recordSize": None, "recordFps": None,
         "recordQuality": None, "recordQualityActive": None, "recordQualityOptions": [],
         "thumbnailUrl": None, "thumbnailAt": None,      # no bucket configured in this test: none
-        "access": "control"}            # DEALER-PANEL-PLAN.md D4; TENANCY=report here, so as before
+        "access": "control",            # DEALER-PANEL-PLAN.md D4; TENANCY=report here, so as before
+        "adapterId": None}              # the row predates it: an administrator's alone (D4)
     assert cams["cam-01"]["recordingMode"] == "manual"          # the default
     assert cams["cam-01"]["supportsDetection"] is False         # no ONVIF: manual only
     assert (cams["cam-01"]["videoCodec"], cams["cam-01"]["videoEncode"]) == ("h264", "pi-hw")

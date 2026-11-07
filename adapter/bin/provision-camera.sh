@@ -27,11 +27,11 @@ CAMERA_ID="${1:-}"       # e.g. cam-03
 MEDIAMTX_PATH="${2:-}"   # e.g. cam03 -- same id, hyphen stripped
 START="${3:-start}"      # start | no-start
 
-if [[ ! "$CAMERA_ID" =~ ^cam-[0-9]{2}$ ]]; then
+if [[ ! "$CAMERA_ID" =~ ^cam-[0-9]{2,4}$ ]]; then
   echo "invalid camera id: $CAMERA_ID" >&2
   exit 1
 fi
-if [[ ! "$MEDIAMTX_PATH" =~ ^cam[0-9]{2}$ || "$MEDIAMTX_PATH" != "${CAMERA_ID//-/}" ]]; then
+if [[ ! "$MEDIAMTX_PATH" =~ ^cam[0-9]{2,4}$ || "$MEDIAMTX_PATH" != "${CAMERA_ID//-/}" ]]; then
   echo "invalid mediamtx path for $CAMERA_ID: $MEDIAMTX_PATH" >&2
   exit 1
 fi

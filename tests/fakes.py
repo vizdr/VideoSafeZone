@@ -125,9 +125,15 @@ class FakeTable:
         return self._project(self._page(rows, ExclusiveStartKey, Limit), ProjectionExpression)
 
     # -- writes
-    def put_item(self, Item, **kw):
+    def put_item(self, Item, ConditionExpression=None, ExpressionAttributeValues=None,
+                 ExpressionAttributeNames=None, **kw):
+        if kw:
+            raise NotImplementedError(f"FakeTable.put_item: {sorted(kw)}")
         self.writes.append(("put", deepcopy(Item)))
         n = self._index(self._key_of(Item))
+        if ConditionExpression and not self._holds(ConditionExpression, self.items[n] if n is not None else None,
+                                                   ExpressionAttributeNames or {}, ExpressionAttributeValues or {}):
+            raise _conditional_check_failed()
         if n is None:
             self.items.append(deepcopy(Item))
         else:

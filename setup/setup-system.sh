@@ -189,10 +189,10 @@ cat > "$TMP" <<EOF
 # VideoSafeZone adapter (setup/setup-system.sh, LAUNCH.md A8): exactly the privileged actions its
 # services run non-interactively -- producer Start/Stop and Unregister's disable (camera_control.py),
 # live views (agent.py, live_view.py), and camera provisioning (admin GUI -> provision-camera.sh).
-# Regex arguments need sudo >= 1.9.10.
-${SETUP_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl ^(start|stop|enable|disable) kvs-cam(@cam)?[0-9]{2}\\.service\$, \\
-    /usr/bin/systemctl ^(start|stop) kvs-live@cam[0-9]{2}\\.service\$, \\
-    ${VMS_HOME}/adapter/bin/provision-camera.sh ^cam-[0-9]{2} cam[0-9]{2}( no-start)?\$
+# Regex arguments need sudo >= 1.9.10. Camera IDs run cam-01 ... cam-9999 (DEALER-PANEL-PLAN.md D11).
+${SETUP_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl ^(start|stop|enable|disable) kvs-cam(@cam[0-9]{2,4}|[0-9]{2})\\.service\$, \\
+    /usr/bin/systemctl ^(start|stop) kvs-live@cam[0-9]{2,4}\\.service\$, \\
+    ${VMS_HOME}/adapter/bin/provision-camera.sh ^cam-[0-9]{2,4} cam[0-9]{2,4}( no-start)?\$
 EOF
 /usr/sbin/visudo -qcf "$TMP" || die "the generated sudo rule doesn't parse -- not installed"
 if ! as_root cmp -s "$TMP" /etc/sudoers.d/020_vms-adapter; then

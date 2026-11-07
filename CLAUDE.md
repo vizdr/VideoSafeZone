@@ -117,6 +117,7 @@ bash cloud/provision.sh directory --dry-run       # the directory API /directory
 bash cloud/provision.sh portal --dry-run          # the dealer portal's registry read for vsz-directory-api
 bash cloud/provision.sh adapters --dry-run        # Cloud IDs' key, retained configs, the IoT rule for last seen
 bash cloud/adapter-identity.sh pending            # a new adapter's AWS identity: the owner's script (D15 amended)
+bash cloud/provision.sh cameras --dry-run         # adding cameras from the web page: tables, IoT rules, adapter-cameras
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -400,7 +401,11 @@ row — both GUIs, `list-cameras`, the agent (all but stop/live-stop), the outag
 (through its registry cache), the event watcher, `sync_mediamtx_paths.py` (no path, not in
 its cache), `rematch_cameras.py`, `codec_caps.py` — and every route or Lambda that changes a
 camera answers 409 for one. Unregister needs `systemctl disable`, which the sudo rule allows
-since #80. A new reader of the table must skip it too.
+since #80. A new reader of the table must skip it too. **Each Pi acts only on its own rows**
+(`DEALER-PANEL-PLAN.md` D12): `camera_control.is_mine(row)` — `adapterId` is this Pi's Thing, or none
+on a Pi with `ADOPT_UNSTAMPED_ROWS=yes`, and never a row with `releasedFrom` — and `acts_on(row)`
+(mine and not unregistered) filter the same readers; another adapter's camera gets 409 from the
+admin GUI and is ignored by the agent, Stop aside. A new reader filters with `acts_on`.
 
 **Whose camera it is: `adapterId`** — the IoT Thing that serves it, written by the admin GUI at
 registration and stamped by `rematch_cameras.py` on the Pi with `ADOPT_UNSTAMPED_ROWS=yes`. Every
@@ -464,7 +469,9 @@ call again from the database. A plan's price is computed twice, by the page for 
 tested against `tests/fixtures/pricing-cases.json`: change one, change both.
 
 `adapter/onvif-admin/` — a small local Flask app, LAN-only, no login, run directly on the
-Pi. It exists because **WS-Discovery is UDP multicast and only works from a process on
+Pi. (Registration itself lives in `adapter/camera_registration.py`, shared with the agent, which
+registers a camera the web page's Add cameras asks for — `DEALER-PANEL-PLAN.md` D16. Camera IDs are
+allocated, `cam-01` … `cam-9999`, and claimed before anything is made, D11.) It exists because **WS-Discovery is UDP multicast and only works from a process on
 the camera's own LAN segment** — the cloud client and Lambda structurally cannot reach it.
 It does discovery (`adapter/onvif_discovery.py`, shared with the `discover-onvif.py` CLI),
 one-click registration (adds the MediaMTX path live, provisions a `kvs-cam@.service`

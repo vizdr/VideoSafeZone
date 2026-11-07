@@ -27,7 +27,7 @@ const fake = vi.hoisted(() => {
 });
 vi.mock("../src/api", () => ({
   endpoints: fake.endpoints,
-  session: { signedIn: true, username: "demo", onChange: () => () => {} },
+  session: { signedIn: true, username: "demo", claims: {}, onChange: () => () => {} },
 }));
 
 import {

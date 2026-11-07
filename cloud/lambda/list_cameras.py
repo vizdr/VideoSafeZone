@@ -203,6 +203,9 @@ def lambda_handler(event, context):
                     "recordQualityOptions": record_quality_options(i),
                     # "control" or "view" (a camera shared with the caller to watch, D18).
                     "access": tenant_access(event, i) or "control",
+                    # The adapter that serves it (D4): the page groups by adapter and asks it to
+                    # remove the camera (D16, adapter-cameras).
+                    "adapterId": i.get("adapterId"),
                 }
                 for i in items
             ),

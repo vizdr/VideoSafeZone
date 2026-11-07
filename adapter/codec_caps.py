@@ -158,7 +158,7 @@ def refresh(table, camera_ids=None, write: bool = True, log=print) -> dict:
     """Refresh every registry row (or the given ones). Returns {cameraId: status}."""
     # Unregistered cameras are skipped: nothing on this Pi pulls them any more, and asking a
     # camera that may be gone only costs timeouts (camera_control.is_unregistered).
-    items = [i for i in table.scan()["Items"] if not camera_control.is_unregistered(i)]
+    items = [i for i in table.scan()["Items"] if camera_control.acts_on(i)]
     done = {}
     for item in sorted(items, key=lambda i: i["cameraId"]):
         if camera_ids and item["cameraId"] not in camera_ids:

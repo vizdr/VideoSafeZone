@@ -10,6 +10,8 @@ import os
 import subprocess
 import sys
 
+import config
+
 from onvif import ONVIFCamera
 
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
@@ -71,6 +73,25 @@ def is_unregistered(row: dict) -> bool:
     # supervisor, the event watcher, the MediaMTX path sync, rematch_cameras.py, codec_caps.py,
     # and agent.py (everything but stop).
     return bool(row.get("unregisteredAt"))
+
+
+def is_mine(row: dict) -> bool:
+    # Whether this Pi serves the camera (DEALER-PANEL-PLAN.md D12): the registry is one table for
+    # every adapter, and a Pi must never add a MediaMTX path for, subscribe to the events of, or
+    # start another Pi's camera -- its address is on another LAN. A row says whose it is in
+    # `adapterId` (the Thing name, from adapter.env). A row without one is adopted only by a Pi
+    # whose adapter.env says ADOPT_UNSTAMPED_ROWS=yes (adapter-01, rematch_cameras.adopt_unstamped
+    # stamps it), and never once it was released from an adapter (`releasedFrom`, D15).
+    owner = row.get("adapterId")
+    if owner:
+        return owner == config.THING_NAME
+    return bool(config.ADOPT_UNSTAMPED_ROWS) and not row.get("releasedFrom")
+
+
+def acts_on(row: dict) -> bool:
+    # A camera this Pi acts on: its own (is_mine), and not unregistered. Every reader that acts on
+    # cameras filters with this; stopping a producer stays possible on any camera with a unit here.
+    return is_mine(row) and not is_unregistered(row)
 
 
 def has_producer(camera_id: str) -> bool:

@@ -11,7 +11,7 @@ import type { Camera, ScheduleEntry } from "../src/api/types";
 const fake = vi.hoisted(() => ({ endpoints: { setCameraSettings: vi.fn() } }));
 vi.mock("../src/api", () => ({
   endpoints: fake.endpoints,
-  session: { signedIn: true, username: "demo", onChange: () => () => {} },
+  session: { signedIn: true, username: "demo", claims: {}, onChange: () => () => {} },
 }));
 
 import {

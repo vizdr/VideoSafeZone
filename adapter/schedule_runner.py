@@ -89,7 +89,7 @@ def fetch_schedules() -> dict:
             break
         kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
     return {i["cameraId"]: i["schedule"] for i in items
-            if i.get("schedule") and not camera_control.is_unregistered(i)}
+            if i.get("schedule") and camera_control.acts_on(i)}
 
 
 def load_schedules(now: dt.datetime) -> dict:

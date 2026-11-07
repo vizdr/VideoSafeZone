@@ -15,7 +15,7 @@
 # KVS_STREAM and LIVE=1 -- still works.)
 set -e
 if [ -n "${LIVE_OF:-}" ]; then
-  [[ "$LIVE_OF" =~ ^cam[0-9]{2}$ ]] || { echo "stream-channel: invalid LIVE_OF '$LIVE_OF'" >&2; exit 1; }
+  [[ "$LIVE_OF" =~ ^cam[0-9]{2,4}$ ]] || { echo "stream-channel: invalid LIVE_OF '$LIVE_OF'" >&2; exit 1; }
   CAMERA_ID="cam-${LIVE_OF#cam}"
   MEDIAMTX_PATH="${LIVE_OF}_live"          # replaced below by the path stream-codec.py reads
   KVS_STREAM="${CAMERA_ID}-live"

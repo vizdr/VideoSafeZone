@@ -880,6 +880,27 @@ refuses to register a new camera and says why; re-registering one that is there 
 **Lost or stolen:** System → Adapters → *Revoke*, then deactivate its certificate:
 `bash cloud/adapter-identity.sh revoke adapter-02`.
 
+### Adding cameras from the web page
+
+A customer adds cameras through their adapter (`DEALER-PANEL-PLAN.md` Phase 7, D16): the page asks
+the adapter over its own MQTT session to look on its network and to register the camera picked.
+In this order, once:
+
+```bash
+bash cloud/deploy.sh lambda list-cameras          # each camera's adapter, for Remove and grouping
+bash cloud/deploy.sh lambda publish-cmd           # each command to the camera's own adapter
+bash cloud/provision.sh cameras --dry-run         # what it would add, changing nothing
+bash cloud/provision.sh cameras                   # tables adapter-discovery and camera-requests, the IoT
+                                                  # rules filling them, Lambda adapter-cameras on /adapters
+systemctl --user restart kvs-agent onvif-admin    # on each adapter's Pi: discover, register, unregister
+bash cloud/deploy.sh page                         # Add cameras, Remove camera in Settings
+```
+
+`provision.sh cameras` checks itself: `/adapters` answers the demo holder for `adapter-01`, and
+"no such adapter" to the demo dealer. New camera IDs are allocated (`cam-06`, …, up to `cam-9999`);
+from `cam-100` on, the sudo rule must allow the longer names — `bash setup/setup-system.sh` once
+installs it.
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

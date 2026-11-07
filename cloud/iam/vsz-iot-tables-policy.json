@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "StoreScansAndCameraRequestProgress",
+    "Effect": "Allow",
+    "Action": "dynamodb:PutItem",
+    "Resource": [
+      "arn:aws:dynamodb:eu-central-1:596633517506:table/adapter-discovery",
+      "arn:aws:dynamodb:eu-central-1:596633517506:table/camera-requests"
+    ]
+  }]
+}

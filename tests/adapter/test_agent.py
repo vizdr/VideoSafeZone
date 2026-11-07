@@ -140,6 +140,23 @@ def test_unknown_cameras_and_actions_do_nothing(world, msg):
     assert sudo(w.system) == [] and w.conn.published == []
 
 
+@pytest.mark.parametrize("owner", [{"adapterId": "adapter-02"}, {"releasedFrom": "test-thing"}])
+@pytest.mark.parametrize("action", ["start", "live", "ir"])
+def test_another_adapters_camera_is_ignored(world, owner, action):
+    """DEALER-PANEL-PLAN.md D12: its producer, live view and IR are another Pi's (or nobody's)."""
+    w = world([*ROWS, {"cameraId": "cam-07", "mode": "passthrough", "onvifHost": "192.0.2.17", **owner}],
+              producers=("cam-01", "cam-02", "cam-03", "cam-05", "cam-07"))
+    send(action=action, camera="cam-07", mode="ON")
+    assert sudo(w.system) == [] and w.conn.published == []
+
+
+def test_a_released_cameras_producer_can_still_be_stopped(world):
+    w = world([*ROWS, {"cameraId": "cam-07", "mode": "passthrough", "releasedFrom": "test-thing"}],
+              producers=("cam-01", "cam-02", "cam-03", "cam-05", "cam-07"))
+    send(action="stop", camera="cam-07")
+    assert sudo(w.system) == [["sudo", "systemctl", "stop", "kvs-cam@cam07.service"]]
+
+
 # --- Live view ---------------------------------------------------------------------------------
 
 def _deadline(camera_path):
@@ -286,10 +303,13 @@ def test_importing_the_agent_connects_nothing():
 
 # --- the activation message (DEALER-PANEL-PLAN.md Phase 6.3) -----------------------------------------
 
-def test_the_retained_config_tells_the_admin_gui_whether_the_adapter_is_activated(capsys):
+def test_the_retained_config_tells_the_admin_gui_whether_the_adapter_is_activated(capsys, monkeypatch):
+    stops = []                       # "not activated" also stops released cameras (tested below)
+    monkeypatch.setattr(agent, "threading", ModuleShim(agent.threading, Thread=SyncThread))
+    monkeypatch.setattr(agent, "stop_released_producers", lambda: stops.append(1))
     assert activation.registration_refusal().startswith("this adapter hasn't heard from the cloud")
     agent.on_config(CONFIG, b'{"activated": false, "at": "2026-11-07T20:00:00Z"}')
-    assert "isn't activated" in activation.registration_refusal()
+    assert "isn't activated" in activation.registration_refusal() and stops == [1]
     agent.on_config(CONFIG, b'{"activated": true, "at": "2026-11-07T20:05:00Z"}')
     assert activation.registration_refusal() is None
     assert activation.load()["at"] == "2026-11-07T20:05:00Z"
@@ -321,3 +341,203 @@ def test_ff91_a_session_aws_discarded_gets_its_subscriptions_back():
     assert conn.resubscribed == 1
     agent.on_connection_resumed(conn, mqtt.ConnectReturnCode.ACCEPTED, True)   # kept: nothing to renew
     assert conn.resubscribed == 1
+
+
+# --- adding and removing cameras from the web page (DEALER-PANEL-PLAN.md Phase 7.3, D16) -------------
+
+import camera_registration  # noqa: E402
+import onvif_discovery  # noqa: E402
+from fakes import FakeTable  # noqa: E402
+
+DISCOVERY = "adapter/test-thing/discovery"
+REGISTRATION = "adapter/test-thing/registration"
+REF = {k: f"urn:uuid:00000000-0000-0000-0000-0000000000{k}" for k in ("a2", "b5", "c9", "d0")}
+
+
+class SyncThread:
+    """threading.Thread that runs at start(), so a test sees what the command did."""
+    def __init__(self, target, args=(), daemon=None):
+        self.target, self.args = target, args
+
+    def start(self):
+        self.target(*self.args)
+
+
+class Found:
+    """A device as WS-Discovery returns it."""
+    def __init__(self, ref, host, name=None):
+        self.ref, self.host, self.name = ref, host, name
+
+    def getXAddrs(self):  # noqa: N802 -- WSDiscovery's names
+        return [f"http://{self.host}:80/onvif/device_service"]
+
+    def getEPR(self):  # noqa: N802
+        return self.ref
+
+    def getScopes(self):  # noqa: N802
+        return ([f"onvif://www.onvif.org/name/{self.name}"] if self.name else []) + ["onvif://www.onvif.org/hardware/IPC_X"]
+
+
+CAMERA_ROWS = [
+    {"cameraId": "cam-02", "mode": "passthrough", "onvifHost": "192.0.2.12", "onvifEndpointRef": REF["a2"], "displayName": "Door"},
+    {"cameraId": "cam-05", "mode": "passthrough", "onvifHost": "192.0.2.15", "onvifEndpointRef": REF["b5"], "unregisteredAt": UNREG},
+    {"cameraId": "cam-09", "mode": "passthrough", "onvifHost": "192.0.2.19", "onvifEndpointRef": REF["c9"], "adapterId": "adapter-99"},
+]
+DETAILS = {"host": "192.0.2.20", "port": 80, "stream_uri": "rtsp://192.0.2.20:554/profile0", "has_ir_control": True,
+           "audio": None, "streams": [
+               {"name": "sub", "uri": "rtsp://192.0.2.20:554/sub", "width": 640, "height": 360, "fpsChoices": [10, 15], "audio": None},
+               {"name": "main", "uri": "rtsp://192.0.2.20:554/main", "width": 2560, "height": 1440, "fpsChoices": [15, 20],
+                "audio": {"encoding": "G711"}}]}
+
+
+@pytest.fixture
+def web(world, monkeypatch):
+    """The agent with the registry above, a camera-requests table, and commands run synchronously."""
+    def install(requests=(), found=(), details=DETAILS):
+        w = world(rows=CAMERA_ROWS, producers=("cam-02",))
+        w.requests = FakeTable(requests, hash_key="requestId")
+        w.table.session.tables["camera-requests"] = w.requests
+        monkeypatch.setattr(agent, "threading", ModuleShim(agent.threading, Thread=SyncThread))
+        monkeypatch.setattr(onvif_discovery, "scan", lambda timeout=4: list(found))
+        w.enriched = []
+
+        def enrich(xaddr, user, password):
+            w.enriched.append((xaddr, user, password))
+            if isinstance(details, Exception):
+                raise details
+            return details
+        monkeypatch.setattr(onvif_discovery, "enrich_sync", enrich)
+        w.registered = []
+
+        def register(body, env):
+            w.registered.append((body, env))
+            return w.answer
+        w.answer = ({"cameraId": "cam-10", "kvsStreamArn": "arn"}, 201)
+        monkeypatch.setattr(camera_registration, "register", register)
+        w.sent = lambda topic: [p[1] for p in w.conn.published if p[0] == topic]
+        return w
+    return install
+
+
+def test_discovery_publishes_each_device_marked_against_the_registry(web):
+    w = web(found=[Found(REF["a2"], "192.0.2.12", "Door_cam"), Found(REF["b5"], "192.0.2.15"),
+                   Found(REF["c9"], "192.0.2.19"), Found(REF["d0"], "192.0.2.20", "New%20one")])
+    agent.on_message(CMD, json.dumps({"action": "discover", "requestId": "1234abcd"}).encode())
+    [out] = w.sent(DISCOVERY)
+    assert out["requestId"] == "1234abcd" and out["at"].endswith("Z") and "error" not in out
+    by_ref = {d["endpointRef"]: d for d in out["devices"]}
+    assert by_ref[REF["a2"]] | {} == {"endpointRef": REF["a2"], "xaddr": "http://192.0.2.12:80/onvif/device_service",
+                                      "host": "192.0.2.12", "port": 80, "name": "Door cam", "hardware": "IPC X",
+                                      "state": "added", "cameraId": "cam-02", "displayName": "Door"}
+    assert (by_ref[REF["b5"]]["state"], by_ref[REF["b5"]]["cameraId"]) == ("removed", "cam-05")
+    assert by_ref[REF["c9"]]["state"] == "elsewhere" and "cameraId" not in by_ref[REF["c9"]]   # another customer's ID stays theirs
+    assert (by_ref[REF["d0"]]["state"], by_ref[REF["d0"]]["name"]) == (None, "New one")
+
+
+def test_a_failed_scan_is_reported_to_the_waiting_page(web, monkeypatch):
+    w = web()
+    monkeypatch.setattr(onvif_discovery, "scan", lambda timeout=4: (_ for _ in ()).throw(OSError("no multicast")))
+    agent.on_message(CMD, json.dumps({"action": "discover", "requestId": "1234abcd"}).encode())
+    assert w.sent(DISCOVERY)[0]["error"] == "OSError: no multicast"
+
+
+REQUEST = {"requestId": "5678efab-0000-4000-8000-000000000001", "thing": "test-thing", "xaddr": "http://192.0.2.20:80/onvif/device_service",
+           "endpointRef": REF["d0"], "user": "admin", "password": "s3cret-pw", "displayName": "Yard"}
+
+
+def test_a_request_is_registered_as_the_admin_gui_would_and_the_password_never_travels(web):
+    w = web(requests=[REQUEST])
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert [m["status"] for m in w.sent(REGISTRATION)] == ["registering", "done"]
+    assert w.sent(REGISTRATION)[1]["cameraId"] == "cam-10"
+    assert w.enriched == [(REQUEST["xaddr"], "admin", "s3cret-pw")]
+    [(body, env)] = w.registered
+    assert body == {"host": "192.0.2.20", "port": 80, "user": "admin", "password": "s3cret-pw",
+                    "streamUri": "rtsp://192.0.2.20:554/main", "hasIrControl": True, "endpointRef": REF["d0"],
+                    "audioCapable": True, "fps": 15, "displayName": "Yard"}          # the largest stream; 10 isn't offered
+    assert env.table is w.table and env.provision is camera_registration.provision
+    assert "s3cret-pw" not in json.dumps(w.conn.published)                         # in no MQTT message
+
+
+@pytest.mark.parametrize("request_row, error", [
+    ({**REQUEST, "thing": "adapter-99"}, "no such request for this adapter"),
+    ({**REQUEST, "requestId": "other"}, "no such request for this adapter"),
+])
+def test_a_request_that_isnt_this_adapters_is_refused_untouched(web, request_row, error):
+    w = web(requests=[request_row])
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert w.sent(REGISTRATION) == [{"requestId": "5678efab-0000-4000-8000-000000000001", "status": "failed", "at": w.sent(REGISTRATION)[0]["at"],
+                                     "error": error}]
+    assert w.enriched == [] and w.registered == []
+
+
+def test_a_camera_removed_here_comes_back_with_its_id_and_an_added_one_is_refused(web):
+    w = web(requests=[{**REQUEST, "endpointRef": REF["b5"]}])
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert w.registered[0][0]["cameraId"] == "cam-05"                              # Re-register: as it was
+    w = web(requests=[{**REQUEST, "endpointRef": REF["a2"]}])
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert w.sent(REGISTRATION)[-1]["error"] == "this camera is added already, as cam-02" and w.registered == []
+
+
+def test_a_wrong_login_or_a_refused_registration_is_reported(web):
+    w = web(requests=[REQUEST], details=RuntimeError("401"))
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert w.sent(REGISTRATION)[-1]["error"] == "the camera didn't answer with that login (RuntimeError)"
+    w = web(requests=[REQUEST])
+    w.answer = ({"error": "this adapter isn't activated: activate it first"}, 409)
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert w.sent(REGISTRATION)[-1] | {"at": None} == {"requestId": "5678efab-0000-4000-8000-000000000001", "status": "failed", "at": None,
+                                                      "error": "this adapter isn't activated: activate it first"}
+
+
+@pytest.mark.parametrize("msg", [{"action": "discover"}, {"action": "register", "requestId": "../etc"}])
+def test_a_command_without_a_valid_request_id_is_ignored(web, msg):
+    w = web(requests=[REQUEST])
+    agent.on_message(CMD, json.dumps(msg).encode())
+    assert w.conn.published == []
+
+
+def test_unregister_from_the_page_is_the_admin_guis_and_only_for_this_adapters_cameras(web, monkeypatch):
+    w = web()
+    done = []
+    monkeypatch.setattr(camera_registration, "unregister",
+                        lambda table, camera, run=None: done.append((table, camera)) or ({"cameraId": camera}, 200))
+    agent.on_message(CMD, json.dumps({"action": "unregister", "camera": "cam-02"}).encode())
+    agent.on_message(CMD, json.dumps({"action": "unregister", "camera": "cam-09"}).encode())    # another adapter's
+    agent.on_message(CMD, json.dumps({"action": "unregister"}).encode())                       # never cam-01 by default
+    assert done == [(w.table, "cam-02")]
+    assert w.conn.states() == [{"camera": "cam-02", "unregistered": True}]
+
+
+def test_the_registration_body_follows_what_the_camera_offers():
+    req = {"xaddr": "http://192.0.2.30:8000/onvif/device_service", "user": "u", "password": "", "endpointRef": None}
+    no_media2 = {"stream_uri": "rtsp://192.0.2.30/0", "has_ir_control": False, "audio": {"encoding": "AAC"}, "streams": []}
+    assert camera_registration.body_from_discovery(req, no_media2) == {
+        "host": "192.0.2.30", "port": 8000, "user": "u", "password": "", "streamUri": "rtsp://192.0.2.30/0",
+        "hasIrControl": False, "endpointRef": None, "audioCapable": True}                # its own rate, no name
+    ten = {**DETAILS, "streams": [{**DETAILS["streams"][1], "fpsChoices": [10, 15, 25]}]}
+    assert camera_registration.body_from_discovery(req, ten)["fps"] == 10
+
+
+def test_scopes_give_a_devices_name_and_hardware():
+    scopes = ["onvif://www.onvif.org/type/video_encoder", "onvif://www.onvif.org/name/Front%20Gate",
+              "onvif://www.onvif.org/hardware/DS-2CD"]
+    assert camera_registration.scope_value(scopes, "name") == "Front Gate"
+    assert camera_registration.scope_value(scopes, "hardware") == "DS-2CD"
+    assert camera_registration.scope_value([], "name") is None
+
+
+def test_once_the_adapter_isnt_activated_released_cameras_stop_pushing(world, monkeypatch, capsys):
+    """After a release (D15) nobody with access would press Stop: the cost rule (guide §1.2) has the
+    agent stop every producer here for a camera that isn't this adapter's any more."""
+    released = {"cameraId": "cam-07", "mode": "passthrough", "onvifHost": "192.0.2.17", "releasedFrom": "test-thing"}
+    w = world(rows=ROWS[:3] + [released], producers=("cam-01", "cam-02", "cam-07"))
+    monkeypatch.setattr(agent, "threading", ModuleShim(agent.threading, Thread=SyncThread))
+    agent.on_config(CONFIG, b'{"activated": true}')
+    assert [c for c in w.system.calls if "stop" in c] == []
+    agent.on_config(CONFIG, b'{"activated": false}')
+    stops = [c for c in w.system.calls if c[:3] == ["sudo", "systemctl", "stop"]]
+    assert stops == [["sudo", "systemctl", "stop", "kvs-cam@cam07.service"],
+                     ["sudo", "systemctl", "stop", camera_control.live_unit_name("cam-07")]]   # cam-01..03 are this Pi's
+    assert "cam-07 isn't this adapter's any more" in capsys.readouterr().out

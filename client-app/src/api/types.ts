@@ -11,6 +11,10 @@ export interface DetectionTest {
 
 /** One camera from GET /cameras. Never carries a credential (no rtspUrl, no liveRtspUrl). */
 export interface Camera {
+  /** The adapter that serves it (DEALER-PANEL-PLAN.md D4); null for an administrator's own. */
+  adapterId?: string | null;
+  /** "control", or "view" for a camera shared with the caller to watch (DEALER-PANEL-PLAN.md D18). */
+  access?: "control" | "view";
   id: string;                                  // "cam-01": KVS stream, registry key, API field
   mode: "transcode" | "passthrough" | null;
   hasIrControl: boolean;
@@ -252,4 +256,19 @@ export interface CustomerPerson {
 export interface Address { line1?: string; line2?: string; city?: string; postcode?: string; country?: string }
 export interface DealerDetails {
   id: string; name: string; email: string | null; phone: string | null; address: Address | null; createdAt: string;
+}
+
+// --- adding cameras from the web page (DEALER-PANEL-PLAN.md Phase 7, D16) -----------------------------
+
+/** A device the adapter's scan found, marked against the registry: added here, removed here (adding
+ *  it brings it back), another adapter's, or new (null). */
+export interface FoundDevice {
+  endpointRef: string; xaddr: string | null; host: string | null; port: number | null;
+  name: string | null; hardware: string | null; state: "added" | "removed" | "elsewhere" | null;
+  cameraId?: string; displayName?: string | null;
+}
+export interface CameraScan { requestId: string; at: string; devices: FoundDevice[]; error?: string }
+export interface CameraRequest {
+  requestId: string; status: "sent" | "registering" | "done" | "failed";
+  cameraId?: string; error?: string; reactivated?: boolean;
 }

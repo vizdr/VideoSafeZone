@@ -30,6 +30,9 @@
 #   bash cloud/provision.sh adapters                  adapters' activation (DEALER-PANEL-PLAN.md Phase 6): the
 #                                                     Cloud ID key, the API's config publish and camera release,
 #                                                     the IoT rule for last seen, every adapter's config sent
+#   bash cloud/provision.sh cameras                   adding cameras from the web page (DEALER-PANEL-PLAN.md
+#                                                     Phase 7): tables adapter-discovery and camera-requests, the
+#                                                     IoT rules filling them, Lambda adapter-cameras on /adapters
 #   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
 #                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
 #                                                     on every function with the check, vsz-users beside
@@ -919,6 +922,113 @@ provision_adapters() {
   say "on each adapter's Pi, once: systemctl --user restart kvs-agent onvif-admin  (the agent then reads its config)"
 }
 
+# --- adding cameras from the web page (DEALER-PANEL-PLAN.md Phase 7.3, D16) --------------------------
+
+ensure_ttl() {      # ensure_ttl TABLE ATTRIBUTE -- DynamoDB deletes items whose ATTRIBUTE (epoch s) has passed
+  local now
+  now=$(aws dynamodb describe-time-to-live --table-name "$1" --query 'TimeToLiveDescription.TimeToLiveStatus' \
+        --output text 2>/dev/null || echo NONE)
+  if [ "$now" = ENABLED ] || [ "$now" = ENABLING ]; then say "table $1: items expire by $2 already"; return; fi
+  create "expiry of $1's items by $2" aws dynamodb update-time-to-live --table-name "$1" \
+    --time-to-live-specification "Enabled=true,AttributeName=$2"
+}
+
+ensure_iot_tables_role() {   # the role IoT rules use to write what adapters report into DynamoDB
+  if aws iam get-role --role-name vsz-iot-tables-role >/dev/null 2>&1; then
+    say "role vsz-iot-tables-role: exists, left as is"
+    ensure_inline_policy vsz-iot-tables-role tables vsz-iot-tables-policy.json
+    return
+  fi
+  create "role vsz-iot-tables-role (trust: cloud/iam/iot-tables-trust.json)" aws iam create-role \
+    --role-name vsz-iot-tables-role --assume-role-policy-document "file://$IAM_DIR/iot-tables-trust.json"
+  create "  its inline policy tables (cloud/iam/vsz-iot-tables-policy.json)" aws iam put-role-policy \
+    --role-name vsz-iot-tables-role --policy-name tables --policy-document "file://$IAM_DIR/vsz-iot-tables-policy.json"
+  [ "$DRY" -eq 1 ] || sleep 10            # a new role takes a moment before IoT may assume it
+}
+
+ensure_topic_rule() {        # ensure_topic_rule NAME FILE -- an IoT rule from cloud/iot/, made once
+  local name=$1 file="$VMS_HOME/cloud/iot/$2" i
+  [ -e "$file" ] || die "no $file"
+  if aws iot get-topic-rule --rule-name "$name" >/dev/null 2>&1; then say "IoT rule $name: exists, left as is"; return; fi
+  if [ "$DRY" -eq 1 ]; then say "would create IoT rule $name (cloud/iot/$2)"; return; fi
+  for i in 1 2 3 4 5 6; do
+    aws iot create-topic-rule --rule-name "$name" --topic-rule-payload "file://$file" 2>"$TMP/rule.err" && break
+    sleep 5
+  done
+  aws iot get-topic-rule --rule-name "$name" >/dev/null 2>&1 || die "IoT rule $name: $(cat "$TMP/rule.err")"
+  CHANGED=1
+  say "created IoT rule $name (cloud/iot/$2)"
+}
+
+provision_cameras() {
+  local rid url cmd_role
+  aws iam get-role --role-name KVSAdapterRole >/dev/null 2>&1 || die "no role KVSAdapterRole (the adapters' role)"
+  cmd_role=$(aws lambda get-function-configuration --function-name publish-cmd --query Role --output text)
+  cmd_role=${cmd_role##*/}
+  ensure_table adapter-discovery thing
+  if [ "$DRY" -eq 1 ] && ! aws dynamodb describe-table --table-name adapter-discovery >/dev/null 2>&1; then
+    say "would make adapter-discovery's items expire by ttl"
+  else ensure_ttl adapter-discovery ttl; fi
+  ensure_table camera-requests requestId
+  if [ "$DRY" -eq 1 ] && ! aws dynamodb describe-table --table-name camera-requests >/dev/null 2>&1; then
+    say "would make camera-requests's items expire by ttl"
+  else ensure_ttl camera-requests ttl; fi
+  ensure_iot_tables_role
+  ensure_topic_rule vsz_adapter_discovery vsz-adapter-discovery-rule.json
+  ensure_topic_rule vsz_camera_registration vsz-camera-registration-rule.json
+  ensure_inline_policy KVSAdapterRole camera-requests kvs-adapter-camera-requests-policy.json
+  ensure_inline_policy "$cmd_role" any-adapter-cmd publish-cmd-any-adapter-policy.json
+  ensure_role adapter-cameras-role adapter-cameras adapter-cameras-policy.json
+  ensure_function adapter-cameras adapter-cameras-role 256 10
+  rid=$(ensure_resource "/adapters/{proxy+}")
+  ensure_method "$rid" "/adapters/{proxy+}" ANY adapter-cameras
+  ensure_cors "$rid" "/adapters/{proxy+}" "GET,POST,OPTIONS"
+  deploy_stage cameras
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  # Done means verified through API Gateway: the preflight, the authorizer, the function and its
+  # table read as the demo holder, and "no such adapter" for the demo dealer.
+  url="https://$API.execute-api.$REGION.amazonaws.com/$STAGE/adapters/adapter-01/discovery"
+  local i
+  for i in 1 2 3 4 5 6; do
+    curl -s -o /dev/null -D "$TMP/h" -X OPTIONS "$url" -H "Origin: https://example.org" \
+      -H "Access-Control-Request-Method: GET" && grep -qi '^access-control-allow-origin: \*' "$TMP/h" && break
+    sleep 5
+  done
+  grep -qi '^access-control-allow-origin: \*' "$TMP/h" || die "OPTIONS /adapters/...: no CORS answer"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "$url")" = 401 ] || die "GET /adapters/... without a token: expected 401"
+  find_pool
+  python3 - "$url" "$DEMO_FILE" "$REGION" "$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
+      --query "UserPoolClients[?ClientName=='$CLIENT_NAME'].ClientId" --output text)" <<'PY' || die "adapter-cameras didn't answer as it should -- see above"
+import json, sys, urllib.error, urllib.request
+url, demo, region, client = sys.argv[1:5]
+passwords = dict(line.split() for line in open(demo) if line.strip())
+
+def token(who):
+    req = urllib.request.Request(f"https://cognito-idp.{region}.amazonaws.com/", data=json.dumps({
+        "AuthFlow": "USER_PASSWORD_AUTH", "ClientId": client,
+        "AuthParameters": {"USERNAME": who, "PASSWORD": passwords[who]}}).encode(),
+        headers={"Content-Type": "application/x-amz-json-1.1",
+                 "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"})
+    return json.load(urllib.request.urlopen(req, timeout=30))["AuthenticationResult"]["IdToken"]
+
+def ask(who):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": token(who)}), timeout=30)
+        return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+holder = ask("demo-holder@example.com")
+dealer = ask("demo-dealer@example.com")
+print(f"  demo-holder: {holder[0]} {holder[1]}")
+print(f"  demo-dealer: {dealer[0]} {dealer[1]}")
+ok = holder[0] == 200 or holder == (404, {"error": "no scan yet: ask for one"})
+sys.exit(0 if ok and dealer == (404, {"error": "no such adapter"}) else 1)
+PY
+  say "verified: /adapters answers its adapter's holder and no one else (CORS, authorizer, adapter-cameras, adapter-discovery)"
+  say "on each adapter's Pi, once: systemctl --user restart kvs-agent  (it then answers discover, register, unregister)"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -931,5 +1041,6 @@ case "${1:-}" in
   directory)       preflight; provision_directory ;;
   portal)          preflight; find_pool; provision_portal ;;
   adapters)        preflight; provision_adapters ;;
-  *) sed -n '2,36p' "$0"; exit 1 ;;
+  cameras)         preflight; provision_cameras ;;
+  *) sed -n '2,39p' "$0"; exit 1 ;;
 esac

@@ -1,0 +1,12 @@
+{
+  "sql": "SELECT requestId, status, at, cameraId, error, reactivated, topic(2) AS thing, floor(timestamp() / 1000) + 900 AS ttl FROM 'adapter/+/registration'",
+  "description": "A camera request's progress from its adapter, written over the request -- its password goes (DEALER-PANEL-PLAN.md D16)",
+  "awsIotSqlVersion": "2016-03-23",
+  "ruleDisabled": false,
+  "actions": [{
+    "dynamoDBv2": {
+      "roleArn": "arn:aws:iam::596633517506:role/vsz-iot-tables-role",
+      "putItem": {"tableName": "camera-requests"}
+    }
+  }]
+}

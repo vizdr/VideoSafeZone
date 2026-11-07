@@ -83,7 +83,9 @@ async function setLayout(id: LayoutId): Promise<void> {
       {{ layoutStatus.text }}</p>
 
     <p v-if="cameras.loaded && !cameras.cameras.length" class="muted" data-test="no-cameras">No cameras registered yet.
-      <RouterLink v-if="auth.role === 'customer'" :to="{ name: 'add-adapter' }">Add your Cloud Adapter</RouterLink></p>
+      <template v-if="auth.role === 'customer'">
+        <RouterLink :to="{ name: 'add-cameras' }" data-test="add-cameras">Add cameras</RouterLink> ·
+        <RouterLink :to="{ name: 'add-adapter' }">Add your Cloud Adapter</RouterLink></template></p>
     <div v-else class="grid">
       <LiveTile v-for="(t, i) in tiles" :key="t.cameraId ?? `empty-${i}`" :camera="cameras.byId(t.cameraId ?? undefined)"
                 :cell="t.cell" :selected="!!t.cameraId && t.cameraId === selected"

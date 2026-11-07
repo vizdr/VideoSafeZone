@@ -217,3 +217,13 @@ def test_outage_buffer_refuses_other_values(aws, secs):
 def test_outage_buffer_unregistered(aws):
     aws(set_camera_outage_buffer, CAMERAS)
     assert invoke(set_camera_outage_buffer, {"cameraId": "cam-05", "outageBufferSec": 0})[0] == 409
+
+
+def test_a_command_goes_to_the_cameras_own_adapter(aws):
+    """With several adapters, a command must reach the Pi that serves the camera (DEALER-PANEL-PLAN.md
+    D16, A5): the row's adapterId names it; a row without one keeps the old topic (above)."""
+    from botocore.stub import ANY
+    fake = aws(publish_cmd, cameras=CAMERAS + [{"cameraId": "cam-07", "mode": "passthrough", "onvifHost": "192.0.2.17",
+                                             "adapterId": "adapter-02"}])
+    fake.stub("iot-data").add_response("publish", {}, {"topic": "adapter/adapter-02/cmd", "qos": 1, "payload": ANY})
+    assert invoke(publish_cmd, {"action": "start", "camera": "cam-07"})[0] == 200

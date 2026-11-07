@@ -141,7 +141,12 @@ def test_ff36_failed_provisioning_rolls_the_path_back_with_delete(gui):
     assert status == 500 and "invalid camera id" in body["error"]
     assert [w[:2] for w in g.mtx.writes()] == [("POST", "/v3/config/paths/add/cam04"),
                                                 ("DELETE", "/v3/config/paths/delete/cam04")]
-    assert "cam04" not in g.mtx.conf and g.table.row("cam-04") is None
+    assert "cam04" not in g.mtx.conf
+    # The ID was claimed before the path (D11): the claim stays, unregistered -- skipped by every
+    # reader -- and abandoned; the device role can't delete a row (camera_registration.abandon_claim).
+    claim = g.table.row("cam-04")
+    assert claim["unregisteredAt"] and claim["abandonedAt"] and "registering" not in claim
+    assert set(claim) == {"cameraId", "adapterId", "unregisteredAt", "abandonedAt"}
 
 
 def test_an_existing_mediamtx_path_stops_registration_before_systemd(gui):

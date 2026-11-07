@@ -64,7 +64,7 @@ def fetch_registry():
     # An unregistered camera gets no path, and stays out of the cache, so an offline start
     # doesn't bring it back either.
     return [{"cameraId": i["cameraId"], **{k: (int(i[k]) if k == "onvifPort" else i[k]) for k in keep if k in i}}
-            for i in items if not camera_control.is_unregistered(i)]
+            for i in items if camera_control.acts_on(i)]
 
 
 def save_cache(cameras):

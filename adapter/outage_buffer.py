@@ -136,7 +136,7 @@ def _fetch_registry() -> dict:
     # An unregistered camera is left out, so it is disarmed here and unknown to the admin
     # GUI's status poll -- both through this one cache (camera_control.is_unregistered).
     return {i["cameraId"]: int(i.get("outageBufferSec", 0) or 0) for i in items
-            if not camera_control.is_unregistered(i)}
+            if camera_control.acts_on(i)}
 
 
 def registry_refresher(shared: dict, online_flag: dict):

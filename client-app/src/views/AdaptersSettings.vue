@@ -55,6 +55,8 @@ async function remove(a: AdapterSummary): Promise<void> {
             <td><span class="status" :class="{ active: a.connected }">{{ connection(a) }}</span></td>
             <td class="muted">{{ a.activation ? new Date(a.activation.activatedAt).toLocaleDateString() : "" }}</td>
             <td class="console-actions">
+              <RouterLink :to="{ name: 'add-cameras', params: { thing: a.thingName } }" class="p-button p-button-sm"
+                          data-test="add-cameras">Add cameras</RouterLink>
               <Button v-if="confirming !== a.id" size="small" severity="danger" variant="text" label="Remove"
                       @click="confirming = a.id" />
               <template v-else>

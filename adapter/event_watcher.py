@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 from aws_device_creds import get_session
-from camera_control import is_unregistered
+from camera_control import acts_on
 
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
 VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -107,7 +107,7 @@ def load_cameras():
     items = get_session(REGION).resource("dynamodb").Table("cameras").scan()["Items"]
     return {
         i["cameraId"]: i for i in items
-        if i.get("recordingMode") in MODE_TOPICS and i.get("onvifHost") and not is_unregistered(i)
+        if i.get("recordingMode") in MODE_TOPICS and i.get("onvifHost") and acts_on(i)
     }
 
 

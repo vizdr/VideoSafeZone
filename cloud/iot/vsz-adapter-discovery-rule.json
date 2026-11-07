@@ -1,0 +1,12 @@
+{
+  "sql": "SELECT requestId, at, devices, error, topic(2) AS thing, floor(timestamp() / 1000) + 900 AS ttl FROM 'adapter/+/discovery'",
+  "description": "What an adapter's scan found, for the web page's Add cameras (DEALER-PANEL-PLAN.md D16); the Thing from the topic",
+  "awsIotSqlVersion": "2016-03-23",
+  "ruleDisabled": false,
+  "actions": [{
+    "dynamoDBv2": {
+      "roleArn": "arn:aws:iam::596633517506:role/vsz-iot-tables-role",
+      "putItem": {"tableName": "adapter-discovery"}
+    }
+  }]
+}

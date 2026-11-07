@@ -20,9 +20,10 @@ built and tested, provisioned by the user (`provision.sh directory-db`), verifie
 FoundAndFixed.md #89). **Phase 3 done 2026-11-07**: the tenant check enforces and is verified,
 and `kvs-demo-api` accepts only `vsz-users`. **Phase 4 done 2026-11-07**: the directory API and the
 System console, deployed and verified by the user. **Phase 5 done 2026-11-07**: the dealer portal,
-deployed and verified by the user. **Phase 6 built 2026-11-07** (Cloud IDs and activation, with D15
-amended: the owner's script makes adapters' AWS identities), tested, not yet deployed. Next: its
-deploy and *Verify*, then Phase 7.
+deployed and verified by the user. **Phase 6 deployed 2026-11-07** (Cloud IDs and activation, with D15
+amended: the owner's script makes adapters' AWS identities); the activation flow itself is still to
+be tried (its *Verify*). **Phase 7 built 2026-11-07** (adding cameras from the web page), tested, not
+yet deployed. Next: its deploy and *Verify*, then Phase 8.
 
 ---
 
@@ -1298,6 +1299,15 @@ an SSH drop left the first one running unseen; the second took over at a clean p
   and write instead), no token renewal, the actions shown to a dealer, a wrong code left on the
   location step.
 
+*Deployed 2026-11-07* by the user (migration 002, both directory functions, `provision.sh adapters`,
+the Pi's agent and admin GUI restarted, the page). Checked read-only the same evening: the three
+functions are live = HEAD, migration 002 applied, `CLOUD_ID_KEY` set (64 characters), the policy
+`adapters` matches `cloud/iam/`, the IoT rule `vsz_adapter_presence` enabled with its permission;
+the directory recorded `adapter-01` connected at 20:56:02 UTC, three seconds after the agent's
+restart (presence works end to end); the agent logged the retained `activated: true`; the page on
+CloudFront carries the new build. Not yet tried: the activation flow (only `adapter-01` exists, no
+Cloud ID used) — the *Verify* above.
+
 ### Phase 7: Adding cameras from the web page (§4c D16, with D11 and D12)
 
 7.1 Registration moves out of `app.py` into `adapter/camera_registration.py`, used by the admin
@@ -1315,6 +1325,78 @@ routing by `adapterId`.
 ones marked; adding a camera (a spare, or one unregistered first in the admin GUI) makes it play in
 Live; the password appears in no log (CloudWatch, journal) and no MQTT message; with the Pi's
 agent stopped, the page reports the adapter offline instead of waiting forever.
+
+*Built 2026-11-07* (1419 offline pytest, 117 tests_db, 251 Vitest), again across two sessions of
+the same conversation after another SSH drop; the second took over at a clean point and reviewed
+the first's work before going on.
+- **7.1:** registration moved out of `app.py` into **`adapter/camera_registration.py`**
+  (`register(body, env)` → `(answer, status)`, with an `Env` of collaborators: the table, a KVS
+  client, provisioning, the wait for video, reading and recording detection), shared by the admin
+  GUI and the agent; behaviour unchanged — the admin tests passed with no test file touched. Its
+  collaborators (`provision`, `wait_for_flowing`, `read_detection`, `record_detection`) and
+  Unregister (`unregister`) moved with it; `app.py` keeps thin wrappers that look up its own `time`
+  and `subprocess` at call time, so its tests' fakes still apply.
+- **7.2, D12:** `camera_control.is_mine(row)` — `adapterId` is this Pi's Thing, or none with
+  `ADOPT_UNSTAMPED_ROWS` and no `releasedFrom` — and `acts_on(row)` (mine and not unregistered),
+  applied in `sync_mediamtx_paths` (and so rematch), `schedule_runner`, `event_watcher`,
+  `codec_caps` and the outage buffer's cache (and so thumbnails); the agent ignores another
+  adapter's camera but for Stop; the admin GUI lists only its own and answers 409 to every change of
+  another's (Stop stays), and the name route treats another adapter's camera as unknown.
+  `tests/adapter/test_foreign_rows.py`, `tests/admin/test_admin_adapters.py`.
+- **7.2, D11:** a new camera without an ID gets the next one past every adapter's
+  (`next_camera_id`; `cam-01` … `cam-9999`, the pattern widened to `^cam-\d{2,4}$` in the admin
+  GUI, `provision-camera.sh`, `stream-channel.sh` and the sudo rule in `setup-system.sh` — reinstalled
+  by re-running it, needed only from `cam-100`); the admin page no longer asks for an ID. **The ID is
+  claimed before anything is made** (`claim_camera_id`: a row of its own, marked unregistered so
+  every reader skips it, written with `attribute_not_exists`), and the camera's row is written over
+  the claim at the end. The first version claimed the ID only at the end, after the path, the unit
+  and the KVS stream: two registrations of one ID on one Pi would have had the loser rewrite the
+  winner's channel file, start its unit into the winner's stream and stop it again — found in
+  review before anything shipped. A failure after the claim leaves it abandoned (`abandonedAt`,
+  still unregistered): the device role may update rows but not delete them, and widening the role,
+  shared with the VMS card, isn't worth it; MediaMTX already holding the path is checked before the
+  claim, so the commonest failure leaves none. A typed free ID is still accepted.
+- **7.3:** the agent's commands **`discover`** (WS-Discovery, each device marked against the
+  registry: added here, removed here — adding it brings it back as it was —, another adapter's, or
+  new; another adapter's camera ID isn't shown), **`register`** (only a request ID travels; the
+  agent reads the request from `camera-requests`, publishes "registering" at once — the IoT rule
+  writes the whole item, so the password leaves the table as soon as the agent has it — asks the
+  camera with that login (`enrich_sync`), builds what the admin form would send
+  (`body_from_discovery`: the largest stream, 10 fps where offered, else 15, the IR and microphone
+  facts) and registers through `camera_registration`) and **`unregister`**; the long ones run in a
+  thread. Their answers go to `adapter/<thing>/discovery` and `…/registration`; IoT rules
+  `vsz_adapter_discovery` and `vsz_camera_registration` (explicit fields, the Thing from the topic,
+  `ttl` 15 minutes) store them in **`adapter-discovery`** and **`camera-requests`**. **Lambda
+  `adapter-cameras`** on `kvs-demo-api` `/adapters/{proxy+}`: `POST <thing>/discover`,
+  `GET <thing>/discovery`, `POST <thing>/cameras`, `GET <thing>/cameras/requests/<id>`,
+  `POST <thing>/cameras/<cameraId>/remove` (POST, not DELETE: the route's CORS stays GET and POST);
+  only for an adapter in the caller's `vsz_adapters` (or `*`), anyone else is told it doesn't exist;
+  no answer, error or log carries a request's login. **`publish-cmd`** sends each command to the
+  camera's own adapter (`adapter/<row.adapterId>/cmd`; a row without one keeps the old topic).
+  `list-cameras` returns `adapterId`. **The camera ID is allocated by whoever registers** — on the
+  Pi, in `camera_registration` — not by the Lambda as D16 step 3 said: the claim makes that safe,
+  and the Lambda then never writes the registry. **After a release** the agent, hearing
+  `activated: false`, stops the producers and live views of every camera on this Pi that isn't its
+  own any more: nobody with access would press Stop (the cost rule).
+- **7.4:** **Add cameras** (`#/cameras/add/:thing?`, from Live's empty state and Settings → Cloud
+  adapters): the adapter (picked when there is one) looks; the page polls for its own scan's answer
+  (a minute, then "is it online?", with when it was last seen); per camera a name and the ONVIF
+  login, sent once and not kept; progress until it is registered, then Live and Settings know it.
+  **Remove camera** in Settings → Camera, for whoever controls it on an account (not for a shared
+  camera, an administrator's own, or the USB camera): the adapter unregisters it; adding it again
+  brings it back with its recordings.
+- **Tests:** `tests/admin/test_admin_adapters.py` (27: D12 in the admin GUI; D11's allocation, a
+  claim taken meanwhile, a typed ID taken meanwhile touching nothing, the ID range, a claim skipped by
+  readers), `tests/adapter/test_foreign_rows.py` (11), `tests/adapter/test_agent.py` (+13: discovery
+  and its marks, a registration end to end with the password in no MQTT message, another adapter's
+  request, a removed camera brought back, a wrong login, unregister, released cameras stopping),
+  `tests/cloud/test_adapter_cameras.py` (24), `tests/cloud/test_command_lambdas.py` (+1: routing),
+  `client-app/tests/cameras-add.spec.ts` (13). Broken on purpose once each, turning red: no claim,
+  the first page only, every row mine, a released row adopted, Stop refused, no "registering"
+  report, the request in a report, another adapter's request accepted, anyone controlling any
+  adapter, the login in a status answer, `publish-cmd` back to one adapter, the password kept in the
+  form, any scan taken for this one, Remove offered for a shared camera, released cameras never
+  stopped.
 
 ### Phase 8: Billing seam (fakes)
 
@@ -1409,8 +1491,10 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 5: deployed (`deploy.sh lambda vsz-directory`, `lambda vsz-directory-api`, `provision.sh portal`, `deploy.sh page`) and verified by the user (2026-11-07)
 - [x] D15 amended: AWS identities by the owner's script, `cloud/adapter-identity.sh` (the user, 2026-11-07)
 - [x] Phase 6: Adapters — Cloud IDs, activation, release, last seen — built and tested (2026-11-07)
-- [ ] Phase 6: deployed (db-migrate 002, both directory functions, `provision.sh adapters`, the Pi's agent and admin GUI restarted, `deploy.sh page`) and its *Verify* recorded
-- [ ] Phase 7: Adding cameras from the web page (allocated IDs, per-Pi filtering)
+- [x] Phase 6: deployed (db-migrate 002, both directory functions, `provision.sh adapters`, the Pi's agent and admin GUI restarted, `deploy.sh page`), checked read-only (2026-11-07)
+- [ ] Phase 6: its *Verify* — the activation flow (a Cloud ID used, refused, released)
+- [x] Phase 7: Adding cameras from the web page (allocated IDs, per-Pi filtering) — built and tested (2026-11-07)
+- [ ] Phase 7: deployed (`deploy.sh lambda list-cameras`, `lambda publish-cmd`, `provision.sh cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page`) and its *Verify* recorded
 - [ ] Phase 8: Billing seam with fakes
 - [ ] Phase 9: Account page and additional users
 - [ ] Phase 10: A second adapter at another customer — spike, device isolation

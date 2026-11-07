@@ -34,6 +34,9 @@ export function makeRoutes(role: () => Role | null): RouteRecordRaw[] {
           meta: { roles: CUSTOMER_ROLES } },
         { path: "adapters/add", name: "add-adapter", component: () => import("./views/AddAdapterView.vue"),
           meta: { roles: CUSTOMER_ROLES } },
+        // Adding cameras through an adapter (DEALER-PANEL-PLAN.md D16).
+        { path: "cameras/add/:thing?", name: "add-cameras", component: () => import("./views/AddCamerasView.vue"),
+          meta: { roles: CUSTOMER_ROLES } },
         { path: "settings/:cameraId?/:section?", name: "settings", component: SettingsView, meta: cameras },
         { path: "account", name: "account", component: AccountView },   // DEALER-PANEL-PLAN.md D18
         {
