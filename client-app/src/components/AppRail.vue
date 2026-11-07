@@ -3,8 +3,8 @@ import { computed } from "vue";
 import { useRoute } from "vue-router";
 import { useAuthStore } from "../stores/auth";
 
-// Live, Events, Settings; Exit at the bottom (WEB-PANEL-PLAN.md §4.1). Audit logs and the other
-// Videoloft entries are left out on purpose (D8).
+// Live, Events, Settings; Account and Exit at the bottom (WEB-PANEL-PLAN.md §4.1,
+// DEALER-PANEL-PLAN.md D18). Audit logs and the other Videoloft entries are left out on purpose (D8).
 const items = [
   { name: "live", label: "Live", icon: "pi-video" },
   { name: "events", label: "Events", icon: "pi-history" },
@@ -36,6 +36,11 @@ function exit(): void {
       <span>{{ item.label }}</span>
     </RouterLink>
     <div class="spacer" />
+    <RouterLink :to="{ name: 'account' }" class="rail-item" :class="{ active: isActive('account') }"
+                :aria-current="isActive('account') ? 'page' : undefined">
+      <i class="pi pi-user" aria-hidden="true" />
+      <span>Account</span>
+    </RouterLink>
     <button type="button" class="rail-item" @click="exit">
       <i class="pi pi-sign-out" aria-hidden="true" />
       <span>Exit</span>

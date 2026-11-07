@@ -31,14 +31,17 @@ package_lambda() {    # package_lambda NAME ZIP -- a fresh package of this tree'
   (cd "$dir" && package_files "$name" | zip -qX "$zip" -@)
 }
 
-# The answer of vsz-db-admin to EVENT_FILE, pretty-printed; returns non-zero when it says
-# {"ok": false} or crashes. The event goes in a file so that a password never sits on a command line.
-invoke_db_admin() {   # invoke_db_admin EVENT_FILE
-  local out="$TMP/db-admin-answer.json" crashed
-  crashed=$(aws lambda invoke --function-name vsz-db-admin --cli-binary-format raw-in-base64-out \
-    --payload "fileb://$1" "$out" --query FunctionError --output text) ||
-    die "couldn't invoke vsz-db-admin"
-  [ "$crashed" = None ] || die "vsz-db-admin crashed ($crashed): $(cat "$out")"
+# The answer of a directory function (vsz-db-admin, vsz-directory) to EVENT_FILE, pretty-printed;
+# returns non-zero when it says {"ok": false} or crashes. The event goes in a file so that a
+# password never sits on a command line.
+invoke_lambda() {     # invoke_lambda NAME EVENT_FILE
+  local name=$1 out="$TMP/$1-answer.json" crashed
+  crashed=$(aws lambda invoke --function-name "$name" --cli-binary-format raw-in-base64-out \
+    --payload "fileb://$2" "$out" --query FunctionError --output text) ||
+    die "couldn't invoke $name"
+  [ "$crashed" = None ] || die "$name crashed ($crashed): $(cat "$out")"
   python3 -m json.tool "$out"
   python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("ok") else 1)' "$out"
 }
+
+invoke_db_admin() { invoke_lambda vsz-db-admin "$1"; }   # invoke_db_admin EVENT_FILE

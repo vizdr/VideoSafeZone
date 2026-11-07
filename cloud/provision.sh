@@ -15,6 +15,12 @@
 #                                                     Phase 1): pg-layer, security group vsz-db-client,
 #                                                     role and function vsz-db-admin in the VPC; then the
 #                                                     database's bootstrap (once), migrations, status
+#   bash cloud/provision.sh identity                  sign-in (DEALER-PANEL-PLAN.md Phase 2): function
+#                                                     vsz-directory in the VPC, user pool vsz-users with
+#                                                     it as the pre-token trigger, app client vsz-web
+#   bash cloud/provision.sh directory-seed EMAIL      the system administrator (EMAIL, invited by Cognito)
+#                                                     and the demo directory and accounts; then signs in
+#                                                     as each demo account and shows its claims
 #
 # deploy.sh replaces the code of functions that exist; this creates what doesn't exist yet -- and
 # only that. Every step looks first and leaves an existing resource as it is, so a second run
@@ -45,6 +51,10 @@ VPC_EXECUTION=arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRo
 DB_INSTANCE=database-coursera-iot            # shared with another project (DEALER-PANEL-PLAN.md §2)
 DB_NAME=videosafezone
 LAYER_DIR="$VMS_HOME/cloud/layers/vsz-pg"
+COGNITO_DIR="$VMS_HOME/cloud/cognito"
+POOL_NAME=vsz-users
+CLIENT_NAME=vsz-web
+DEMO_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/videosafezone/demo-accounts.txt"
 
 AWS="$(command -v aws || echo "$HOME/.local/bin/aws")"
 aws() { "$AWS" --region "$REGION" "$@"; }
@@ -358,34 +368,35 @@ ensure_db_ingress() { # ensure_db_ingress DB_SG CLIENT_SG -- the one rule added 
   say "added to rds-lambda-2 ($1): tcp 5432 from vsz-db-client ($2)"
 }
 
-ensure_db_admin_function() {   # SG SUBNETS HOST PORT -- vsz-db-admin, in the VPC, with the layer
-  local sg=$1 subnets=$2 host=$3 port=$4 name=vsz-db-admin conf i
+ensure_vpc_function() {   # NAME ROLE MEMORY TIMEOUT -- in the VPC, with the layer (db_network sets the rest)
+  local name=$1 role=$2 memory=$3 timeout=$4 conf i
   if conf=$(aws lambda get-function-configuration --function-name "$name" --output json 2>/dev/null); then
     say "function $name: exists, left as is (bash cloud/deploy.sh lambda $name updates its code)"
-    python3 - "$conf" "$LAYER_ARN" "$sg" <<'PY'
+    python3 - "$conf" "$LAYER_ARN" "$DB_SG" <<'PY'
 import json, sys
 conf, layer, sg = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+name = conf["FunctionName"]
 layers = [l["Arn"] for l in conf.get("Layers", [])]
 if layer != "(new)" and layer not in layers:
-    print(f"!! vsz-db-admin uses {layers or 'no layer'}, not {layer} -- to switch: aws lambda "
-          f"update-function-configuration --function-name vsz-db-admin --layers {layer}", file=sys.stderr)
+    print(f"!! {name} uses {layers or 'no layer'}, not {layer} -- to switch: aws lambda "
+          f"update-function-configuration --function-name {name} --layers {layer}", file=sys.stderr)
 if sg != "(new)" and sg not in conf.get("VpcConfig", {}).get("SecurityGroupIds", []):
-    print(f"!! vsz-db-admin isn't in the security group {sg}", file=sys.stderr)
+    print(f"!! {name} isn't in the security group {sg}", file=sys.stderr)
 PY
     return
   fi
   if [ "$DRY" -eq 1 ]; then
-    say "would create function $name: in the VPC (vsz-db-client; subnets $subnets), layer vsz-pg, 256 MB, 60 s, DB_HOST=$host"
+    say "would create function $name: in the VPC (vsz-db-client; subnets $DB_SUBNETS), layer vsz-pg, $memory MB, $timeout s"
     return
   fi
   package_lambda "$name" "$TMP/$name.zip"
   say "creating function $name in the VPC (a minute or two: Lambda attaches it to the subnets)"
   for i in $(seq 1 12); do      # a new role takes a few seconds before Lambda may assume it and use EC2
     if aws lambda create-function --function-name "$name" --runtime python3.13 --architectures arm64 \
-         --handler vsz_db_admin.lambda_handler --role "arn:aws:iam::$ACCOUNT:role/vsz-db-admin-role" \
-         --memory-size 256 --timeout 60 --zip-file "fileb://$TMP/$name.zip" --layers "$LAYER_ARN" \
-         --vpc-config "SubnetIds=$subnets,SecurityGroupIds=$sg" \
-         --environment "Variables={DB_HOST=$host,DB_PORT=$port,DB_NAME=$DB_NAME}" >/dev/null 2>"$TMP/err"; then
+         --handler "${name//-/_}.lambda_handler" --role "arn:aws:iam::$ACCOUNT:role/$role" \
+         --memory-size "$memory" --timeout "$timeout" --zip-file "fileb://$TMP/$name.zip" --layers "$LAYER_ARN" \
+         --vpc-config "SubnetIds=$DB_SUBNETS,SecurityGroupIds=$DB_SG" \
+         --environment "Variables={DB_HOST=$DB_HOST,DB_PORT=$DB_PORT,DB_NAME=$DB_NAME}" >/dev/null 2>"$TMP/err"; then
       break
     fi
     grep -qE "cannot be assumed|does not have permissions|CreateNetworkInterface" "$TMP/err" && [ "$i" -lt 12 ] ||
@@ -393,8 +404,34 @@ PY
     sleep 5
   done
   aws lambda wait function-active-v2 --function-name "$name"
-  # No reserved concurrency: the account's total is 10 and AWS keeps all 10 unreserved. One
-  # migration at a time is the function's own advisory lock instead.
+  # No reserved concurrency: the account's total is 10 and AWS keeps all 10 unreserved
+  # (DEALER-PANEL-PLAN.md D3, §9).
+}
+
+# The database's facts and the network every directory function shares: sets DB_HOST, DB_PORT,
+# DB_VPC, DB_SUBNETS, DB_RDS_SG; then the layer (LAYER_ARN), vsz-db-client (DB_SG) and its rule.
+db_network() {
+  local facts dbi iam dbsgs
+  facts=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" --query \
+    'DBInstances[0].[Endpoint.Address, Endpoint.Port, DBSubnetGroup.VpcId, DbiResourceId, IAMDatabaseAuthenticationEnabled]' \
+    --output text) || die "no RDS instance $DB_INSTANCE"
+  read -r DB_HOST DB_PORT DB_VPC dbi iam <<<"$facts"
+  DB_SUBNETS=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
+    --query 'DBInstances[0].DBSubnetGroup.Subnets[].SubnetIdentifier' --output text | tr '\t' ',')
+  dbsgs=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
+    --query 'DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' --output text)
+  [ "$iam" = True ] || die "IAM database authentication is off on $DB_INSTANCE -- DEALER-PANEL-PLAN.md Phase 0.3 first"
+  local f
+  for f in vsz-db-admin-policy.json vsz-directory-policy.json; do
+    grep -q "dbuser:$dbi/" "$IAM_DIR/$f" || die "cloud/iam/$f doesn't name $dbi, this instance's resource id"
+  done
+  DB_RDS_SG=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=rds-lambda-2" "Name=vpc-id,Values=$DB_VPC" \
+    --query 'SecurityGroups[0].GroupId' --output text)
+  grep -qw -- "$DB_RDS_SG" <<<"$dbsgs" || die "the security group rds-lambda-2 ($DB_RDS_SG) isn't attached to $DB_INSTANCE"
+  say "database: $DB_INSTANCE ($DB_HOST:$DB_PORT) in $DB_VPC; its group for Lambdas: rds-lambda-2 ($DB_RDS_SG)"
+  ensure_pg_layer
+  DB_SG=$(ensure_sg vsz-db-client "$DB_VPC" "VideoSafeZone functions that reach the directory database")
+  ensure_db_ingress "$DB_RDS_SG" "$DB_SG"
 }
 
 # Status first; only a database that isn't set up yet gets the bootstrap -- and only then is the
@@ -427,27 +464,9 @@ json.dump({"action": "bootstrap", "masterUser": s["username"], "masterPassword":
 }
 
 provision_directory_db() {
-  local facts host port vpc dbi iam dbsgs subnets rdssg sg
-  facts=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" --query \
-    'DBInstances[0].[Endpoint.Address, Endpoint.Port, DBSubnetGroup.VpcId, DbiResourceId, IAMDatabaseAuthenticationEnabled]' \
-    --output text) || die "no RDS instance $DB_INSTANCE"
-  read -r host port vpc dbi iam <<<"$facts"
-  subnets=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
-    --query 'DBInstances[0].DBSubnetGroup.Subnets[].SubnetIdentifier' --output text | tr '\t' ',')
-  dbsgs=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
-    --query 'DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' --output text)
-  [ "$iam" = True ] || die "IAM database authentication is off on $DB_INSTANCE -- DEALER-PANEL-PLAN.md Phase 0.3 first"
-  grep -q "dbuser:$dbi/vsz_migrator" "$IAM_DIR/vsz-db-admin-policy.json" ||
-    die "cloud/iam/vsz-db-admin-policy.json doesn't name $dbi, this instance's resource id"
-  rdssg=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=rds-lambda-2" "Name=vpc-id,Values=$vpc" \
-    --query 'SecurityGroups[0].GroupId' --output text)
-  grep -qw -- "$rdssg" <<<"$dbsgs" || die "the security group rds-lambda-2 ($rdssg) isn't attached to $DB_INSTANCE"
-  say "database: $DB_INSTANCE ($host:$port) in $vpc; its group for Lambdas: rds-lambda-2 ($rdssg)"
-  ensure_pg_layer
-  sg=$(ensure_sg vsz-db-client "$vpc" "VideoSafeZone functions that reach the directory database")
-  ensure_db_ingress "$rdssg" "$sg"
+  db_network
   ensure_role vsz-db-admin-role vsz-db-admin vsz-db-admin-policy.json "$VPC_EXECUTION"
-  ensure_db_admin_function "$sg" "$subnets" "$host" "$port"
+  ensure_vpc_function vsz-db-admin vsz-db-admin-role 256 60
   if [ "$DRY" -eq 1 ]; then
     say "would then: set the database up if it isn't (the master password from Secrets Manager, sent once), apply the migrations, show the status"
     say "dry run: nothing was changed"; return
@@ -460,11 +479,192 @@ provision_directory_db() {
   say "verified: vsz-db-admin reaches the database over verified TLS as vsz_migrator with an IAM token, and the migrations are applied"
 }
 
+# --- identity: the user pool, its client and its trigger (DEALER-PANEL-PLAN.md Phase 2, D1, D4) ------
+
+find_pool() {         # sets POOL_ID ("" when there is none) and POOL_ARN
+  POOL_ID=$(aws cognito-idp list-user-pools --max-results 60 --query "UserPools[?Name=='$POOL_NAME'].Id" \
+    --output text | sed 's/^None$//')
+  [ "$(wc -w <<<"$POOL_ID")" -le 1 ] || die "several user pools named $POOL_NAME: $POOL_ID -- won't guess"
+  POOL_ARN="arn:aws:cognito-idp:$REGION:$ACCOUNT:userpool/$POOL_ID"
+}
+
+ensure_user_pool() {  # from cloud/cognito/vsz-users-pool.json; an existing pool is left as it is
+  local want live
+  want=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["LambdaConfig"]["PreTokenGenerationConfig"]["LambdaArn"])' \
+    "$COGNITO_DIR/vsz-users-pool.json")
+  [ "$want" = "arn:aws:lambda:$REGION:$ACCOUNT:function:vsz-directory" ] ||
+    die "cloud/cognito/vsz-users-pool.json names another trigger: $want"
+  find_pool
+  if [ -n "$POOL_ID" ]; then
+    say "user pool $POOL_NAME: exists ($POOL_ID), left as is"
+    live=$(aws cognito-idp describe-user-pool --user-pool-id "$POOL_ID" \
+      --query 'UserPool.LambdaConfig.PreTokenGenerationConfig.LambdaArn' --output text)
+    [ "$live" = "$want" ] || warn "$POOL_NAME's pre-token trigger is $live, not vsz-directory"
+    return
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    say "would create user pool $POOL_NAME (cloud/cognito/vsz-users-pool.json): sign-in with the email address, accounts by invitation only, trigger vsz-directory, deletion protection"
+    POOL_ID="(new)"; return
+  fi
+  POOL_ID=$(aws cognito-idp create-user-pool --cli-input-json "file://$COGNITO_DIR/vsz-users-pool.json" \
+    --query UserPool.Id --output text)
+  POOL_ARN="arn:aws:cognito-idp:$REGION:$ACCOUNT:userpool/$POOL_ID"
+  say "created user pool $POOL_NAME ($POOL_ID)"
+}
+
+ensure_trigger_permission() {   # Cognito may invoke vsz-directory -- for this pool only
+  local policy
+  policy=$(aws lambda get-policy --function-name vsz-directory --query Policy --output text 2>/dev/null || true)
+  if [ "$POOL_ID" != "(new)" ] && grep -qF "$POOL_ARN" <<<"$policy"; then
+    say "vsz-directory: Cognito may invoke it for $POOL_NAME"; return
+  fi
+  if [ "$DRY" -eq 1 ]; then say "would let Cognito invoke vsz-directory, for $POOL_NAME only"; return; fi
+  aws lambda add-permission --function-name vsz-directory --statement-id "cognito-$POOL_NAME" \
+    --action lambda:InvokeFunction --principal cognito-idp.amazonaws.com \
+    --source-arn "$POOL_ARN" --source-account "$ACCOUNT" >/dev/null
+  say "let Cognito invoke vsz-directory, for $POOL_NAME ($POOL_ID) only"
+}
+
+ensure_pool_client() {          # sets CLIENT_ID; from cloud/cognito/vsz-web-client.json
+  CLIENT_ID=""
+  if [ "$POOL_ID" != "(new)" ]; then
+    CLIENT_ID=$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
+      --query "UserPoolClients[?ClientName=='$CLIENT_NAME'].ClientId" --output text | sed 's/^None$//')
+  fi
+  if [ -n "$CLIENT_ID" ]; then say "app client $CLIENT_NAME: exists ($CLIENT_ID), left as is"; return; fi
+  if [ "$DRY" -eq 1 ]; then
+    say "would create app client $CLIENT_NAME (cloud/cognito/vsz-web-client.json): no secret, 5-minute tokens"; return
+  fi
+  python3 -c 'import json, sys
+d = json.load(open(sys.argv[1])); d["UserPoolId"] = sys.argv[2]; json.dump(d, open(sys.argv[3], "w"))' \
+    "$COGNITO_DIR/vsz-web-client.json" "$POOL_ID" "$TMP/client.json"
+  CLIENT_ID=$(aws cognito-idp create-user-pool-client --cli-input-json "file://$TMP/client.json" \
+    --query UserPoolClient.ClientId --output text)
+  say "created app client $CLIENT_NAME ($CLIENT_ID)"
+}
+
+provision_identity() {
+  db_network
+  ensure_role vsz-directory-role vsz-directory vsz-directory-policy.json "$VPC_EXECUTION"
+  # Cognito waits 5 s for its trigger, cold start included. At 256 MB (a seventh of a vCPU) the
+  # first one took 4.26 s; memory buys CPU, so 1024 MB (FoundAndFixed.md #89).
+  ensure_vpc_function vsz-directory vsz-directory-role 1024 5
+  ensure_user_pool
+  ensure_trigger_permission
+  ensure_pool_client
+  if [ "$DRY" -eq 1 ]; then say "would then: ping the database through vsz-directory"; say "dry run: nothing was changed"; return; fi
+  printf '{"op": "ping", "actor": {"kind": "operator"}}\n' > "$TMP/ping-event.json"
+  invoke_lambda vsz-directory "$TMP/ping-event.json" || die "vsz-directory can't use the database -- see above"
+  say "user pool $POOL_NAME: $POOL_ID -- app client $CLIENT_NAME: $CLIENT_ID (client-app/src/config.ts takes them at Phase 3's switch)"
+  say "verified: vsz-directory reaches the database as vsz_app over verified TLS with an IAM token; Cognito may call it as $POOL_NAME's trigger"
+}
+
+# --- the demo directory (Phase 2.3) ---------------------------------------------------------------
+# The administrator is a real person: Cognito emails a temporary password. The demo accounts are
+# example.com addresses that receive nothing; each gets a random password, kept in DEMO_FILE
+# (0600) for sign-in-check.sh. demo-disabled and demo-suspended exist to be refused.
+DEMO_ACCOUNTS="demo-owner demo-dealer demo-holder demo-superadmin demo-user demo-disabled demo-suspended"
+
+ensure_cognito_user() {         # ensure_cognito_user EMAIL invite|demo -- prints the user's sub
+  local email=$1 mode=$2 sub
+  sub=$(aws cognito-idp admin-get-user --user-pool-id "$POOL_ID" --username "$email" \
+    --query "UserAttributes[?Name=='sub'].Value" --output text 2>/dev/null | sed 's/^None$//') || sub=""
+  if [ -n "$sub" ]; then say "  $email: in the pool already" >&2; echo "$sub"; return; fi
+  if [ "$mode" = invite ]; then
+    sub=$(aws cognito-idp admin-create-user --user-pool-id "$POOL_ID" --username "$email" \
+      --user-attributes "Name=email,Value=$email" Name=email_verified,Value=true --desired-delivery-mediums EMAIL \
+      --query "User.Attributes[?Name=='sub'].Value" --output text)
+    say "  $email: created -- Cognito emails a temporary password" >&2
+  else
+    sub=$(aws cognito-idp admin-create-user --user-pool-id "$POOL_ID" --username "$email" \
+      --user-attributes "Name=email,Value=$email" Name=email_verified,Value=true --message-action SUPPRESS \
+      --query "User.Attributes[?Name=='sub'].Value" --output text)
+    ( umask 077
+      python3 - "$POOL_ID" "$email" "$TMP/set-password.json" "$DEMO_FILE" <<'PY'
+import json, secrets, string, sys
+pool, email, request, demo = sys.argv[1:5]
+chars = string.ascii_letters + string.digits
+pw = [secrets.choice(string.ascii_uppercase), secrets.choice(string.ascii_lowercase), secrets.choice(string.digits)]
+pw += [secrets.choice(chars) for _ in range(13)]
+secrets.SystemRandom().shuffle(pw)
+pw = "".join(pw)
+json.dump({"UserPoolId": pool, "Username": email, "Password": pw, "Permanent": True}, open(request, "w"))
+lines = [l for l in open(demo).read().splitlines() if l and not l.startswith(email + " ")]
+open(demo, "w").write("\n".join(lines + [f"{email} {pw}"]) + "\n")
+PY
+    )
+    aws cognito-idp admin-set-user-password --cli-input-json "file://$TMP/set-password.json"
+    rm -f -- "$TMP/set-password.json"
+    say "  $email: created, its password in $DEMO_FILE" >&2
+  fi
+  echo "$sub"
+}
+
+provision_directory_seed() {
+  local admin=${1:-} name subs="{}" sub
+  [[ "$admin" == ?*@?*.?* ]] ||
+    die "usage: bash cloud/provision.sh directory-seed YOUR_EMAIL -- the system administrator; Cognito emails it a temporary password"
+  find_pool
+  [ -n "$POOL_ID" ] || die "no user pool $POOL_NAME: bash cloud/provision.sh identity first"
+  aws lambda get-function-configuration --function-name vsz-directory >/dev/null 2>&1 ||
+    die "no function vsz-directory: bash cloud/provision.sh identity first"
+  if [ "$DRY" -eq 1 ]; then
+    say "would create in $POOL_NAME: $admin (system administrator; Cognito emails a temporary password)"
+    say "would create the demo accounts, $(sed 's/\([a-z-]*\)/\1@example.com/g' <<<"$DEMO_ACCOUNTS"), passwords in $DEMO_FILE"
+    say "would then: seed the demo directory through vsz-directory, sign in as each demo account"
+    say "dry run: nothing was changed"; return
+  fi
+  mkdir -p "$(dirname "$DEMO_FILE")"; chmod 700 "$(dirname "$DEMO_FILE")"
+  touch "$DEMO_FILE"; chmod 600 "$DEMO_FILE"
+  say "accounts in $POOL_NAME:"
+  sub=$(ensure_cognito_user "$admin" invite)
+  subs=$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); d[sys.argv[2]] = sys.argv[3]; print(json.dumps(d))' "$subs" "$admin" "$sub")
+  for name in $DEMO_ACCOUNTS; do
+    sub=$(ensure_cognito_user "$name@example.com" demo)
+    subs=$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); d[sys.argv[2]] = sys.argv[3]; print(json.dumps(d))' "$subs" "$name@example.com" "$sub")
+  done
+  python3 - "$admin" "$subs" "$TMP/seed-event.json" <<'PY'
+import json, sys
+admin, subs, out = sys.argv[1], json.loads(sys.argv[2]), sys.argv[3]
+d = lambda name: f"{name}@example.com"
+spec = {
+    "users": [{"email": e, "sub": s, "status": "disabled" if e == d("demo-disabled") else "active"}
+              for e, s in subs.items()],
+    "platform": {"members": [{"email": admin, "role": "system_admin"},
+                             {"email": d("demo-owner"), "role": "system_owner"}]},
+    "dealers": [{
+        "name": "Demo dealer", "members": [{"email": d("demo-dealer"), "role": "dealer"}],
+        "customers": [
+            {"name": "Demo customer", "reference": "DEMO-1",
+             "members": [{"email": d("demo-holder"), "role": "customer"},
+                         {"email": d("demo-superadmin"), "role": "customer_admin"},
+                         {"email": d("demo-user"), "role": "customer_user"},
+                         {"email": d("demo-disabled"), "role": "customer_user"}],
+             "sites": [{"name": "Home", "timezone": "Europe/Berlin",
+                        "adapters": [{"thing": "adapter-01", "name": "Hall", "label": "The first Pi"}]}],
+             "shares": [{"email": d("demo-user"), "camera": "cam-03", "thing": "adapter-01"}]},
+            {"name": "Suspended demo customer", "status": "suspended",
+             "members": [{"email": d("demo-suspended"), "role": "customer"}]},
+        ]}],
+}
+json.dump({"op": "operator_seed", "actor": {"kind": "operator"}, "spec": spec}, open(out, "w"))
+PY
+  say "the demo directory:"
+  invoke_lambda vsz-directory "$TMP/seed-event.json" || die "the seed failed -- see above"
+  say "signing in as each demo account (demo-disabled and demo-suspended must be refused):"
+  for name in $DEMO_ACCOUNTS; do
+    bash "$VMS_HOME/cloud/sign-in-check.sh" "$name@example.com" || true
+  done
+  say "the administrator ($admin) signs in with the emailed temporary password and chooses a new one (the web page, Phase 3)"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
   thumbnails)      preflight; provision_thumbnails ;;
   pg-layer)        preflight; ensure_pg_layer; [ "$DRY" -eq 0 ] || say "dry run: nothing was changed" ;;
   directory-db)    preflight; provision_directory_db ;;
-  *) sed -n '2,17p' "$0"; exit 1 ;;
+  identity)        preflight; provision_identity ;;
+  directory-seed)  preflight; shift; provision_directory_seed "${1:-}" ;;
+  *) sed -n '2,23p' "$0"; exit 1 ;;
 esac

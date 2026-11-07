@@ -776,6 +776,22 @@ bash cloud/deploy.sh db-migrate --dry-run         # ... lists what would be appl
 bash cloud/deploy.sh db-migrate                   # ... and applies it, each file in one transaction
 ```
 
+### Sign-in for accounts and roles (user pool `vsz-users`)
+
+The web panel's accounts live in a user pool of this repository's own, `vsz-users`; the shared
+`kvs-demo-users` stays VMS's (`DEALER-PANEL-PLAN.md` D1). Its pre-token trigger, `vsz-directory`,
+puts each person's role into their ID token (D4). Once:
+
+```bash
+bash cloud/provision.sh identity --dry-run        # what it would create, changing nothing
+bash cloud/provision.sh identity                  # vsz-directory, the pool, its app client
+bash cloud/provision.sh directory-seed YOU@MAIL   # you as system administrator (a temporary password
+                                                  # by email), the demo directory and accounts
+bash cloud/sign-in-check.sh demo-holder@example.com   # any time: sign in, show the token's claims
+```
+
+The demo accounts' passwords are in `~/.local/state/videosafezone/demo-accounts.txt` (0600).
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

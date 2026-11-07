@@ -1,0 +1,13 @@
+{
+  "ClientName": "vsz-web",
+  "GenerateSecret": false,
+  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+  "IdTokenValidity": 5,
+  "AccessTokenValidity": 5,
+  "RefreshTokenValidity": 30,
+  "TokenValidityUnits": {"IdToken": "minutes", "AccessToken": "minutes", "RefreshToken": "days"},
+  "PreventUserExistenceErrors": "ENABLED",
+  "EnableTokenRevocation": true,
+  "ReadAttributes": ["email", "email_verified"],
+  "WriteAttributes": ["email"]
+}

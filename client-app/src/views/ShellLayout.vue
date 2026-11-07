@@ -25,6 +25,8 @@ onMounted(() => {
 });
 
 const onSettings = computed(() => route.name === "settings" || route.name === "settings-live");
+// The Account page is about the person, not a camera: no camera list beside it.
+const showCameras = computed(() => route.name !== "account");
 
 // One controller per camera, following the list (stores/players.ts).
 watch(() => cameras.cameras, list => players.sync(list), { immediate: true });
@@ -47,9 +49,9 @@ function select(id: string): void {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'no-cameras': !showCameras }">
     <AppRail />
-    <aside class="cameras-col">
+    <aside v-if="showCameras" class="cameras-col">
       <RouterLink v-if="onSettings" :to="{ name: 'settings-live' }" class="yours"
                   :class="{ active: route.name === 'settings-live' }">
         <i class="pi pi-th-large" aria-hidden="true" /> Live view <span>(yours)</span>

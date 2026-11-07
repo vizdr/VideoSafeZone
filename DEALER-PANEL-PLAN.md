@@ -15,7 +15,9 @@ the user's requirements, §4c), as proposed, with two changes from the user: the
 VideoSafeZone (D17), and the Account page has no Opt-ins for now (D18).
 **Progress:** Phase 0.1 (sign-up closed, #87 fixed) and 0.3 (deletion protection and IAM
 authentication on the database) done 2026-11-06, run by the user. **Phase 1 done 2026-11-07**:
-built and tested, provisioned by the user (`provision.sh directory-db`), verified. Next: Phase 2.
+built and tested, provisioned by the user (`provision.sh directory-db`), verified. **Phase 2 done
+2026-11-07**: provisioned by the user and verified, the trigger's cold start included (1.09 s,
+FoundAndFixed.md #89). Next: Phase 3.
 
 ---
 
@@ -945,6 +947,59 @@ ID move to `config.ts` only at Phase 3's switch.
 a disabled user and a user of a suspended customer get no token; with the trigger cold, sign-in
 finishes well inside Cognito's 5 seconds (measured and recorded here).
 
+*Built 2026-11-07* (1025 offline pytest, 42 tests_db, 135 Vitest; not provisioned):
+- **2.2** `cloud/lambda/vsz_directory.py`. As Cognito's pre-token trigger (event version 1): finds
+  the person by sub, at the first sign-in by verified email (linking the sub); refuses — raises,
+  which is how a trigger stops a sign-in — the unknown, the disabled, and anyone without an active
+  organisation; returns D4's claims; marks an invited person active at their first sign-in, and
+  takes a confirmed new email into the directory (unless another person here has it). As the
+  operator's tool: `ping`, `claims_for` (what an email would get, without signing in),
+  `operator_seed` (one transaction; everything found by its natural key first, so a second run
+  changes nothing). One connection while warm, replaced once if it drops; an SQL error isn't
+  retried. Its five database helpers are copies of `vsz-db-admin`'s, identical
+  (`test_lambda_twins`) — which is why `vsz-db-admin`'s `connect()` changed too (its connection's
+  name comes from the function's own), so that function needs `deploy.sh lambda vsz-db-admin`.
+  IAM: `cloud/iam/vsz-directory-policy.json`, `rds-db:connect` as `vsz_app` only.
+- **2.1** `cloud/cognito/vsz-users-pool.json` and `vsz-web-client.json`, the configuration as
+  files beside `cloud/iam/` (Lite tier: ID-token claims work there; password at least 10
+  characters with upper and lower case and a number; invitation and code emails say
+  VideoSafeZone). `provision.sh identity`: the function in the VPC (256 MB, 5 s — Cognito's
+  limit for a trigger), the pool with it as trigger, Cognito's permission to invoke it for this
+  pool only, the client; then a `ping` through it. `directory-db` now shares the network part
+  with it (`db_network`, `ensure_vpc_function`); its dry run still finds everything in place.
+- **2.3** `provision.sh directory-seed YOUR_EMAIL`: you as `system_admin` (Cognito emails a
+  temporary password, valid 7 days), and the demo accounts at example.com — owner, dealer,
+  holder, Super Admin, user (shares `cam-03` "hall"), and two that must be refused (disabled;
+  holder of a suspended customer) — with random passwords in
+  `~/.local/state/videosafezone/demo-accounts.txt` (0600). Then the seed, then
+  `cloud/sign-in-check.sh` for each demo account: it signs in the way the page does and prints
+  the time taken and the `vsz_*` claims, or the refusal.
+- **2.4** `client-app/`: the sign-in page of D17 (rendered and looked at), the new-password and
+  forgotten-password steps, the Account page with its Account details tab (email and password,
+  each with Edit; no camera list beside it), Account on the rail above Exit. The session keeps the
+  access token for the account calls, and shows a refusal from the trigger in its own words.
+  Nothing is deployed: until Phase 3's switch the page still uses the old pool.
+- `tests_db/test_directory.py` (14): every role's claims on the real schema, the refusals, a
+  person in two accounts, the cap on shares, linking, first sign-in, a changed address, the seed
+  run twice. `tests/cloud/test_directory.py` (17): the trigger's answer and refusal, which events
+  are a first sign-in, operator-only operations, the transaction around the seed, reconnecting.
+
+*Provisioned 2026-11-07* (run by the user: `deploy.sh lambda vsz-db-admin`, `provision.sh
+identity`, `provision.sh directory-seed`), and verified:
+- Pool `vsz-users` (`eu-central-1_5QDHHWlPI`): Lite, accounts by invitation only, email sign-in,
+  deletion protection, trigger `vsz-directory` (V1_0); client `vsz-web` (`4g53lfqkkriopjntkgf240edte`):
+  no secret, ID and access tokens 5 minutes, refresh 30 days, user-existence errors hidden. 8 users:
+  the administrator (invited by email) and the 7 demo accounts. Both directory functions' live code
+  is this tree.
+- The demo sign-ins, through `cloud/sign-in-check.sh`: owner `system_owner` + the platform's id;
+  dealer `dealer` + the dealer's id; holder and Super Admin `customer` with `vsz_adapters`
+  `adapter-01`; the user `customer` with `vsz_cameras` `cam-03@adapter-01` only; the disabled
+  account and the suspended customer's holder **refused** by the trigger. Each in 0.34–0.43 s.
+- **Two defects found:** the trigger's only cold start took 4.26 s (init 284 ms + handler 3974 ms) at
+  256 MB, of the 5 s Cognito allows — the demo sign-ins had found it warm (FoundAndFixed.md #89:
+  1024 MB) and the refusal read "…account.." (#90). Both fixed and deployed the same day: the cold
+  start at 1024 MB took **1.09 s** (init 292 ms + handler 795 ms; 1.68 s end to end through
+  Cognito), warm runs 7 ms; the refusal ends in one full stop.
 ### Phase 3: Tenancy on the camera API
 
 3.1 `adapterId` on camera rows: admin GUI writes it at registration and re-registration;
@@ -1084,8 +1139,9 @@ of its own if the shared instance's availability becomes the limit.
 ## 9. To check before promising
 
 - The pre-token trigger's cold start in the VPC (layer import, IAM token, TLS connect, query) stays
-  well under Cognito's 5 seconds; if not, provisioned concurrency of 1 (a small fixed cost) or a
-  lighter path for the trigger.
+  well under Cognito's 5 seconds — **measured 2026-11-07: 4.26 s at 256 MB, 1.09 s at 1024 MB**
+  (FoundAndFixed.md #89). Provisioned concurrency isn't available in this account (the concurrency
+  note below); should it ever creep up, signing the IAM token without boto3 removes the biggest CPU cost.
 - What the instance does to sign-in during its maintenance window and minor-version upgrades.
 - `max_connections` on the micro instance against the other project's use — measured 79 (Phase 1);
   our roles are capped at 13.
@@ -1108,7 +1164,9 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 1: layer, `vsz-db-admin`, migration 001, `tests_db/` in CI — built and tested (2026-11-06)
 - [x] Phase 0.4: the master secret works; the instance's databases recorded (2026-11-07)
 - [x] Phase 1: provisioned (`provision.sh directory-db`, the user) and its *Verify* recorded (2026-11-07)
-- [ ] Phase 2: `vsz-users`, `vsz-directory` + trigger, seed, the sign-in page, Account details
+- [x] Phase 2: `vsz-users`, `vsz-directory` + trigger, seed, the sign-in page, Account details — built and tested (2026-11-07)
+- [x] Phase 2: provisioned (`provision.sh identity`, `directory-seed`, the user) and its *Verify* recorded (2026-11-07)
+- [x] Phase 2: the trigger at 1024 MB, a cold start measured: 1.09 s (FoundAndFixed.md #89, 2026-11-07)
 - [ ] Phase 3: `adapterId`, tenant checks report → enforce, pool switch
 - [ ] Phase 4: directory API, System console
 - [ ] Phase 5: Dealer portal

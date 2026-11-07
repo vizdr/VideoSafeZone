@@ -16,12 +16,12 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-88 entries, from the first build (2026-08-20) through the move onto a second Pi
+90 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
 found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
-planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07).
+planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -113,6 +113,8 @@ planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-
 | 86 | earlyoom killed the agent and two other services; systemd took it as a clean exit and left them down | systemd / platform | 2026-11-01 | fixed 2026-11-01 |
 | 87 | The user pool allowed self sign-up: anyone could make an account and reach every camera | Cognito / setup | 2026-11-06 | fixed 2026-11-06 |
 | 88 | tests_db passed on the Pi only because the shell exported AWS_REGION; CI failed them all | tests | 2026-11-07 | fixed 2026-11-07 |
+| 89 | The sign-in trigger's cold start took 4.26 s of the 5 s Cognito allows | Lambda / sign-in | 2026-11-07 | fixed 2026-11-07 |
+| 90 | A refused sign-in's message ended in ".." | Lambda / sign-in | 2026-11-07 | fixed 2026-11-07 |
 
 ### What they have in common
 
@@ -1633,3 +1635,42 @@ PostgreSQL 18 — CI's version; the Pi ran 17 — is confirmed by CI's next run.
 
 **The rule:** a test suite sets every environment value the code under test reads, and removes
 the operator's own. Passing on the machine that wrote it proves only that machine's shell.
+
+### #89 — The sign-in trigger's cold start took 4.26 s of the 5 s Cognito allows
+
+**Found:** 2026-11-07, measuring Phase 2 (`DEALER-PANEL-PLAN.md` §9 asked for it): `vsz-directory`'s
+CloudWatch REPORT lines show one cold start — init 284 ms, handler 3974 ms — beside warm runs of
+41 ms (median). **Referenced from:** `cloud/provision.sh` (`provision_identity`), the plan's D3 and §9.
+
+Cognito gives a trigger 5 seconds, cold start included, and refuses the sign-in when it runs out.
+The function was made with 256 MB, which in Lambda means about a seventh of a vCPU, and its first
+call does CPU-bound work: building boto3's RDS client (about 230 ms on one Pi core), importing
+pg8000 (120 ms), the TLS handshake, then RDS checking the IAM token. That cold run happened to be the
+`ping` after provisioning; the demo sign-ins that followed found the function warm (0.34–0.43 s end
+to end), so nothing failed — but a sign-in arriving at a cold function would have had 0.7 s to spare.
+
+**Fix:** 1024 MB, about four times the CPU, so the CPU-bound part shrinks accordingly. Cost stays
+negligible: a warm run takes some 40 ms. Provisioned concurrency would remove cold starts, but this
+account's total concurrency is 10, all of it kept unreserved. `provision.sh identity` now creates the
+function with 1024 MB; the existing one is changed by the operator with one command.
+
+**Verified** (2026-11-07, the memory raised by the operator): the next sign-in was a cold start —
+init 292 ms + handler 795 ms = **1087 ms**, against 4258 ms at 256 MB; 1.68 s end to end through
+Cognito (`cloud/sign-in-check.sh`). Warm runs 7 ms; 100 MB used of 1024.
+
+**The rule:** a function on a hard deadline is sized by its cold start, not its warm one.
+
+### #90 — A refused sign-in's message ended in ".."
+
+**Found:** 2026-11-07, in `provision.sh directory-seed`'s output: "This account can't sign in. If it
+should, ask whoever manages your account..". **Referenced from:** `cloud/lambda/vsz_directory.py`.
+
+Cognito reports a trigger's exception as "PreTokenGeneration failed with error <message>." — with a
+full stop of its own after the message. `vsz-directory`'s message already ended with one. The page
+strips the prefix and shows the rest, so people would have read the doubled stop.
+
+**Fix:** the message has no final full stop (a comment there says why);
+`test_ff90_the_refusal_leaves_the_full_stop_to_cognito` keeps it so. **Verified** (2026-11-07,
+deployed by the operator): the refusal now reads "…ask whoever manages your account." — one stop.
+
+**The rule:** text that another system wraps is written for the wrapped result.

@@ -7,6 +7,7 @@ import LiveView from "./views/LiveView.vue";
 import EventsView from "./views/EventsView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import LiveViewSettings from "./views/LiveViewSettings.vue";
+import AccountView from "./views/AccountView.vue";
 
 export const routes: RouteRecordRaw[] = [
   { path: "/login", name: "login", component: LoginView, meta: { public: true } },
@@ -20,6 +21,7 @@ export const routes: RouteRecordRaw[] = [
       // Before the camera route, which would otherwise take "live-view" for a camera ID.
       { path: "settings/live-view", name: "settings-live", component: LiveViewSettings },
       { path: "settings/:cameraId?/:section?", name: "settings", component: SettingsView },
+      { path: "account", name: "account", component: AccountView },   // DEALER-PANEL-PLAN.md D18
     ],
   },
   { path: "/:rest(.*)*", redirect: "/live" },

@@ -77,11 +77,12 @@ def tls_context():
 def connect(user, database, password=None):
     import pg8000.native                             # from the vsz-pg layer
     if not DB_HOST:
-        raise AdminError("DB_HOST is not set")
+        raise RuntimeError("DB_HOST is not set")
     con = pg8000.native.Connection(
         user, host=DB_HOST, port=DB_PORT, database=database,
         password=rds_token(user) if password is None else password,
-        ssl_context=tls_context(), timeout=15, application_name="vsz-db-admin")
+        ssl_context=tls_context(), timeout=15,
+        application_name=os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "vsz"))
     con.run("SET statement_timeout = '50s'")
     con.run("SET lock_timeout = '10s'")
     return con

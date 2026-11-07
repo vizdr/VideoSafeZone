@@ -1,0 +1,41 @@
+{
+  "PoolName": "vsz-users",
+  "UserPoolTier": "LITE",
+  "UsernameAttributes": ["email"],
+  "UsernameConfiguration": {"CaseSensitive": false},
+  "AutoVerifiedAttributes": ["email"],
+  "UserAttributeUpdateSettings": {"AttributesRequireVerificationBeforeUpdate": ["email"]},
+  "AdminCreateUserConfig": {
+    "AllowAdminCreateUserOnly": true,
+    "InviteMessageTemplate": {
+      "EmailSubject": "Your VideoSafeZone account",
+      "EmailMessage": "You have a VideoSafeZone account. Sign in with your email address, {username}, and this temporary password: {####} -- at the first sign-in you choose your own. It works for 7 days."
+    }
+  },
+  "VerificationMessageTemplate": {
+    "DefaultEmailOption": "CONFIRM_WITH_CODE",
+    "EmailSubject": "Your VideoSafeZone code",
+    "EmailMessage": "Your VideoSafeZone code is {####}"
+  },
+  "Policies": {
+    "PasswordPolicy": {
+      "MinimumLength": 10,
+      "RequireUppercase": true,
+      "RequireLowercase": true,
+      "RequireNumbers": true,
+      "RequireSymbols": false,
+      "TemporaryPasswordValidityDays": 7
+    }
+  },
+  "AccountRecoverySetting": {"RecoveryMechanisms": [{"Priority": 1, "Name": "verified_email"}]},
+  "MfaConfiguration": "OFF",
+  "DeletionProtection": "ACTIVE",
+  "EmailConfiguration": {"EmailSendingAccount": "COGNITO_DEFAULT"},
+  "LambdaConfig": {
+    "PreTokenGenerationConfig": {
+      "LambdaVersion": "V1_0",
+      "LambdaArn": "arn:aws:lambda:eu-central-1:596633517506:function:vsz-directory"
+    }
+  },
+  "UserPoolTags": {"project": "VideoSafeZone"}
+}

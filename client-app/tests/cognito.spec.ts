@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AuthError, CognitoSession, jwtClaims } from "../src/auth/cognito";
+import { AuthError, CognitoSession, NewPasswordRequired, jwtClaims } from "../src/auth/cognito";
 import { COGNITO_CLIENT_ID } from "../src/config";
 
 function b64url(s: string): string {
@@ -24,16 +24,18 @@ const result = (id: string, refresh?: string) => ({
   AuthenticationResult: { IdToken: id, AccessToken: "access", ExpiresIn: 3600, ...(refresh ? { RefreshToken: refresh } : {}) },
 });
 
-/** A Cognito that answers with `replies` in order and records each request body. */
+/** A Cognito that answers with `replies` in order and records each request's body and action. */
 function cognito(...replies: Array<[number, object] | Error>) {
   const bodies: Array<Record<string, any>> = [];
+  const targets: string[] = [];
   const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
     bodies.push(JSON.parse(String(init?.body)));
+    targets.push(String((init?.headers as Record<string, string>)["X-Amz-Target"]).split(".")[1]);
     const next = replies.shift() ?? [500, {}];
     if (next instanceof Error) throw next;
     return new Response(JSON.stringify(next[1]), { status: next[0] });
   });
-  return { fetch: fetch as unknown as typeof globalThis.fetch, bodies, calls: fetch };
+  return { fetch: fetch as unknown as typeof globalThis.fetch, bodies, targets, calls: fetch };
 }
 
 function session(c: ReturnType<typeof cognito>, storage: Storage | null = memoryStorage(), clock = { t: 0 }) {
@@ -125,12 +127,15 @@ describe("CognitoSession", () => {
     expect(storage.getItem("vsz.refreshToken")).toBeNull();
   });
 
-  it("explains a refused sign-in and a challenge this page can't answer", async () => {
+  it("explains a refused sign-in, in the trigger's own words, and a challenge it can't answer", async () => {
     const wrong = session(cognito([400, { message: "Incorrect username or password." }])).s;
     await expect(wrong.signIn("u", "bad")).rejects.toThrow("Incorrect username or password.");
-    const challenge = session(cognito([200, { ChallengeName: "NEW_PASSWORD_REQUIRED", Session: "x" }])).s;
-    await expect(challenge.signIn("u", "p")).rejects.toThrow(/NEW_PASSWORD_REQUIRED/);
-    expect(challenge.signedIn).toBe(false);
+    const refused = session(cognito([400, { __type: "UserLambdaValidationException",
+      message: "PreTokenGeneration failed with error This account can't sign in. If it should, ask whoever manages your account." }])).s;
+    await expect(refused.signIn("u", "p")).rejects.toThrow(/^This account can't sign in\./);
+    const mfa = session(cognito([200, { ChallengeName: "SOFTWARE_TOKEN_MFA", Session: "x" }])).s;
+    await expect(mfa.signIn("u", "p")).rejects.toThrow(/SOFTWARE_TOKEN_MFA/);
+    expect(mfa.signedIn).toBe(false);
   });
 
   it("works when storage is blocked (private browsing)", async () => {
@@ -140,6 +145,83 @@ describe("CognitoSession", () => {
     await s.signIn("u", "p");
     expect(await s.idToken()).toBe("ID1");
     expect(await s.restore()).toBe(false);
+  });
+});
+
+describe("invited people and their own account (DEALER-PANEL-PLAN.md D17, D18)", () => {
+  it("asks an invited person for their own password, answering with Cognito's user name", async () => {
+    const c = cognito(
+      [200, { ChallengeName: "NEW_PASSWORD_REQUIRED", Session: "S1", ChallengeParameters: { USER_ID_FOR_SRP: "uuid-1" } }],
+      [200, result(jwt({ email: "a@example.test", vsz_role: "customer" }), "R1")]);
+    const { s } = session(c);
+    await expect(s.signIn("a@example.test", "Temp1234")).rejects.toBeInstanceOf(NewPasswordRequired);
+    expect(s.awaitingNewPassword).toBe(true);
+    expect(s.signedIn).toBe(false);
+    await s.completeNewPassword("MyOwnPass12");
+    expect(c.targets).toEqual(["InitiateAuth", "RespondToAuthChallenge"]);
+    expect(c.bodies[1]).toEqual({
+      ChallengeName: "NEW_PASSWORD_REQUIRED", ClientId: COGNITO_CLIENT_ID, Session: "S1",
+      ChallengeResponses: { USERNAME: "uuid-1", NEW_PASSWORD: "MyOwnPass12" },
+    });
+    expect(s.signedIn).toBe(true);
+    expect(s.username).toBe("a@example.test");
+    expect(s.claims.vsz_role).toBe("customer");
+    expect(s.awaitingNewPassword).toBe(false);
+  });
+
+  it("refuses a new password with no challenge waiting", async () => {
+    const c = cognito();
+    const { s } = session(c);
+    await expect(s.completeNewPassword("x")).rejects.toThrow(/Sign in again/);
+    expect(c.calls).not.toHaveBeenCalled();
+  });
+
+  it("resets a forgotten password with the emailed code", async () => {
+    const c = cognito([200, {}], [200, {}]);
+    const { s } = session(c);
+    await s.forgotPassword("a@example.test");
+    await s.confirmForgotPassword("a@example.test", "123456", "NewPass1234");
+    expect(c.targets).toEqual(["ForgotPassword", "ConfirmForgotPassword"]);
+    expect(c.bodies).toEqual([
+      { ClientId: COGNITO_CLIENT_ID, Username: "a@example.test" },
+      { ClientId: COGNITO_CLIENT_ID, Username: "a@example.test", ConfirmationCode: "123456", Password: "NewPass1234" },
+    ]);
+  });
+
+  it("changes the password and the address with the access token, renewing once the address is confirmed", async () => {
+    const c = cognito([200, result(jwt({ email: "old@example.test" }), "R1")], [200, {}], [200, {}], [200, {}],
+                      [200, result(jwt({ email: "new@example.test" }))]);
+    const { s } = session(c);
+    await s.signIn("old@example.test", "p");
+    await s.changePassword("p", "NewPass1234");
+    await s.changeEmail("new@example.test");
+    expect(s.username).toBe("old@example.test");            // until it is confirmed
+    await s.confirmEmail("654321");
+    expect(c.targets).toEqual(["InitiateAuth", "ChangePassword", "UpdateUserAttributes", "VerifyUserAttribute", "InitiateAuth"]);
+    expect(c.bodies[1]).toEqual({ AccessToken: "access", PreviousPassword: "p", ProposedPassword: "NewPass1234" });
+    expect(c.bodies[2]).toEqual({ AccessToken: "access", UserAttributes: [{ Name: "email", Value: "new@example.test" }] });
+    expect(c.bodies[3]).toEqual({ AccessToken: "access", AttributeName: "email", Code: "654321" });
+    expect(c.bodies[4].AuthFlow).toBe("REFRESH_TOKEN_AUTH");
+    expect(s.username).toBe("new@example.test");
+  });
+
+  it("renews an expiring access token before using it", async () => {
+    const c = cognito([200, result("ID1", "R1")],
+                      [200, { AuthenticationResult: { IdToken: "ID2", AccessToken: "access2", ExpiresIn: 300 } }], [200, {}]);
+    const { s, clock } = session(c);
+    await s.signIn("u", "p");
+    clock.t = 3600_000;
+    await s.changePassword("p", "q");
+    expect(c.targets).toEqual(["InitiateAuth", "InitiateAuth", "ChangePassword"]);
+    expect(c.bodies[2].AccessToken).toBe("access2");
+  });
+
+  it("forgets a waiting challenge on sign-out", async () => {
+    const c = cognito([200, { ChallengeName: "NEW_PASSWORD_REQUIRED", Session: "S1" }]);
+    const { s } = session(c);
+    await expect(s.signIn("a@example.test", "t")).rejects.toBeInstanceOf(AuthError);
+    s.signOut();
+    expect(s.awaitingNewPassword).toBe(false);
   });
 });
 

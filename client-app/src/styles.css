@@ -17,6 +17,7 @@ h1, h2, h3 { line-height: 1.2; }
   grid-template-columns: 5.5rem 17.5rem minmax(0, 1fr);
   min-height: 100vh;
 }
+.shell.no-cameras { grid-template-columns: 5.5rem minmax(0, 1fr); }
 .shell > .cameras-col {
   background: var(--p-surface-900);
   border-right: 1px solid var(--p-content-border-color);
@@ -35,6 +36,7 @@ h1, h2, h3 { line-height: 1.2; }
 /* Phone width: the rail becomes a top bar and the list sits above the view. */
 @media (max-width: 800px) {
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
+  .shell.no-cameras { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .shell > .cameras-col {
     max-height: 40vh;
     border-right: 0;
