@@ -17,8 +17,8 @@ VideoSafeZone (D17), and the Account page has no Opt-ins for now (D18).
 authentication on the database) done 2026-11-06, run by the user. **Phase 1 done 2026-11-07**:
 built and tested, provisioned by the user (`provision.sh directory-db`), verified. **Phase 2 done
 2026-11-07**: provisioned by the user and verified, the trigger's cold start included (1.09 s,
-FoundAndFixed.md #89). **Phase 3 built and tested 2026-11-07**; its rollout (3.3) is the
-user's, in steps over a day.
+FoundAndFixed.md #89). **Phase 3 done 2026-11-07**: the tenant check enforces and is verified;
+only removing the old pool from the API (`deploy.sh tenancy old-pool-off`) is left. Next: Phase 4.
 
 ---
 
@@ -1048,6 +1048,19 @@ unknown-camera answer; as the dealer, the camera routes refuse; VMS's page unaff
 - 2026-11-07: `ADOPT_UNSTAMPED_ROWS=yes` in the Pi's `/etc/adapter/adapter.env` (the user); the
   next `kvs-camera-rematch` run stamped `cam-01`…`cam-04` with `adapter-01` — checked in the
   registry. (A dry run before had named the same four, the USB camera included.)
+- 2026-11-07: `provision.sh tenancy`, `deploy.sh lambdas`, `deploy.sh page` (the user): the page signs
+  in to `vsz-users`; the administrator signed in and set a password, and sees all four cameras.
+  Report mode checked: at 14:05 `demo-user` listed the cameras and `list-cameras` logged
+  `would-refuse hidden` for exactly `cam-01`, `cam-02` and `cam-04` — `cam-03`, the shared one,
+  passed — while still showing all four, as report mode must. Enforcing is the next step.
+- 2026-11-07: `deploy.sh tenancy enforce` (the user), after a clean `tenancy log`; the page as
+  `demo-user` shows only `cam-03`. *Verify*, against the live API with each demo account's own
+  token: `GET /cameras` lists `cam-03` (`view`) for demo-user, all four (`control`) for holder and
+  Super Admin, nothing for dealer and owner; the dealer's `GET /hls?stream=cam-03` and demo-user's
+  for `cam-04` get "unknown stream" — the same words as a camera that doesn't exist (`cam-99`);
+  demo-user changing a `cam-03` clip gets 403 "shared with you to view, not to change", while the
+  holder passes the check (and S3 then has no such clip — the probe used one that doesn't exist).
+  VMS's `pir-api` still accepts only `kvs-demo-users`. Left: `deploy.sh tenancy old-pool-off`.
 
 ### Phase 4: Directory API and the System console
 
@@ -1199,7 +1212,8 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 2: `vsz-users`, `vsz-directory` + trigger, seed, the sign-in page, Account details — built and tested (2026-11-07)
 - [x] Phase 2: provisioned (`provision.sh identity`, `directory-seed`, the user) and its *Verify* recorded (2026-11-07)
 - [x] Phase 2: the trigger at 1024 MB, a cold start measured: 1.09 s (FoundAndFixed.md #89, 2026-11-07)
-- [ ] Phase 3: `adapterId`, tenant checks report → enforce, pool switch
+- [x] Phase 3: `adapterId`, tenant checks report → enforce, pool switch — enforcing and verified (2026-11-07)
+- [ ] Phase 3: `deploy.sh tenancy old-pool-off`; later, delete the old app client `kvs-demo-web-client`
 - [ ] Phase 4: directory API, System console
 - [ ] Phase 5: Dealer portal
 - [ ] Phase 6: Adapters — Cloud IDs, activation, release, last seen
