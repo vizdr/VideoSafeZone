@@ -25,7 +25,7 @@ export class ApiClient {
   }
 
   async request<T = Record<string, unknown>>(
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "PATCH",
     path: string,
     body?: unknown,
     opts: { keepalive?: boolean } = {},

@@ -21,6 +21,9 @@
 #   bash cloud/provision.sh directory-seed EMAIL      the system administrator (EMAIL, invited by Cognito)
 #                                                     and the demo directory and accounts; then signs in
 #                                                     as each demo account and shows its claims
+#   bash cloud/provision.sh directory                 the directory API (DEALER-PANEL-PLAN.md Phase 4):
+#                                                     function vsz-directory-api, /directory/{proxy+} (ANY,
+#                                                     Cognito authorizer) and its CORS preflight, stage
 #   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
 #                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
 #                                                     on every function with the check, vsz-users beside
@@ -116,8 +119,8 @@ ensure_role() {    # ensure_role ROLE INLINE_POLICY_NAME POLICY_FILE [MANAGED_PO
     --policy-name "$pname" --policy-document "file://$file"
 }
 
-ensure_function() {   # ensure_function NAME ROLE -- python3.13, arm64, 128 MB, 10 s, as the others
-  local name=$1 role=$2 py; no_pir "$name"
+ensure_function() {   # ensure_function NAME ROLE [MEMORY TIMEOUT] -- python3.13, arm64, 128 MB, 10 s by default
+  local name=$1 role=$2 memory=${3:-128} timeout=${4:-10} py; no_pir "$name"
   py="$LAMBDA_DIR/${name//-/_}.py"; [ -e "$py" ] || die "no $py"
   if aws lambda get-function-configuration --function-name "$name" >/dev/null 2>&1; then
     say "function $name: exists, left as is (bash cloud/deploy.sh lambda $name updates its code)"; return
@@ -129,7 +132,7 @@ ensure_function() {   # ensure_function NAME ROLE -- python3.13, arm64, 128 MB, 
   for i in 1 2 3 4 5 6 7 8; do       # a new role takes a few seconds before Lambda may assume it
     if aws lambda create-function --function-name "$name" --runtime python3.13 --architectures arm64 \
          --handler "${name//-/_}.lambda_handler" --role "arn:aws:iam::$ACCOUNT:role/$role" \
-         --memory-size 128 --timeout 10 --zip-file "fileb://$TMP/$name.zip" >/dev/null 2>"$TMP/err"; then
+         --memory-size "$memory" --timeout "$timeout" --zip-file "fileb://$TMP/$name.zip" >/dev/null 2>"$TMP/err"; then
       break
     fi
     grep -q "cannot be assumed" "$TMP/err" && [ "$i" -lt 8 ] || die "create-function: $(cat "$TMP/err")"
@@ -204,9 +207,14 @@ ensure_method() {     # ensure_method RESOURCE_ID PATH METHOD FUNCTION -- Cognit
   aws apigateway put-integration --rest-api-id "$API" --resource-id "$rid" --http-method "$method" \
     --type AWS_PROXY --integration-http-method POST --uri "$uri" >/dev/null
   # Only this API, this method, this path may invoke the function -- as for every other route.
-  aws lambda add-permission --function-name "$fn" --statement-id "apigw-$method-${path//\//-}" \
+  # ANY on a {proxy+} resource: API Gateway invokes with the real method and path, so the
+  # permission names any method and any path under the resource's parent.
+  local arn_method=$method arn_path=$path
+  [ "$method" != ANY ] || arn_method='*'
+  arn_path=${arn_path//\{proxy+\}/*}
+  aws lambda add-permission --function-name "$fn" --statement-id "apigw-$method-${path//[^A-Za-z0-9]/-}" \
     --action lambda:InvokeFunction --principal apigateway.amazonaws.com \
-    --source-arn "arn:aws:execute-api:$REGION:$ACCOUNT:$API/*/$method$path" >/dev/null
+    --source-arn "arn:aws:execute-api:$REGION:$ACCOUNT:$API/*/$arn_method$arn_path" >/dev/null
 }
 
 ensure_cors() {       # ensure_cors RESOURCE_ID PATH "GET,PUT,OPTIONS" -- the mock OPTIONS every route has
@@ -715,6 +723,59 @@ provision_tenancy() {
   say "next: bash cloud/deploy.sh lambdas (the check, in report mode), then deploy.sh page (the page on $POOL_NAME)"
 }
 
+# --- the directory API (DEALER-PANEL-PLAN.md Phase 4, D8) -------------------------------------------
+
+provision_directory() {
+  local rid url
+  find_pool
+  [ -n "$POOL_ID" ] || die "no user pool $POOL_NAME: bash cloud/provision.sh identity first"
+  grep -q "userpool/$POOL_ID\"" "$IAM_DIR/vsz-directory-api-policy.json" ||
+    die "cloud/iam/vsz-directory-api-policy.json doesn't name $POOL_NAME ($POOL_ID)"
+  ensure_role vsz-directory-api-role vsz-directory-api vsz-directory-api-policy.json
+  ensure_function vsz-directory-api vsz-directory-api-role 512 15
+  if [ "$DRY" -eq 1 ] && ! aws lambda get-function-configuration --function-name vsz-directory-api >/dev/null 2>&1; then
+    say "would set vsz-directory-api's POOL_ID=$POOL_ID"
+  else
+    ensure_env vsz-directory-api POOL_ID "$POOL_ID"
+  fi
+  rid=$(ensure_resource "/directory/{proxy+}")
+  ensure_method "$rid" "/directory/{proxy+}" ANY vsz-directory-api
+  ensure_cors "$rid" "/directory/{proxy+}" "GET,POST,PUT,PATCH,OPTIONS"
+  deploy_stage directory
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  # Done means verified through API Gateway: the preflight, the authorizer, and a real call as the
+  # demo owner, whose password provision.sh directory-seed keeps.
+  url="https://$API.execute-api.$REGION.amazonaws.com/$STAGE/directory/me"
+  local i
+  for i in 1 2 3 4 5 6; do
+    curl -s -o /dev/null -D "$TMP/h" -X OPTIONS "$url" -H "Origin: https://example.org" \
+      -H "Access-Control-Request-Method: GET" && grep -qi '^access-control-allow-origin: \*' "$TMP/h" && break
+    sleep 5                        # a new deployment takes a few seconds to reach the edge
+  done
+  grep -qi '^access-control-allow-origin: \*' "$TMP/h" || die "OPTIONS /directory/me: no CORS answer"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "$url")" = 401 ] || die "GET /directory/me without a token: expected 401"
+  python3 - "$url" "$DEMO_FILE" "$REGION" "$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
+      --query "UserPoolClients[?ClientName=='$CLIENT_NAME'].ClientId" --output text)" <<'PY' || die "the directory API didn't answer the demo owner -- is vsz-directory's new code deployed? (bash cloud/deploy.sh lambda vsz-directory)"
+import json, sys, urllib.error, urllib.request
+url, demo, region, client = sys.argv[1:5]
+pw = dict(line.split() for line in open(demo) if line.strip())["demo-owner@example.com"]
+auth = urllib.request.Request(f"https://cognito-idp.{region}.amazonaws.com/", data=json.dumps({
+    "AuthFlow": "USER_PASSWORD_AUTH", "ClientId": client,
+    "AuthParameters": {"USERNAME": "demo-owner@example.com", "PASSWORD": pw}}).encode(),
+    headers={"Content-Type": "application/x-amz-json-1.1",
+             "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"})
+token = json.load(urllib.request.urlopen(auth, timeout=30))["AuthenticationResult"]["IdToken"]
+try:
+    me = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": token}), timeout=30))
+except urllib.error.HTTPError as e:
+    print(f"GET /directory/me as demo-owner: {e.code} {e.read().decode()[:200]}", file=sys.stderr)
+    sys.exit(1)
+assert me.get("role") == "system_owner", me
+print(f"GET /directory/me as demo-owner: role {me['role']}, {me['org']['name']}")
+PY
+  say "verified: /directory answers (CORS preflight, authorizer, vsz-directory-api, vsz-directory)"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -724,5 +785,6 @@ case "${1:-}" in
   identity)        preflight; provision_identity ;;
   directory-seed)  preflight; shift; provision_directory_seed "${1:-}" ;;
   tenancy)         preflight; provision_tenancy ;;
-  *) sed -n '2,27p' "$0"; exit 1 ;;
+  directory)       preflight; provision_directory ;;
+  *) sed -n '2,30p' "$0"; exit 1 ;;
 esac

@@ -1,7 +1,8 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  Camera, CameraSettings, ClipsPage, CommandAction, HlsSession, IrMode, RecordingMode, StorageTier,
+  AdapterSummary, Camera, CameraSettings, ClipsPage, CommandAction, CustomerSummary, Dealer, DirectoryUser,
+  HlsSession, IrMode, Me, MemberRole, Overview, Price, Pricing, RecordingMode, StorageTier, UserAction,
   UserSettings,
 } from "./types";
 
@@ -54,6 +55,26 @@ export function makeEndpoints(api: ApiClient) {
 
     playClip: (s3Key: string) =>
       api.request<{ status?: string; url?: string; eta_hours?: number }>("POST", "/clips/play", { s3Key }),
+
+    // The directory (DEALER-PANEL-PLAN.md §6): vsz-directory-api decides who may do what.
+    me: () => api.request<Me>("GET", "/directory/me"),
+    overview: () => api.request<Overview>("GET", "/directory/overview"),
+    listDealers: () => api.request<Dealer[]>("GET", "/directory/dealers"),
+    createDealer: (dealer: { name: string; email?: string; phone?: string }) =>
+      api.request<{ id: string }>("POST", "/directory/dealers", dealer),
+    updateDealer: (id: string, change: Partial<Pick<Dealer, "name" | "email" | "phone" | "status">>) =>
+      api.request<{ id: string; changed: string[] }>("PATCH", `/directory/dealers/${q(id)}`, change),
+    listCustomers: (dealerId?: string) =>
+      api.request<CustomerSummary[]>("GET", `/directory/customers${dealerId ? `?dealerId=${q(dealerId)}` : ""}`),
+    listAdapters: () => api.request<AdapterSummary[]>("GET", "/directory/adapters"),
+    listUsers: () => api.request<DirectoryUser[]>("GET", "/directory/users"),
+    inviteUser: (invite: { email: string; name?: string; orgId: string; role: MemberRole }) =>
+      api.request<{ userId: string; invited: string }>("POST", "/directory/users", invite),
+    userAction: (userId: string, action: UserAction) =>
+      api.request<{ userId: string; status: string }>("POST", `/directory/users/${q(userId)}/${action}`),
+    getPricing: () => api.request<Pricing>("GET", "/directory/pricing"),
+    putPricing: (prices: Price[], settings: Pick<Pricing["settings"], "retention_days" | "annual_discount_percent" | "trial_days">) =>
+      api.request<{ prices: number }>("PUT", "/directory/pricing", { prices, settings }),
   };
 }
 

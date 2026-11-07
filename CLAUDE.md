@@ -113,6 +113,7 @@ bash cloud/deploy.sh lambdas                      # every function whose live co
 bash cloud/provision.sh user-settings --dry-run   # a new feature's table/role/function/routes, created once
 bash cloud/deploy.sh db-migrate --dry-run         # the directory database's migrations (cloud/db/migrations/)
 bash cloud/provision.sh identity --dry-run        # the user pool vsz-users and its trigger vsz-directory
+bash cloud/provision.sh directory --dry-run       # the directory API /directory/* (vsz-directory-api)
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -443,7 +444,11 @@ layout (saved through `GET/PUT /me/settings`), each tile a camera's live view, w
 Record clip and sound on the selected tile. **Events**: the evidence clips, with tiering.
 **Settings**: per camera (cloud recording, recording mode, microphone, IR, outage buffer, codec
 read-only) and per account (Live view). The old page's player logic lives on, behaviour
-unchanged, in `src/player/camera-controller.ts`, with its FoundAndFixed fixes under test.
+unchanged, in `src/player/camera-controller.ts`, with its FoundAndFixed fixes under test. What a
+signed-in person sees follows their role (`DEALER-PANEL-PLAN.md` D6, D7): owners and administrators
+also get the **System console** (`src/views/system/`: dealers, customers, users, adapters, the
+price list, over `/directory/*`), dealers their portal instead of the camera pages. The page only
+hides; `vsz-directory` decides every call again from the database.
 
 `adapter/onvif-admin/` — a small local Flask app, LAN-only, no login, run directly on the
 Pi. It exists because **WS-Discovery is UDP multicast and only works from a process on

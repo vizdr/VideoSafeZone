@@ -4,6 +4,7 @@ A module of its own, imported by name, because `from conftest import ...` would 
 first -- the main suite's, which blocks the network.
 """
 import os
+import uuid
 from urllib.parse import unquote, urlsplit
 
 import pytest
@@ -85,3 +86,34 @@ def adapter(con, thing, dealer_id=None):
 def activate(con, adapter_id, customer_id, site_id):
     return one(con, "INSERT INTO vsz.adapter_activation (adapter_id, customer_id, site_id) "
                     "VALUES (:a, :c, :s) RETURNING id", a=adapter_id, c=customer_id, s=site_id)
+
+
+# --- the demo directory, as cloud/provision.sh directory-seed builds it ---------------------------
+
+SUBS = {name: str(uuid.uuid4()) for name in
+        ("admin", "owner", "dealer", "holder", "superadmin", "user", "disabled", "suspended")}
+
+
+def demo_spec():
+    """The shape cloud/provision.sh directory-seed sends."""
+    e = {name: f"{name}@example.test" for name in SUBS}
+    return {
+        "users": [{"email": e[n], "sub": SUBS[n], "status": "disabled" if n == "disabled" else "active"}
+                  for n in SUBS],
+        "platform": {"members": [{"email": e["admin"], "role": "system_admin"},
+                                 {"email": e["owner"], "role": "system_owner"}]},
+        "dealers": [{
+            "name": "Demo dealer", "members": [{"email": e["dealer"], "role": "dealer"}],
+            "customers": [
+                {"name": "Demo customer", "reference": "DEMO-1",
+                 "members": [{"email": e["holder"], "role": "customer"},
+                             {"email": e["superadmin"], "role": "customer_admin"},
+                             {"email": e["user"], "role": "customer_user"},
+                             {"email": e["disabled"], "role": "customer_user"}],
+                 "sites": [{"name": "Home", "timezone": "Europe/Berlin",
+                            "adapters": [{"thing": "adapter-01", "name": "Hall"}]}],
+                 "shares": [{"email": e["user"], "camera": "cam-03", "thing": "adapter-01"}]},
+                {"name": "Suspended demo customer", "status": "suspended",
+                 "members": [{"email": e["suspended"], "role": "customer"}]},
+            ]}],
+    }

@@ -1,24 +1,31 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useRoute } from "vue-router";
+import type { Role } from "../api/types";
+import { CAMERA_ROLES, DEALER_ROLES, SYSTEM_ROLES } from "../auth/roles";
 import { useAuthStore } from "../stores/auth";
 
-// Live, Events, Settings; Account and Exit at the bottom (WEB-PANEL-PLAN.md §4.1,
-// DEALER-PANEL-PLAN.md D18). Audit logs and the other Videoloft entries are left out on purpose (D8).
-const items = [
-  { name: "live", label: "Live", icon: "pi-video" },
-  { name: "events", label: "Events", icon: "pi-history" },
-  { name: "settings", label: "Settings", icon: "pi-cog" },
+// Live, Events, Settings for whoever has cameras; Dealer portal for dealers; System for owners and
+// administrators; Account and Exit at the bottom (WEB-PANEL-PLAN.md §4.1, DEALER-PANEL-PLAN.md D7,
+// D18). Audit logs and the other Videoloft entries are left out on purpose (D8).
+const ALL = [
+  { name: "live", label: "Live", icon: "pi-video", roles: CAMERA_ROLES },
+  { name: "events", label: "Events", icon: "pi-history", roles: CAMERA_ROLES },
+  { name: "settings", label: "Settings", icon: "pi-cog", roles: CAMERA_ROLES },
+  { name: "dealer", label: "Dealer portal", icon: "pi-briefcase", roles: DEALER_ROLES },
+  { name: "system", label: "System", icon: "pi-sitemap", roles: SYSTEM_ROLES },
 ] as const;
 
 const route = useRoute();
 const auth = useAuthStore();
+const items = computed(() => ALL.filter(i => (i.roles as ReadonlyArray<Role | null>).includes(auth.role as Role | null)));
 
 // Switching tabs keeps the selected camera.
 const cameraParam = computed(() =>
   typeof route.params.cameraId === "string" ? { cameraId: route.params.cameraId } : {});
+const paramsFor = (name: string) => (["live", "events", "settings"].includes(name) ? cameraParam.value : {});
 
-// "settings-live" (Settings → Live view) is still the Settings tab.
+// "settings-live" (Settings → Live view) is still the Settings tab; system-* is the System tab.
 const isActive = (name: string) => typeof route.name === "string" && route.name.startsWith(name);
 
 // The shell sees the sign-out, ends any Live view, clears the stores and goes to sign-in.
@@ -29,7 +36,7 @@ function exit(): void {
 
 <template>
   <nav class="rail" aria-label="Main">
-    <RouterLink v-for="item in items" :key="item.name" :to="{ name: item.name, params: cameraParam }"
+    <RouterLink v-for="item in items" :key="item.name" :to="{ name: item.name, params: paramsFor(item.name) }"
                 class="rail-item" :class="{ active: isActive(item.name) }"
                 :aria-current="isActive(item.name) ? 'page' : undefined">
       <i :class="['pi', item.icon]" aria-hidden="true" />

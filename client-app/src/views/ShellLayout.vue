@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import type { Role } from "../api/types";
+import { CAMERA_ROLES } from "../auth/roles";
 import AppRail from "../components/AppRail.vue";
 import CameraList from "../components/CameraList.vue";
 import HevcNote from "../components/HevcNote.vue";
@@ -19,14 +21,18 @@ const userSettings = useUserSettingsStore();
 const cameraId = computed(() =>
   typeof route.params.cameraId === "string" ? route.params.cameraId : undefined);
 
+// Cameras and the Live layout only for whoever sees cameras (DEALER-PANEL-PLAN.md D5).
 onMounted(() => {
+  if (!CAMERA_ROLES.includes(auth.role as Role | null)) return;
   if (!cameras.loaded && !cameras.loading) void cameras.load();
   if (!userSettings.loaded) void userSettings.load();
 });
 
 const onSettings = computed(() => route.name === "settings" || route.name === "settings-live");
-// The Account page is about the person, not a camera: no camera list beside it.
-const showCameras = computed(() => route.name !== "account");
+// The camera list belongs beside the camera pages only -- not beside Account, the dealer portal or
+// the System console.
+const showCameras = computed(() =>
+  typeof route.name === "string" && ["live", "events", "settings"].some(n => (route.name as string).startsWith(n)));
 
 // One controller per camera, following the list (stores/players.ts).
 watch(() => cameras.cameras, list => players.sync(list), { immediate: true });

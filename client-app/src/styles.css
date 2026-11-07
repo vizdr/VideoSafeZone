@@ -44,3 +44,55 @@ h1, h2, h3 { line-height: 1.2; }
   }
   .shell > .content { padding: 1rem; }
 }
+
+/* The consoles: System (DEALER-PANEL-PLAN.md §7.2) and, from Phase 5, the dealer portal. */
+.console-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 1.25rem;
+  padding: 0.35rem;
+  background: var(--p-surface-900);
+  border-radius: 0.6rem;
+}
+.console-tabs a {
+  padding: 0.45rem 1rem;
+  border-radius: 0.45rem;
+  color: var(--p-text-muted-color);
+  text-decoration: none;
+}
+.console-tabs a.router-link-active { background: var(--p-primary-color); color: var(--p-primary-contrast-color); }
+.console-tabs a:focus-visible { outline: 2px solid var(--p-primary-color); }
+.console-card {
+  margin-bottom: 1.25rem;
+  padding: 1.25rem 1.5rem;
+  background: var(--p-surface-900);
+  border-radius: 0.6rem;
+}
+.console-card h2 {
+  margin: 0 0 1rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--p-primary-color);
+  font-size: 1.3rem;
+}
+.console-card h2 .dot { color: var(--p-primary-color); }
+.console-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.console-table th, .console-table td {
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--p-content-border-color);
+  vertical-align: top;
+}
+.console-table th { color: var(--p-text-muted-color); font-weight: 600; }
+.console-table td.num, .console-table th.num { text-align: right; }
+.console-form { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; }
+.console-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--p-text-muted-color); }
+.console-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.status { padding: 0.1rem 0.5rem; border-radius: 1rem; font-size: 0.8rem; background: var(--p-surface-700); }
+.status.active, .status.activated { background: var(--p-green-900); color: var(--p-green-200); }
+.status.suspended, .status.disabled, .status.revoked { background: var(--p-red-900); color: var(--p-red-200); }
+.status.invited, .status.provisioned { background: var(--p-yellow-900); color: var(--p-yellow-100); }
+.muted { color: var(--p-text-muted-color); }
+@media (max-width: 800px) {
+  .console-table { display: block; overflow-x: auto; }
+}

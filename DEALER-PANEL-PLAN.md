@@ -17,8 +17,9 @@ VideoSafeZone (D17), and the Account page has no Opt-ins for now (D18).
 authentication on the database) done 2026-11-06, run by the user. **Phase 1 done 2026-11-07**:
 built and tested, provisioned by the user (`provision.sh directory-db`), verified. **Phase 2 done
 2026-11-07**: provisioned by the user and verified, the trigger's cold start included (1.09 s,
-FoundAndFixed.md #89). **Phase 3 done 2026-11-07**: the tenant check enforces and is verified;
-only removing the old pool from the API (`deploy.sh tenancy old-pool-off`) is left. Next: Phase 4.
+FoundAndFixed.md #89). **Phase 3 done 2026-11-07**: the tenant check enforces and is verified,
+and `kvs-demo-api` accepts only `vsz-users`. **Phase 4 built 2026-11-07** (the directory API and
+the System console), tested, not yet deployed. Next: its deploy and *Verify*, then Phase 5.
 
 ---
 
@@ -694,7 +695,7 @@ admin (with `?dealerId=` to narrow).
 | `POST /directory/accounts/{id}/holder` | holder | hand the holder role to a Super Admin or user |
 | `GET /directory/dealer` · `PATCH` | dealer, admin | own company details |
 | `GET /directory/dealers` · `POST` · `PATCH /directory/dealers/{id}` | owner, admin | dealers |
-| `GET /directory/users` · `POST` | owner (dealer users), admin (any role) | users across the system |
+| `GET /directory/users` · `POST` | owner (a dealer's staff, a customer's holder), admin (any role) | users across the system |
 | `GET /directory/invoices` | dealer (scope), owner, admin | fake invoices (D9) |
 | `POST /directory/billing/run-period` | admin | fake billing run (D9) |
 | `GET /directory/overview` | owner, admin | counts per dealer, plan totals, cameras registered vs. in plans |
@@ -1060,7 +1061,10 @@ unknown-camera answer; as the dealer, the camera routes refuse; VMS's page unaff
   for `cam-04` get "unknown stream" — the same words as a camera that doesn't exist (`cam-99`);
   demo-user changing a `cam-03` clip gets 403 "shared with you to view, not to change", while the
   holder passes the check (and S3 then has no such clip — the probe used one that doesn't exist).
-  VMS's `pir-api` still accepts only `kvs-demo-users`. Left: `deploy.sh tenancy old-pool-off`.
+  VMS's `pir-api` still accepts only `kvs-demo-users`.
+- 2026-11-07, 14:37: `deploy.sh tenancy old-pool-off` (the user, after committing Phase 3):
+  `kvs-demo-api`'s authorizer accepts only `vsz-users` now, stage deployed; demo-user still lists
+  `cam-03` through it, a bad token gets 401. `pir-api` (VMS) unchanged, on `kvs-demo-users`.
 
 ### Phase 4: Directory API and the System console
 
@@ -1070,6 +1074,43 @@ System console screens (§7.2), lazy-loaded; route guards by role in the page (V
 
 *Verify:* as admin, create a dealer and its first user; the invitation arrives; that user signs in,
 sets a password, lands on the dealer portal (empty); as owner, the Users tab can't create an admin.
+
+*Built 2026-11-07* (1253 offline pytest, 63 tests_db, 177 Vitest):
+- **`vsz-directory-api`** (`cloud/lambda/vsz_directory_api.py`), outside the VPC, on
+  `/directory/{proxy+}` (ANY, behind the Cognito authorizer). It sends `vsz-directory` the token's
+  `sub` and nothing else — never the role in the token — and turns each route into one operation:
+  `GET me | overview | dealers | customers[?dealerId=] | adapters | users | pricing`, `POST dealers`,
+  `PATCH dealers/<id>`, `POST users` (an invitation), `POST users/<id>/disable | enable |
+  reset-password | resend-invite`, `PUT pricing`. An invitation is the directory's row first, then
+  Cognito's `AdminCreateUser` (the email with a temporary password), then the new `sub` linked; if
+  Cognito refuses, the row is cancelled, and an address in use is a plain "can't add this address".
+  A disable is the directory's first — the trigger refuses at the next token whatever Cognito
+  says — then Cognito's, with every session signed out. Its role may invoke `vsz-directory` and make
+  those five Cognito admin calls on `vsz-users`, nothing else (`cloud/iam/vsz-directory-api-policy.json`).
+- **`vsz-directory`'s operations for signed-in people** (`USER_OPS`): the person is looked up by
+  `sub` on every call (`resolve_actor`; disabled, or in a suspended organisation → 403), writes run
+  in one transaction and are audited. D6 as two rules: **`may_give`** (an invitation) — an
+  administrator any role, an owner a dealer's staff or a customer's holder, a dealer only the holder
+  of its own customers; a holder's Super Admins and users are Additional users (Phase 9).
+  **`may_manage`** (disable, enable, reset, resend) — an administrator anyone, an owner everyone
+  but the system's staff, a dealer its own customers' people; never one's own account; a person
+  in two dealers' customers is neither dealer's alone. The price list is replaced whole, every
+  resolution × recording × storage duration priced, or refused.
+- **The System console** (`client-app/src/views/system/`), loaded only when opened: Overview
+  (counts, plans, memberships by role), Dealers (create, suspend / activate, invite a dealer's
+  user), Customers (by dealer, read-only until Phase 5's pages), Users (search; invite, with the
+  roles the organisation and the caller's role allow; disable / enable, reset, resend), Adapters
+  (read-only until Phase 6), Pricing (the matrix in currency units, durations, annual discount,
+  trial; the placeholder warning until saved once). Routes carry their roles: a dealer lands on
+  `/dealer` (a placeholder until Phase 5), an owner on the System console, everyone else on Live; a
+  route for another role sends you home. The rail shows each role its entries; the camera list and
+  camera loading are only for the roles that have cameras.
+- **Tests:** `tests/cloud/test_directory_api.py` (the routes, the sub-only rule, the invitation and
+  its undo, disable's sign-out, CORS on every answer; Cognito under a Stubber);
+  `tests_db/test_directory_ops.py` (21, every operation as each demo person on the real schema);
+  `client-app/tests/console.spec.ts` (42: homes and guards per role, the rail per role, each tab
+  against a faked API). Each was broken on purpose once — the router's role check, an owner's
+  roles, the cents, `may_give`, `may_manage` — and turned red.
 
 ### Phase 5: Dealer portal
 
@@ -1213,8 +1254,10 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 2: provisioned (`provision.sh identity`, `directory-seed`, the user) and its *Verify* recorded (2026-11-07)
 - [x] Phase 2: the trigger at 1024 MB, a cold start measured: 1.09 s (FoundAndFixed.md #89, 2026-11-07)
 - [x] Phase 3: `adapterId`, tenant checks report → enforce, pool switch — enforcing and verified (2026-11-07)
-- [ ] Phase 3: `deploy.sh tenancy old-pool-off`; later, delete the old app client `kvs-demo-web-client`
-- [ ] Phase 4: directory API, System console
+- [x] Phase 3: `deploy.sh tenancy old-pool-off` (2026-11-07)
+- [ ] Later: delete the old app client `kvs-demo-web-client` from `kvs-demo-users` (unused since the switch)
+- [x] Phase 4: directory API, System console — built and tested (2026-11-07)
+- [ ] Phase 4: deployed (`deploy.sh lambda vsz-directory`, `provision.sh directory`, `deploy.sh page`) and its *Verify* recorded
 - [ ] Phase 5: Dealer portal
 - [ ] Phase 6: Adapters — Cloud IDs, activation, release, last seen
 - [ ] Phase 7: Adding cameras from the web page (allocated IDs, per-Pi filtering)

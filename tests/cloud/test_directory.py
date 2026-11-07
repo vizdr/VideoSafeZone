@@ -69,10 +69,17 @@ def test_an_unverified_email_is_passed_as_unverified(claims):
 # --- operator operations ----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("event", [{"op": "ping"}, {"op": "ping", "actor": {"kind": "dealer"}}, None, "ping"])
-def test_only_the_operator_has_operations_yet(event, monkeypatch):
+def test_someone_neither_a_user_nor_the_operator_gets_nothing(event, monkeypatch):
     monkeypatch.setattr(directory, "with_db", lambda work: pytest.fail("reached the database"))
     assert directory.lambda_handler(event, None) == {
-        "ok": False, "error": "only the operator's operations exist yet"}
+        "ok": False, "status": 401, "error": "who is asking? actor.kind must be user or operator"}
+
+
+def test_a_user_can_only_ask_for_a_user_operation(monkeypatch):
+    monkeypatch.setattr(directory, "with_db", lambda work: pytest.fail("reached the database"))
+    for op in ("ping", "operator_seed", "drop"):          # the operator's, or none at all
+        assert directory.lambda_handler({"op": op, "actor": {"kind": "user", "sub": "x"}}, None) == {
+            "ok": False, "status": 404, "error": f"no operation {op!r}"}
 
 
 def test_operations_are_named(monkeypatch):

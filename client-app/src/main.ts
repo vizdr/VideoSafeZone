@@ -15,7 +15,7 @@ async function start(): Promise<void> {
   app.use(OpenVue, { theme: { preset, options: { darkModeSelector: ".app-dark" } } });
   const auth = useAuthStore();
   await auth.restore();          // a refresh token in sessionStorage signs a reloaded tab back in
-  app.use(makeRouter(() => auth.signedIn));
+  app.use(makeRouter(() => auth.signedIn, () => auth.role as never));
   app.mount("#app");
 }
 

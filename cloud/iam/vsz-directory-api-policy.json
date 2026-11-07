@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AskTheDirectory",
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": "arn:aws:lambda:eu-central-1:596633517506:function:vsz-directory"
+    },
+    {
+      "Sid": "InviteAndManageAccountsInVszUsers",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminDisableUser",
+        "cognito-idp:AdminEnableUser",
+        "cognito-idp:AdminUserGlobalSignOut",
+        "cognito-idp:AdminResetUserPassword"
+      ],
+      "Resource": "arn:aws:cognito-idp:eu-central-1:596633517506:userpool/eu-central-1_5QDHHWlPI"
+    }
+  ]
+}

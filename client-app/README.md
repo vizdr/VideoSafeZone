@@ -37,6 +37,7 @@ build at `/app/index.html`, a preview to look at first.
 | `src/stores/userSettings.ts` | the account's own settings (GET/PUT `/me/settings`) |
 | `src/clips/format.ts`, `src/components/events/` | Events: the clip list and its player |
 | `src/stores/`, `src/views/`, `src/components/` | Pinia stores and the Vue screens |
+| `src/auth/roles.ts`, `src/views/system/`, `src/composables/useLoad.ts` | what each role sees and where it lands; the System console (`/directory/*`, DEALER-PANEL-PLAN.md Phase 4) |
 | `src/theme.ts` | the OpenVue preset: Aura, sky accent, slate dark surfaces |
 | `tests/` | Vitest; `camera-controller.spec.ts` keeps the FoundAndFixed fixes the player carries |
 

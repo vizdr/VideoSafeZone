@@ -810,6 +810,23 @@ bash cloud/deploy.sh tenancy enforce              # then it refuses
 bash cloud/deploy.sh tenancy old-pool-off         # kvs-demo-api stops taking kvs-demo-users' tokens
 ```
 
+### The directory API and the System console
+
+`/directory/*` is the web panel's directory: dealers, customers, users, invitations, the price list
+(`DEALER-PANEL-PLAN.md` §6, D8). Its function, `vsz-directory-api`, sits outside the VPC and asks
+`vsz-directory` for everything, so `vsz-directory` must carry the operations first. Once:
+
+```bash
+bash cloud/deploy.sh lambda vsz-directory         # the operations for signed-in people
+bash cloud/provision.sh directory --dry-run       # what it would create, changing nothing
+bash cloud/provision.sh directory                 # role, vsz-directory-api, /directory/{proxy+}, stage
+bash cloud/deploy.sh page                         # the System console and the dealer portal's place
+```
+
+`provision.sh directory` checks itself at the end: CORS answers, a call without a token gets 401,
+and `GET /directory/me` as the demo owner answers `system_owner`. Afterwards `deploy.sh lambda
+vsz-directory-api` ships a change to the API like any other function.
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

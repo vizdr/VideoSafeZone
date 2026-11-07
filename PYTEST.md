@@ -479,7 +479,7 @@ and grants in `cloud/db/migrations/`. A fake can't check those, so they run agai
   directory's code will use, inside a transaction that is rolled back.
 - **Helpers are `tests_db/dbhelpers.py`**, imported by name. `from conftest import …` would pick
   up `tests/conftest.py` first, through `pythonpath`, and install the main suite's guards.
-- **What it checks (42 tests):** the bootstrap (roles IAM-only with their connection limits, the
+- **What it checks (42 tests at Phase 1–3):** the bootstrap (roles IAM-only with their connection limits, the
   database owned by the migrator and closed to every other role, no lasting SET option for the
   master user); the runner (each file once, a failing one rolled back whole, a changed one
   refused); and every rule of the schema — who sits under whom, which role fits which
@@ -488,7 +488,11 @@ and grants in `cloud/db/migrations/`. A fake can't check those, so they run agai
   within an account and ended by a release, plan versions and the audit log never edited, and
   every table readable by `vsz_app` and none by `PUBLIC`. Since Phase 2, also `vsz-directory`'s
   claims for every role (`tests_db/test_directory.py`): the refusals, a person in two accounts, the
-  cap on shared cameras, linking at the first sign-in, a changed address, the demo seed run twice.
+  cap on shared cameras, linking at the first sign-in, a changed address, the demo seed run twice. Since
+  Phase 4 (63 tests), also its operations for signed-in people, each asked as a demo person
+  (`tests_db/test_directory_ops.py`): who may see which list, who may invite whom and manage whom
+  (D6), dealers created once by name, an invitation linked or cancelled, reset only for the signed
+  in and resend only for the invited, the price list replaced whole or refused.
 - **Proved to catch regressions:** granting `vsz_app` UPDATE on plans turns two tests red;
   dropping the bootstrap's `REVOKE SET OPTION` turns one red here and two in
   `tests/cloud/test_db_admin.py`. They found one bug before anything was deployed: a trigger

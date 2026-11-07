@@ -9,39 +9,10 @@ import uuid
 
 import pytest
 
-from dbhelpers import activate, adapter, customer, dealer, member, one, person, platform, site
+from dbhelpers import SUBS, activate, adapter, customer, dealer, demo_spec, member, one, person, platform, site
 from loaders import load_lambda
 
 directory = load_lambda("vsz_directory")
-
-SUBS = {name: str(uuid.uuid4()) for name in
-        ("admin", "owner", "dealer", "holder", "superadmin", "user", "disabled", "suspended")}
-
-
-def demo_spec():
-    """The shape cloud/provision.sh directory-seed sends."""
-    e = {name: f"{name}@example.test" for name in SUBS}
-    return {
-        "users": [{"email": e[n], "sub": SUBS[n], "status": "disabled" if n == "disabled" else "active"}
-                  for n in SUBS],
-        "platform": {"members": [{"email": e["admin"], "role": "system_admin"},
-                                 {"email": e["owner"], "role": "system_owner"}]},
-        "dealers": [{
-            "name": "Demo dealer", "members": [{"email": e["dealer"], "role": "dealer"}],
-            "customers": [
-                {"name": "Demo customer", "reference": "DEMO-1",
-                 "members": [{"email": e["holder"], "role": "customer"},
-                             {"email": e["superadmin"], "role": "customer_admin"},
-                             {"email": e["user"], "role": "customer_user"},
-                             {"email": e["disabled"], "role": "customer_user"}],
-                 "sites": [{"name": "Home", "timezone": "Europe/Berlin",
-                            "adapters": [{"thing": "adapter-01", "name": "Hall"}]}],
-                 "shares": [{"email": e["user"], "camera": "cam-03", "thing": "adapter-01"}]},
-                {"name": "Suspended demo customer", "status": "suspended",
-                 "members": [{"email": e["suspended"], "role": "customer"}]},
-            ]}],
-    }
-
 
 @pytest.fixture
 def seeded(app):
