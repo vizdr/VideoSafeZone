@@ -16,12 +16,12 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-87 entries, from the first build (2026-08-20) through the move onto a second Pi
+88 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
 found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
-planning the dealer panel (2026-11-06).
+planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -112,6 +112,7 @@ planning the dealer panel (2026-11-06).
 | 85 | An unknown IR mode got a 500 from the admin GUI, a 400 from the cloud | admin GUI | 2026-10-28 | fixed 2026-10-28 |
 | 86 | earlyoom killed the agent and two other services; systemd took it as a clean exit and left them down | systemd / platform | 2026-11-01 | fixed 2026-11-01 |
 | 87 | The user pool allowed self sign-up: anyone could make an account and reach every camera | Cognito / setup | 2026-11-06 | fixed 2026-11-06 |
+| 88 | tests_db passed on the Pi only because the shell exported AWS_REGION; CI failed them all | tests | 2026-11-07 | fixed 2026-11-07 |
 
 ### What they have in common
 
@@ -1601,3 +1602,34 @@ is still `demo-viewer`.
 
 **The rule:** a public app client is safe only when sign-up is closed, or when the API checks
 more than "the token came from this pool".
+
+### #88 — tests_db passed on the Pi only because the shell exported AWS_REGION; CI failed them all
+
+**Found:** 2026-11-07, by the first CI run of the new `db` job (`DEALER-PANEL-PLAN.md` Phase 1):
+the `pytest` job passed, `db` failed at "Run tests_db" — while all 27 had passed on the Pi.
+**Referenced from:** `tests_db/conftest.py`, PYTEST.md (tests_db).
+
+`vsz_db_admin.py` reads `AWS_REGION` when it is imported, as every Lambda does
+(`REGION = os.environ["AWS_REGION"]`). The main suite's `tests/conftest.py` sets a fake region,
+fake keys and empty AWS config files before anything is imported. `tests_db/` has its own
+`conftest.py`, by design, and it set none of that. The operator's shell on the Pi exports
+`AWS_REGION`, so the import worked there; CI's runner exports nothing, so loading the module raised
+`KeyError: 'AWS_REGION'` and every test errored. The CI log needs a GitHub login, so the cause was
+found by comparing the two environments, then reproduced: with `AWS_REGION` and
+`AWS_DEFAULT_REGION` removed, all 28 tests error with exactly that `KeyError`.
+
+The same gap meant the suite could see the shell's real AWS identity (profile, config files).
+Nothing in it calls AWS, but a test suite that inherits the operator's credentials is one change
+away from using them.
+
+**Fix:** `tests_db/conftest.py` now does what `tests/conftest.py` does, before the Lambda is
+loaded: removes the AWS identity variables and `DB_*`, and sets a fake region, fake keys,
+`AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` to `/dev/null`, and no instance metadata.
+`test_ff88_no_aws_identity_from_the_shell` checks the result.
+
+**Verified** (2026-11-07): without the fix, in an environment like CI's, 28 errors
+(`KeyError: 'AWS_REGION'`); with it, 28 passed both there and in the operator's shell.
+PostgreSQL 18 — CI's version; the Pi ran 17 — is confirmed by CI's next run.
+
+**The rule:** a test suite sets every environment value the code under test reads, and removes
+the operator's own. Passing on the machine that wrote it proves only that machine's shell.

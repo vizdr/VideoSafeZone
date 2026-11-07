@@ -14,8 +14,8 @@ adding cameras from the web page, the sign-in page, the Account page, a tariff p
 the user's requirements, §4c), as proposed, with two changes from the user: the screens say
 VideoSafeZone (D17), and the Account page has no Opt-ins for now (D18).
 **Progress:** Phase 0.1 (sign-up closed, #87 fixed) and 0.3 (deletion protection and IAM
-authentication on the database) done 2026-11-06, run by the user. **Phase 1 built and tested
-2026-11-06** (not provisioned yet: `bash cloud/provision.sh directory-db`, run by the user).
+authentication on the database) done 2026-11-06, run by the user. **Phase 1 done 2026-11-07**:
+built and tested, provisioned by the user (`provision.sh directory-db`), verified. Next: Phase 2.
 
 ---
 
@@ -130,8 +130,8 @@ The old pool stays for VMS, untouched.
 videosafezone` on `database-coursera-iot`, schema `vsz`. Two login roles, both IAM-authenticated
 (D3), neither the master user: `vsz_migrator` (owns the schema, runs migrations) and `vsz_app`
 (reads and writes rows, no DDL), with `CONNECTION LIMIT` 10 and 3 so we can't starve the other
-project of the micro instance's connections (the default formula gives roughly 100 for 1 GiB;
-check `SHOW max_connections` in Phase 1). Migrations are numbered SQL files in `cloud/db/migrations/`,
+project of the micro instance's connections (measured in Phase 1: `max_connections` is 79, so
+our 13 leave 66 for the other project and RDS's own `rdsadmin`). Migrations are numbered SQL files in `cloud/db/migrations/`,
 applied in order and recorded in a `schema_migrations` table.
 *Cost:* the instance is already running and paid for, so the directory adds storage only.
 *Risk, accepted for a demo:* sign-in now depends on a single-AZ micro instance shared with another
@@ -853,7 +853,9 @@ Then: both flags true and nothing pending (`describe-db-instances`); the instanc
 restart** — the instance logged no event at all. The other project's two Lambdas last ran in July
 and August, so nothing was using the database at the time.
 0.4 Check the master secret still logs in, and which databases exist (from `vsz-db-admin`'s first
-run, Phase 1) — the other project's must not be touched.
+run, Phase 1) — the other project's must not be touched. **Done 2026-11-07:** the secret logged in
+(the bootstrap used it once); the databases are `postgres` — the default, where the other project's
+data lives, untouched — `rdsadmin` (RDS's own) and now `videosafezone`.
 
 *Verify:* `aws cognito-idp sign-up` with the client ID is refused ("SignUp is not permitted");
 `describe-user-pool` differs from before only in that flag; VMS's page still signs in.
@@ -904,6 +906,22 @@ migrations; `SHOW max_connections` and the other project's database list recorde
 - **Dry run against the account:** `provision.sh directory-db --dry-run` lists the layer, the
   security group `vsz-db-client`, the one rule added to `rds-lambda-2`, the role, the function in
   the three subnets, then the bootstrap, migrations and status — and changes nothing.
+
+*Provisioned 2026-11-07* (run by the user, `bash cloud/provision.sh directory-db`), and verified:
+- Created: layer `vsz-pg:1`; security group `vsz-db-client` (`sg-024dd79b5279ab901`, no inbound
+  rules); on `rds-lambda-2` one added rule, tcp 5432 from it, beside the other project's two;
+  role `vsz-db-admin-role` (inline policy equal to `cloud/iam/vsz-db-admin-policy.json`, checked);
+  function `vsz-db-admin` in the three subnets, `Active`, live code = this tree.
+- Bootstrap: created `vsz_migrator` (limit 3), `vsz_app` (limit 10), database `videosafezone`
+  (owner `vsz_migrator`); the master password went to the function once and was used for one
+  connection. Migration `001_directory.sql` applied; `db-migrate --dry-run` afterwards: none pending.
+- Status, through verified TLS as `vsz_migrator` with an IAM token: PostgreSQL 18.3,
+  `max_connections` 79, both roles IAM-only; at the time 3 `rdsadmin` connections, 5 background,
+  1 ours. The function's log holds only Lambda's own start/end lines — nothing it printed.
+- CI: the first run of the `db` job failed — `tests_db` had passed on the Pi only because the shell
+  exported `AWS_REGION` (FoundAndFixed.md #88, fixed the same day; 28 tests now). Its next run is
+  also the first on PostgreSQL 18: the Pi has 17, and fetching 18 from outside Debian's own
+  repository was refused by the session's safety check.
 
 ### Phase 2: Identity
 
@@ -1069,7 +1087,8 @@ of its own if the shared instance's availability becomes the limit.
   well under Cognito's 5 seconds; if not, provisioned concurrency of 1 (a small fixed cost) or a
   lighter path for the trigger.
 - What the instance does to sign-in during its maintenance window and minor-version upgrades.
-- `max_connections` on the micro instance against the other project's use.
+- `max_connections` on the micro instance against the other project's use — measured 79 (Phase 1);
+  our roles are capped at 13.
 - **The account's Lambda concurrency is 10 in total** (found in Phase 1), for every function at
   once — the camera API, the directory, the other projects. Enough for a demo; before real
   customers, ask AWS for the quota to be raised (Service Quotas, "Concurrent executions").
@@ -1087,7 +1106,8 @@ of its own if the shared instance's availability becomes the limit.
 - [x] D11–D14 (several adapters, §4b), D15–D19 (§4c) and the amendments to D1, D4, D6 settled with the user (2026-11-06)
 - [x] Phase 0.3: deletion protection and IAM auth on `database-coursera-iot` (2026-11-06, no restart)
 - [x] Phase 1: layer, `vsz-db-admin`, migration 001, `tests_db/` in CI — built and tested (2026-11-06)
-- [ ] Phase 1: provisioned (`provision.sh directory-db`, the user) and its *Verify* recorded
+- [x] Phase 0.4: the master secret works; the instance's databases recorded (2026-11-07)
+- [x] Phase 1: provisioned (`provision.sh directory-db`, the user) and its *Verify* recorded (2026-11-07)
 - [ ] Phase 2: `vsz-users`, `vsz-directory` + trigger, seed, the sign-in page, Account details
 - [ ] Phase 3: `adapterId`, tenant checks report → enforce, pool switch
 - [ ] Phase 4: directory API, System console

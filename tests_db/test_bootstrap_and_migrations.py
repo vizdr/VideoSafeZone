@@ -5,6 +5,7 @@ capped connections, a database the other project's roles can't even connect to, 
 migrator, and the master user without a lasting way to act as it. The runner must apply each file
 once, in one transaction, and refuse to run when the files and the database disagree.
 """
+import os
 import shutil
 
 import pytest
@@ -118,3 +119,13 @@ def test_an_applied_migration_that_changed_is_refused(admin, scratch_db, tmp_pat
     first.write_text(first.read_text() + "\n-- edited after it was applied\n")
     with pytest.raises(admin.AdminError, match="has changed since"):
         admin.migrate(scratch_db, admin.read_migrations(folder), dry_run=True)
+
+
+def test_ff88_no_aws_identity_from_the_shell(admin):
+    """FoundAndFixed.md #88: the suite passed on the Pi only because the shell exported AWS_REGION."""
+    assert os.environ["AWS_CONFIG_FILE"] == os.devnull
+    assert os.environ["AWS_SHARED_CREDENTIALS_FILE"] == os.devnull
+    assert os.environ["AWS_ACCESS_KEY_ID"] == "testing"
+    assert "AWS_PROFILE" not in os.environ and "DB_HOST" not in os.environ
+    assert admin.REGION == "eu-central-1" and admin.DB_HOST == ""
+

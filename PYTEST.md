@@ -469,13 +469,17 @@ and grants in `cloud/db/migrations/`. A fake can't check those, so they run agai
   `venv-adapter/bin/python -m pip install --require-hashes --no-deps -r cloud/layers/vsz-pg/requirements.txt`
   — the same pinned file the `vsz-pg` Lambda layer is built from. (Built here first with
   Debian's own packages unpacked into a scratch directory, no install: PostgreSQL 17.11.)
+- **Hermetic, like the main suite:** before anything is imported, `tests_db/conftest.py` removes
+  the shell's AWS identity and `DB_*` and sets the same fakes as `tests/conftest.py` — a fake
+  region and keys, `/dev/null` for the AWS config files. Without that, the suite passed on the Pi
+  only because the shell exported `AWS_REGION`, and failed in CI (FoundAndFixed.md #88).
 - **What the session builds:** a stand-in for RDS's `rds_iam` role, `vsz-db-admin`'s bootstrap
   of the test database (twice: it must be repeatable), test-only passwords for the two roles (IAM
   tokens on RDS), the migrations (twice). Each test then works **as `vsz_app`**, the role the
   directory's code will use, inside a transaction that is rolled back.
 - **Helpers are `tests_db/dbhelpers.py`**, imported by name. `from conftest import …` would pick
   up `tests/conftest.py` first, through `pythonpath`, and install the main suite's guards.
-- **What it checks (27 tests):** the bootstrap (roles IAM-only with their connection limits, the
+- **What it checks (28 tests):** the bootstrap (roles IAM-only with their connection limits, the
   database owned by the migrator and closed to every other role, no lasting SET option for the
   master user); the runner (each file once, a failing one rolled back whole, a changed one
   refused); and every rule of the schema — who sits under whom, which role fits which

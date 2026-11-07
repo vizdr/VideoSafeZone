@@ -11,10 +11,29 @@ of the test database (run twice -- it must be repeatable), test-only passwords f
 (on RDS they log in with IAM tokens), and the migrations, applied twice. Each test then works as
 vsz_app inside a transaction that is rolled back, so tests can't see each other's rows.
 """
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# No AWS identity here, ever, and nothing taken from the shell: vsz-db-admin reads AWS_REGION and
+# DB_* when it is imported, and a value the operator's shell happens to export made these tests
+# pass on the Pi and fail in CI, where nothing is exported (FoundAndFixed.md #88). The same fakes
+# as tests/conftest.py.
+for _key in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_DEFAULT_REGION", "AWS_ROLE_ARN",
+             "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+             "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "DB_HOST", "DB_PORT", "DB_NAME", "DB_CA_BUNDLE"):
+    os.environ.pop(_key, None)
+os.environ.update({
+    "AWS_REGION": "eu-central-1",
+    "AWS_ACCESS_KEY_ID": "testing",
+    "AWS_SECRET_ACCESS_KEY": "testing",
+    "AWS_SESSION_TOKEN": "testing",
+    "AWS_CONFIG_FILE": os.devnull,
+    "AWS_SHARED_CREDENTIALS_FILE": os.devnull,
+    "AWS_EC2_METADATA_DISABLED": "true",
+})
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # dbhelpers, by name
 
