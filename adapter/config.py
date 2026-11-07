@@ -45,6 +45,12 @@ def get(key):
     return value
 
 
+def flag(key):
+    """A yes/no switch. The one kind of key that may be absent: absent means "no", which must always
+    be the safe side -- a switch that turns something on, never one that a missing line turns off."""
+    return (os.environ.get(key) or _FILE.get(key) or "no").strip().lower() == "yes"
+
+
 AWS_REGION = get("AWS_REGION")
 THING_NAME = get("THING_NAME")
 IOT_ROLE_ALIAS = get("IOT_ROLE_ALIAS")
@@ -54,3 +60,8 @@ EVIDENCE_BUCKET = get("EVIDENCE_BUCKET")
 
 # MQTT topics are per-Thing; the IoT policy scopes them to ${iot:Connection.Thing.ThingName}.
 TOPIC_PREFIX = f"adapter/{THING_NAME}"
+
+# Stamp this Thing name as adapterId on registry rows that have none and whose MediaMTX path this
+# Pi serves (rematch_cameras.adopt_unstamped; DEALER-PANEL-PLAN.md D4, D12). Only adapter-01, which
+# served every camera registered before adapterId existed, says yes; a second Pi never claims rows.
+ADOPT_UNSTAMPED_ROWS = flag("ADOPT_UNSTAMPED_ROWS")

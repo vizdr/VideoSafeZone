@@ -11,6 +11,11 @@
 #   bash cloud/deploy.sh rollback page | app
 #   bash cloud/deploy.sh db-status                 the directory database, as vsz-db-admin sees it
 #   bash cloud/deploy.sh db-migrate                apply new migrations (cloud/db/migrations/) through it
+#   bash cloud/deploy.sh tenancy status            the tenant check (DEALER-PANEL-PLAN.md 3.3): each function's
+#                                                  TENANCY, the pools kvs-demo-api's authorizer accepts
+#   bash cloud/deploy.sh tenancy log [HOURS]       what the check refused / would refuse, last 24 h
+#   bash cloud/deploy.sh tenancy enforce | report  switch every function with the check
+#   bash cloud/deploy.sh tenancy old-pool-off      kvs-demo-api stops accepting kvs-demo-users (VMS keeps it)
 #   ... --dry-run   say what would happen, change nothing
 #   ... --force     deploy over live code that matches neither this tree nor git HEAD
 #
@@ -53,6 +58,10 @@ SITE=https://dugyd3kkt36pw.cloudfront.net
 LAMBDA_DIR="$VMS_HOME/cloud/lambda"
 BACKUPS="${XDG_STATE_HOME:-$HOME/.local/state}/vms-deploy-backups"
 SHARED_WITH_VMS=(clip-to-s3)
+API_NAME=kvs-demo-api
+STAGE=prod
+AUTHORIZER_NAME=CognitoAuthorizer
+OLD_POOL_NAME=kvs-demo-users       # shared with VMS; this API stops accepting it at the end of 3.3
 APP_SRC="$VMS_HOME/client-app"
 APP_BUILD=""                      # set by build_app
 WEB_PREFIX=""                     # where `page` (root: "") or `app` ("app") publishes the build
@@ -178,6 +187,14 @@ deploy_lambda() {
   for s in "${SHARED_WITH_VMS[@]}"; do
     [ "$name" != "$s" ] || warn "$name is also used by VMS: its event shape and clip rows must stay backward compatible"
   done
+  # The tenant check enforces when TENANCY is unset: never deploy it to a function that has no
+  # setting yet, or the page loses every camera at once (DEALER-PANEL-PLAN.md 3.3).
+  if grep -q '^def tenancy_refusal' "$py"; then
+    local mode
+    mode=$(aws lambda get-function-configuration --function-name "$name" --query Environment.Variables.TENANCY --output text)
+    [ -n "$mode" ] && [ "$mode" != None ] ||
+      die "$name: no TENANCY setting yet -- bash cloud/provision.sh tenancy first (it sets report)"
+  fi
   if [ "$DRY" -eq 1 ]; then say "$name: would deploy $(package_files "$name" | tr '\n' ' ')(live: $(describe "$state"))"; return 0; fi
   mkdir -p "$BACKUPS/$STAMP"
   cp "$TMP/live-$name/live.zip" "$BACKUPS/$STAMP/$name.zip"
@@ -187,6 +204,104 @@ deploy_lambda() {
   [ "$(compare_lambda "$name")" = same ] || die "$name: deployed, but the live code doesn't match the tree"
   say "$name: deployed and verified (previous copy: $BACKUPS/$STAMP/$name.zip)"
   [ "$name" != vsz-db-admin ] || say "$name: its migrations are applied by: bash cloud/deploy.sh db-migrate"
+}
+
+# --- the tenant check's rollout (DEALER-PANEL-PLAN.md 3.3) ------------------------------------------
+
+tenancy_functions() { grep -l '^def tenancy_refusal' "$LAMBDA_DIR"/*.py | xargs -n1 basename | sed 's/\.py$//; s/_/-/g'; }
+
+api_ids() {           # sets API, AUTHORIZER
+  API=$(aws apigateway get-rest-apis --query "items[?name=='$API_NAME'].id" --output text)
+  [ -n "$API" ] && [ "$API" != None ] || die "no REST API named $API_NAME"
+  AUTHORIZER=$(aws apigateway get-authorizers --rest-api-id "$API" --query "items[?name=='$AUTHORIZER_NAME'].id" --output text)
+  [ -n "$AUTHORIZER" ] && [ "$AUTHORIZER" != None ] || die "no authorizer $AUTHORIZER_NAME on $API_NAME"
+}
+authorizer_pools() { aws apigateway get-authorizer --rest-api-id "$API" --authorizer-id "$AUTHORIZER" \
+  --query providerARNs --output text | tr '\t' '\n'; }
+pool_arn() {          # pool_arn NAME -- the ARN of the user pool with that name
+  local id; id=$(aws cognito-idp list-user-pools --max-results 60 --query "UserPools[?Name=='$1'].Id" --output text)
+  [ -n "$id" ] && [ "$id" != None ] && [ "$(wc -w <<<"$id")" -eq 1 ] || die "not exactly one user pool named $1"
+  printf 'arn:aws:cognito-idp:%s:%s:userpool/%s\n' "$REGION" "$ACCOUNT" "$id"
+}
+tenancy_mode() { aws lambda get-function-configuration --function-name "$1" --query Environment.Variables.TENANCY --output text; }
+
+set_tenancy() {       # set_tenancy FUNCTION MODE -- TENANCY changed, every other variable kept
+  local vars merged
+  vars=$(aws lambda get-function-configuration --function-name "$1" --query 'Environment.Variables' --output json)
+  merged=$(python3 -c 'import json, sys
+d = json.loads(sys.argv[1]) or {}; d["TENANCY"] = sys.argv[2]; print(json.dumps({"Variables": d}))' "$vars" "$2")
+  aws lambda update-function-configuration --function-name "$1" --environment "$merged" >/dev/null
+  aws lambda wait function-updated --function-name "$1"
+}
+
+tenancy_command() {   # tenancy_command status | log [HOURS] | report | enforce | old-pool-off
+  local fn mode old
+  api_ids
+  case "${1:-status}" in
+    status)
+      for fn in $(tenancy_functions); do printf '  %-26s TENANCY=%s\n' "$fn" "$(tenancy_mode "$fn")"; done
+      say "$AUTHORIZER_NAME accepts: $(authorizer_pools | tr '\n' ' ')" ;;
+    log)
+      local since=$(( ($(date +%s) - ${2:-24} * 3600) * 1000 ))
+      for fn in $(tenancy_functions); do
+        aws logs filter-log-events --log-group-name "/aws/lambda/$fn" --start-time "$since" \
+          --filter-pattern '"tenancy"' --query 'events[].message' --output json 2>/dev/null || echo '[]'
+      done | python3 -c '
+import collections, json, sys
+seen = collections.Counter()
+for chunk in sys.stdin.read().replace("][", "]\n[").splitlines():
+    for message in json.loads(chunk or "[]"):
+        try:
+            e = json.loads(message[message.index("{"):])
+        except ValueError:
+            continue
+        seen[(e["tenancy"], e["verdict"], e.get("role") or "(no vsz claims: old pool)", e["need"], e.get("camera"))] += 1
+if not seen:
+    print("  nothing refused, nothing that would be")
+for (what, verdict, role, need, camera), n in sorted(seen.items()):
+    print(f"  {n:5d}  {what:12s} {verdict:9s} {role:28s} {need:7s} {camera}")'
+      say "(the last ${2:-24} h; refusals of callers with no vsz claims are the old pool's page -- expected until the switch)" ;;
+    report|enforce)
+      for fn in $(tenancy_functions); do
+        mode=$(tenancy_mode "$fn")
+        if [ "$mode" = "$1" ]; then say "  $fn: $1 already"; continue; fi
+        if [ "$DRY" -eq 1 ]; then say "  $fn: would switch $mode -> $1"; continue; fi
+        set_tenancy "$fn" "$1"
+        [ "$(tenancy_mode "$fn")" = "$1" ] || die "$fn: TENANCY isn't $1 afterwards"
+        say "  $fn: $mode -> $1"
+      done ;;
+    old-pool-off)
+      old=$(pool_arn "$OLD_POOL_NAME")
+      grep -qxF "$(pool_arn vsz-users)" <<<"$(authorizer_pools)" || die "$AUTHORIZER_NAME doesn't accept vsz-users: nothing to switch to"
+      for fn in $(tenancy_functions); do
+        [ "$(tenancy_mode "$fn")" = enforce ] || die "$fn doesn't enforce yet: bash cloud/deploy.sh tenancy enforce first"
+      done
+      if ! grep -qxF "$old" <<<"$(authorizer_pools)"; then say "$AUTHORIZER_NAME accepts $OLD_POOL_NAME no more already"; return; fi
+      if [ "$DRY" -eq 1 ]; then say "would remove $OLD_POOL_NAME from $AUTHORIZER_NAME and deploy stage $STAGE (VMS's pir-api keeps it)"; return; fi
+      aws apigateway update-authorizer --rest-api-id "$API" --authorizer-id "$AUTHORIZER" \
+        --patch-operations "op=remove,path=/providerARNs,value=$old" >/dev/null
+      ! grep -qxF "$old" <<<"$(authorizer_pools)" || die "$AUTHORIZER_NAME still accepts $OLD_POOL_NAME after the patch"
+      aws apigateway create-deployment --rest-api-id "$API" --stage-name "$STAGE" --description "deploy.sh tenancy old-pool-off" >/dev/null
+      say "$AUTHORIZER_NAME now accepts only: $(authorizer_pools | tr '\n' ' ') -- stage $STAGE deployed" ;;
+    *) die "tenancy status | log [HOURS] | report | enforce | old-pool-off" ;;
+  esac
+}
+
+# The page signs in to the pool of its COGNITO_CLIENT_ID; publishing it before kvs-demo-api's
+# authorizer accepts that pool would answer every call 401 (DEALER-PANEL-PLAN.md 3.3).
+check_page_pool() {
+  local client pool arn
+  client=$(sed -n 's/^export const COGNITO_CLIENT_ID = "\([^"]*\)".*/\1/p' "$APP_SRC/src/config.ts")
+  [ -n "$client" ] || die "no COGNITO_CLIENT_ID in client-app/src/config.ts"
+  for pool in $(aws cognito-idp list-user-pools --max-results 60 --query 'UserPools[].Id' --output text); do
+    if aws cognito-idp describe-user-pool-client --user-pool-id "$pool" --client-id "$client" >/dev/null 2>&1; then
+      arn="arn:aws:cognito-idp:$REGION:$ACCOUNT:userpool/$pool"; break
+    fi
+  done
+  [ -n "${arn:-}" ] || die "client-app/src/config.ts names app client $client, which no user pool here has"
+  api_ids
+  grep -qxF "$arn" <<<"$(authorizer_pools)" ||
+    die "the page signs in to $arn, which $AUTHORIZER_NAME doesn't accept yet -- bash cloud/provision.sh tenancy first"
 }
 
 # The directory database through vsz-db-admin (DEALER-PANEL-PLAN.md Phase 1): status, or the
@@ -295,6 +410,7 @@ upload_web_dir() {
 
 deploy_web() {   # deploy_web PREFIX -- "" for the site (page), "app" for the preview
   WEB_PREFIX=$1
+  check_page_pool
   build_app
   local state i name; state=$(compare_web); name=$(web_name)
   case "$state" in
@@ -377,6 +493,7 @@ case "${1:-}" in
   all)      preflight; for n in $(all_functions); do deploy_lambda "$n"; done; deploy_web "" ;;
   rollback) preflight; shift; rollback "$@" ;;
   db-status)  preflight; db_command status ;;
+  tenancy)    preflight; shift; tenancy_command "$@" ;;
   db-migrate) preflight; db_command migrate ;;
-  *) sed -n '2,18p' "$0"; exit 1 ;;
+  *) sed -n '2,20p' "$0"; exit 1 ;;
 esac

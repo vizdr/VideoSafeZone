@@ -211,6 +211,11 @@ def register_camera():
         # still safe to refresh -- editing a path's config doesn't care which unit feeds it.
         if existing.get("mode") != "passthrough" or not existing.get("onvifHost"):
             return jsonify({"error": f"'{camera_id}' exists but isn't a re-registerable ONVIF camera"}), 409
+        # Another adapter's camera isn't this Pi's to re-register: that would hand it, and its
+        # customer's recordings, to this Pi's customer (DEALER-PANEL-PLAN.md D11).
+        owner = existing.get("adapterId")
+        if owner and owner != config.THING_NAME:
+            return jsonify({"error": f"'{camera_id}' belongs to another adapter ({owner})"}), 409
         # Re-registering an unregistered camera also brings it back: its path is added again
         # (Unregister deleted it) and the mark is removed. Its producer stays stopped until
         # someone presses Start, as every producer does after a reboot (FoundAndFixed.md #81).
@@ -247,10 +252,12 @@ def register_camera():
             return jsonify({"error": f"MediaMTX path update failed: {e}"}), 502
 
         # REMOVE is a no-op on a row without the mark, so every re-registration can carry it.
+        # adapterId: which Thing serves the camera -- what the camera API's tenant check compares
+        # with the caller's token (DEALER-PANEL-PLAN.md D4); stamped here if the row predates it.
         sets = ("hasIrControl = :ir, onvifHost = :h, onvifPort = :p, onvifUser = :u, "
-                "onvifPassword = :pw, rtspUrl = :uri, updatedAt = :t")
+                "onvifPassword = :pw, rtspUrl = :uri, adapterId = :aid, updatedAt = :t")
         values = {":ir": has_ir_control, ":h": host, ":p": port, ":u": user, ":pw": password,
-                  ":uri": stream_uri, ":t": _now()}
+                  ":uri": stream_uri, ":aid": config.THING_NAME, ":t": _now()}
         if endpoint_ref:
             sets += ", onvifEndpointRef = :ref"
             values[":ref"] = endpoint_ref
@@ -356,6 +363,7 @@ def register_camera():
         **({"onvifEndpointRef": endpoint_ref} if endpoint_ref else {}),
         "hasIrControl": has_ir_control,
         "kvsStreamArn": stream_arn,
+        "adapterId": config.THING_NAME,          # the tenant check's key (DEALER-PANEL-PLAN.md D4)
         "audioCapable": bool(audio_capable),
         "createdAt": _now(),
         **({"displayName": display_name} if display_name else {}),

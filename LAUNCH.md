@@ -792,6 +792,24 @@ bash cloud/sign-in-check.sh demo-holder@example.com   # any time: sign in, show 
 
 The demo accounts' passwords are in `~/.local/state/videosafezone/demo-accounts.txt` (0600).
 
+### The tenant check: each customer sees only their cameras
+
+Every camera and clip Lambda compares the caller's ID token with the camera row's `adapterId`
+(`DEALER-PANEL-PLAN.md` D4). Rolled out in steps; `bash cloud/deploy.sh tenancy status` shows where
+it stands:
+
+```bash
+# on the Pi, once: rows from before adapterId get adapter-01 (rematch_cameras, every 5 min)
+echo ADOPT_UNSTAMPED_ROWS=yes | sudo tee -a /etc/adapter/adapter.env
+systemctl --user restart onvif-admin              # the admin GUI writes adapterId at registration
+bash cloud/provision.sh tenancy                   # TENANCY=report, the new pool beside the old
+bash cloud/deploy.sh lambdas                      # the check: logs, refuses nothing
+bash cloud/deploy.sh page                         # the page signs in to vsz-users
+bash cloud/deploy.sh tenancy log                  # a day later: what it would have refused
+bash cloud/deploy.sh tenancy enforce              # then it refuses
+bash cloud/deploy.sh tenancy old-pool-off         # kvs-demo-api stops taking kvs-demo-users' tokens
+```
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

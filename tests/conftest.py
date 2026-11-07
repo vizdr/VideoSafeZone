@@ -48,6 +48,10 @@ os.environ.update({
     "ADAPTER_CONFIG": str(FIXTURES / "adapter.env"),
     "AWS_REGION": "eu-central-1",        # the same value as tests/fixtures/adapter.env
     "BUCKET": "test-bucket",             # the clip Lambdas read it at import
+    # The camera Lambdas' tenant check logs and refuses nothing under "report", the rollout's
+    # first step (DEALER-PANEL-PLAN.md 3.3): the tests of what each Lambda does call it as the old
+    # pool's page did, without claims. tests/cloud/test_tenancy.py sets "enforce" itself.
+    "TENANCY": "report",
     "AWS_ACCESS_KEY_ID": "testing",
     "AWS_SECRET_ACCESS_KEY": "testing",
     "AWS_SESSION_TOKEN": "testing",

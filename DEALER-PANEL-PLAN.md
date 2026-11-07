@@ -17,7 +17,8 @@ VideoSafeZone (D17), and the Account page has no Opt-ins for now (D18).
 authentication on the database) done 2026-11-06, run by the user. **Phase 1 done 2026-11-07**:
 built and tested, provisioned by the user (`provision.sh directory-db`), verified. **Phase 2 done
 2026-11-07**: provisioned by the user and verified, the trigger's cold start included (1.09 s,
-FoundAndFixed.md #89). Next: Phase 3.
+FoundAndFixed.md #89). **Phase 3 built and tested 2026-11-07**; its rollout (3.3) is the
+user's, in steps over a day.
 
 ---
 
@@ -1016,6 +1017,37 @@ pool from `kvs-demo-api`'s authorizer (VMS's `pir-api` keeps it). This repositor
 *Verify:* as the demo customer, everything on Live / Events / Settings works; a second test
 customer with no adapter sees no cameras, and a direct `curl` for `cam-03` with its token gets the
 unknown-camera answer; as the dealer, the camera routes refuse; VMS's page unaffected.
+
+*Built 2026-11-07* (1229 offline pytest, 42 tests_db, 135 Vitest):
+- **3.1** The admin GUI writes `adapterId` (this Pi's `THING_NAME`) at registration and at
+  re-registration, and refuses to re-register a camera whose row names another adapter (D11's
+  guard, taken now since the field exists). `rematch_cameras.adopt_unstamped` stamps rows without
+  `adapterId` whose MediaMTX path this Pi serves — configured or published, so the USB `cam-01`
+  too — one conditional write each, on a Pi whose `adapter.env` says `ADOPT_UNSTAMPED_ROWS=yes`
+  (D12, taken now): `config.flag()`, the one kind of key that may be absent, absent meaning no.
+- **3.2** Three functions in all twelve camera and clip Lambdas, identical (the twin test now pins
+  them): `tenant_access` (control / view / none, from `vsz_adapters` and `vsz_cameras`; a row
+  without `adapterId` is an administrator's alone), `tenancy_refusal` (logs each refusal as one
+  JSON line; `TENANCY=report` refuses nothing; unset means enforce), `view_only_response` (403).
+  A hidden camera gets the route's own unknown-camera answer; the three clip Lambdas, which had
+  none, answer 404 "no such clip" and now read the camera row (`CamerasRegistryRead` on their
+  roles). `list-cameras` lists only what the caller reaches, each camera with `access`.
+  `tests/cloud/test_tenancy.py` (186): every route × holder, Super Admin, a user with `cam-03`
+  shared, one with `cam-04` shared, another customer, dealer, owner, administrator, an old pool's
+  token, no token; the unstamped row; the list; the logging; report mode; unset = enforce. Breaking
+  one route's need, or one copy of a helper, turns it red.
+- **3.3 tooling.** `provision.sh tenancy`: the clip roles' policy, `TENANCY=report` on the twelve,
+  `vsz-users` added to the authorizer — read back, every old pool still there — and the stage
+  deployed. `deploy.sh tenancy status | log [HOURS] | report | enforce | old-pool-off`;
+  `old-pool-off` refuses while any function doesn't enforce. Guards: `deploy.sh` won't deploy a
+  Lambda with the check to a function without `TENANCY` (unset would enforce at once), and
+  `deploy.sh page` won't publish a page whose sign-in pool the authorizer doesn't accept.
+  `client-app/src/config.ts` names `vsz-web` now, so the next page deploy is the switch.
+
+*Rollout (3.3), as it goes:*
+- 2026-11-07: `ADOPT_UNSTAMPED_ROWS=yes` in the Pi's `/etc/adapter/adapter.env` (the user); the
+  next `kvs-camera-rematch` run stamped `cam-01`…`cam-04` with `adapter-01` — checked in the
+  registry. (A dry run before had named the same four, the USB camera included.)
 
 ### Phase 4: Directory API and the System console
 

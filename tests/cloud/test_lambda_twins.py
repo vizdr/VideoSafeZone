@@ -37,7 +37,12 @@ SHARED = _functions()
 
 def test_the_known_copies_are_found():
     assert {"utc", "codec_windows", "mp4_video_codec", "_child", "mp4_duration_sec",
-            "no_fragments", "unregistered_response"} <= set(SHARED)
+            "no_fragments", "unregistered_response",
+            # the tenant check, in all twelve camera and clip Lambdas (DEALER-PANEL-PLAN.md 3.2)
+            "tenant_access", "tenancy_refusal", "view_only_response",
+            # the directory functions' database helpers (vsz-db-admin, vsz-directory)
+            "rds_token", "tls_context", "connect", "sql_state", "sql_message"} <= set(SHARED)
+    assert len(SHARED["tenancy_refusal"]) == 12
 
 
 @pytest.mark.parametrize("name", sorted(SHARED))

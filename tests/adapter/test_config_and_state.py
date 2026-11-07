@@ -41,6 +41,15 @@ def test_empty_value_counts_as_missing(monkeypatch):
         config.get("THING_NAME")
 
 
+@pytest.mark.parametrize("value, on", [(None, False), ("", False), ("no", False), ("yes", True),
+                                       (" YES ", True), ("true", False), ("1", False)])
+def test_a_switch_is_on_only_for_yes(monkeypatch, value, on):
+    # The one kind of key that may be absent: absent must be the safe side (DEALER-PANEL-PLAN.md D12).
+    monkeypatch.setattr(config, "_FILE", {} if value is None else {"ADOPT_UNSTAMPED_ROWS": value})
+    monkeypatch.delenv("ADOPT_UNSTAMPED_ROWS", raising=False)
+    assert config.flag("ADOPT_UNSTAMPED_ROWS") is on
+
+
 # --- aws_state ------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("online", [True, False])

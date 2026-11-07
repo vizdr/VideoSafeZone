@@ -350,3 +350,27 @@ def test_registration_records_the_quality_ceiling(gui):
     assert g.post("/api/cameras", NEW)[0] == 201
     row = g.table.row("cam-04")
     assert (row["recordStream"], row["recordSize"], row["recordFps"]) == ("main", "2560x1440", 15)
+
+
+# --- adapterId: which Thing serves the camera (DEALER-PANEL-PLAN.md D4, D11) ------------------------
+
+def test_a_new_camera_is_this_adapters(gui):
+    g = _new_camera_gui(gui)
+    _expect_kvs(g)
+    assert g.post("/api/cameras", NEW)[0] == 201
+    assert g.table.row("cam-04")["adapterId"] == "test-thing"
+
+
+def test_reregistration_stamps_a_row_that_predates_adapterid(gui):
+    g = _known_gui(gui)
+    assert "adapterId" not in g.table.row("cam-03")
+    assert g.post("/api/cameras", REREG)[0] == 200
+    assert g.table.row("cam-03")["adapterId"] == "test-thing"
+
+
+def test_another_adapters_camera_cannot_be_reregistered_here(gui):
+    g = gui(rows=[{**CAM03, "adapterId": "adapter-0002"}], mtx=FakeMediaMTX(), camera=media2("192.0.2.13"))
+    status, body = g.post("/api/cameras", REREG)
+    assert (status, body) == (409, {"error": "'cam-03' belongs to another adapter (adapter-0002)"})
+    assert g.mtx.writes() == [] and g.table.row("cam-03")["adapterId"] == "adapter-0002"
+

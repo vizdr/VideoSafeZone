@@ -21,6 +21,10 @@
 #   bash cloud/provision.sh directory-seed EMAIL      the system administrator (EMAIL, invited by Cognito)
 #                                                     and the demo directory and accounts; then signs in
 #                                                     as each demo account and shows its claims
+#   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
+#                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
+#                                                     on every function with the check, vsz-users beside
+#                                                     kvs-demo-users on kvs-demo-api's authorizer
 #
 # deploy.sh replaces the code of functions that exist; this creates what doesn't exist yet -- and
 # only that. Every step looks first and leaves an existing resource as it is, so a second run
@@ -658,6 +662,59 @@ PY
   say "the administrator ($admin) signs in with the emailed temporary password and chooses a new one (the web page, Phase 3)"
 }
 
+# --- the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md 3.3, D4) -------------------------------
+
+tenancy_functions() { grep -l '^def tenancy_refusal' "$LAMBDA_DIR"/*.py | xargs -n1 basename | sed 's/\.py$//; s/_/-/g'; }
+
+authorizer_pools() { aws apigateway get-authorizer --rest-api-id "$API" --authorizer-id "$AUTHORIZER" \
+  --query providerARNs --output text | tr '\t' '\n'; }
+
+ensure_authorizer_pool() {      # vsz-users beside the old pool on kvs-demo-api's authorizer: added, nothing removed
+  local before after
+  before=$(authorizer_pools)
+  if grep -qxF "$POOL_ARN" <<<"$before"; then say "$AUTHORIZER_NAME: accepts $POOL_NAME already"; return; fi
+  if [ "$DRY" -eq 1 ]; then
+    say "would ADD $POOL_NAME to $AUTHORIZER_NAME, beside $(tr '\n' ' ' <<<"$before")(nothing removed), and deploy stage $STAGE"
+    return
+  fi
+  aws apigateway update-authorizer --rest-api-id "$API" --authorizer-id "$AUTHORIZER" \
+    --patch-operations "op=add,path=/providerARNs,value=$POOL_ARN" >/dev/null
+  after=$(authorizer_pools)
+  # Read back: the new pool there, and every pool that was there still there.
+  grep -qxF "$POOL_ARN" <<<"$after" || die "$AUTHORIZER_NAME still lacks $POOL_NAME after the patch: $after"
+  while IFS= read -r arn; do
+    [ -z "$arn" ] || grep -qxF "$arn" <<<"$after" ||
+      die "$AUTHORIZER_NAME lost $arn -- put it back at once: aws apigateway update-authorizer --rest-api-id $API --authorizer-id $AUTHORIZER --patch-operations op=add,path=/providerARNs,value=$arn"
+  done <<<"$before"
+  say "added $POOL_NAME to $AUTHORIZER_NAME; it now accepts: $(tr '\n' ' ' <<<"$after")"
+  CHANGED=1
+}
+
+provision_tenancy() {
+  local fn role
+  find_pool
+  [ -n "$POOL_ID" ] || die "no user pool $POOL_NAME: bash cloud/provision.sh identity first"
+  # The clip Lambdas read the camera row now, to tell whose clip it is (cloud/iam/, as the others).
+  for fn in play-clip delete-clip set-clip-tier; do
+    role=$(aws lambda get-function-configuration --function-name "$fn" --query Role --output text)
+    ensure_inline_policy "${role##*/}" CamerasRegistryRead cameras-registry-read-policy.json
+  done
+  # Report first: the check logs what it would refuse and refuses nothing. Before the code is
+  # deployed -- deploy.sh won't deploy a Lambda with the check to a function without TENANCY,
+  # since unset means enforce.
+  for fn in $(tenancy_functions); do ensure_env "$fn" TENANCY report; done
+  ensure_authorizer_pool
+  deploy_stage tenancy
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  for fn in $(tenancy_functions); do
+    [ "$(aws lambda get-function-configuration --function-name "$fn" --query Environment.Variables.TENANCY --output text)" != None ] ||
+      die "$fn has no TENANCY setting afterwards"
+  done
+  grep -qxF "$POOL_ARN" <<<"$(authorizer_pools)" || die "$AUTHORIZER_NAME doesn't accept $POOL_NAME afterwards"
+  say "verified: every function with the check has a TENANCY setting; $AUTHORIZER_NAME accepts both pools"
+  say "next: bash cloud/deploy.sh lambdas (the check, in report mode), then deploy.sh page (the page on $POOL_NAME)"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -666,5 +723,6 @@ case "${1:-}" in
   directory-db)    preflight; provision_directory_db ;;
   identity)        preflight; provision_identity ;;
   directory-seed)  preflight; shift; provision_directory_seed "${1:-}" ;;
-  *) sed -n '2,23p' "$0"; exit 1 ;;
+  tenancy)         preflight; provision_tenancy ;;
+  *) sed -n '2,27p' "$0"; exit 1 ;;
 esac

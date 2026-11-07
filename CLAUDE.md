@@ -398,6 +398,14 @@ its cache), `rematch_cameras.py`, `codec_caps.py` — and every route or Lambda 
 camera answers 409 for one. Unregister needs `systemctl disable`, which the sudo rule allows
 since #80. A new reader of the table must skip it too.
 
+**Whose camera it is: `adapterId`** — the IoT Thing that serves it, written by the admin GUI at
+registration and stamped by `rematch_cameras.py` on the Pi with `ADOPT_UNSTAMPED_ROWS=yes`. Every
+camera and clip Lambda compares it with the caller's ID token (`tenant_access`, `tenancy_refusal`,
+identical in all twelve, `DEALER-PANEL-PLAN.md` D4): `vsz_adapters` gives control, `vsz_cameras`
+view only; a camera the caller may not see gets that route's unknown-camera answer. `TENANCY=report`
+logs instead of refusing; unset means enforce. A row without `adapterId` is an administrator's alone,
+and a new Lambda that acts on a camera takes the same three functions.
+
 **Recording triggers are per camera** (`adapter/onvif_events.py`): which ONVIF topic and
 on/off field serve each mode comes from the camera's own `GetEventProperties`, recorded as
 `detectionModes`/`detectionTopics`; a mode the camera doesn't publish is refused by both

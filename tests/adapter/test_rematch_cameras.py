@@ -133,3 +133,59 @@ def test_main_moves_the_registry_cache_and_mediamtx_path(registry, monkeypatch):
     assert table.row("cam-02")["rtspUrl"] == new
     assert mtx.conf["cam02"]["source"] == new
     assert new in sync_mediamtx_paths.CACHE.read_text()
+
+
+# --- adopting unstamped rows (DEALER-PANEL-PLAN.md D4, D12) ----------------------------------------
+
+@pytest.fixture
+def adopting(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", True)
+
+
+def _five(registry):
+    return registry([
+        {"cameraId": "cam-01", "mode": "transcode"},                          # USB: published, not configured
+        _cam("cam-02", "192.0.2.12"),
+        _cam("cam-03", "192.0.2.13", adapterId="adapter-07"),                  # another adapter's
+        _cam("cam-04", "192.0.2.14", unregisteredAt="2026-11-01T00:00:00Z"),
+        _cam("cam-05", "192.0.2.15"),                                          # not served here
+    ])
+
+
+def test_rows_this_pi_serves_get_its_thing_name(registry, adopting, monkeypatch):
+    table = _five(registry)
+    monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(
+        conf={"cam02": {"source": "rtsp://x"}, "cam03": {"source": "rtsp://y"}, "cam04": {"source": "rtsp://z"}},
+        state={"cam01": {"ready": True}}))
+    assert rc.adopt_unstamped() == ["cam-01", "cam-02"]
+    assert table.row("cam-01")["adapterId"] == table.row("cam-02")["adapterId"] == "test-thing"
+    assert table.row("cam-03")["adapterId"] == "adapter-07"           # someone else's stays theirs
+    assert "adapterId" not in table.row("cam-04") and "adapterId" not in table.row("cam-05")
+    assert {w[1]["ConditionExpression"] for w in table.writes} == {"attribute_not_exists(adapterId)"}
+
+
+def test_without_the_switch_no_row_is_claimed(registry, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    table = _five(registry)
+    monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(conf={"cam02": {"source": "rtsp://x"}}))
+    assert rc.adopt_unstamped() == [] and table.writes == []
+
+
+def test_a_row_stamped_meanwhile_is_left_to_whoever_did(registry, adopting, monkeypatch):
+    table = registry([_cam("cam-02", "192.0.2.12", adapterId="adapter-09")])
+    stale = [_cam("cam-02", "192.0.2.12")]                                 # as our scan saw it
+    monkeypatch.setattr(table, "scan", lambda **kw: {"Items": stale})
+    monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(conf={"cam02": {"source": "rtsp://x"}}))
+    assert rc.adopt_unstamped() == []
+    assert table.row("cam-02")["adapterId"] == "adapter-09"
+
+
+def test_a_dry_run_and_a_silent_mediamtx_write_nothing(registry, adopting, monkeypatch):
+    table = _five(registry)
+    monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(conf={"cam02": {"source": "rtsp://x"}}))
+    assert rc.adopt_unstamped(dry_run=True) == ["cam-02"] and table.writes == []
+    monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(down=True))
+    assert rc.adopt_unstamped() == [] and table.writes == []
+

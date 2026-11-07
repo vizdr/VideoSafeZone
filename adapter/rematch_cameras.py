@@ -19,7 +19,9 @@ passthrough camera:
     rtspUrl and of liveRtspUrl, the live view's sub stream (credentials, RTSP port and path
     unchanged) -- registry first, then MediaMTX, both paths
   * ref not found -> nothing. The camera may just be off; absence proves nothing.
-Unregistered cameras are not in the list at all (sync_mediamtx_paths.load_cameras leaves
+Before that, on adapter-01 only (ADOPT_UNSTAMPED_ROWS=yes), rows without an adapterId whose
+MediaMTX path this Pi serves get this Thing's name stamped (adopt_unstamped, DEALER-PANEL-PLAN.md
+D4, D12). Unregistered cameras are not in the list at all (sync_mediamtx_paths.load_cameras leaves
 them out), so their deleted paths are never recreated. It refuses to guess: a ref on two rows, or a new address another camera already has, is
 logged and skipped.
 
@@ -73,6 +75,55 @@ def registry_update(camera_id, fields, expect_host, require_no_ref=False):
         UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in fields),
         ConditionExpression=condition,
         ExpressionAttributeNames=names, ExpressionAttributeValues=values)
+
+
+def adopt_unstamped(dry_run=False):
+    """Stamp this Pi's Thing name as `adapterId` on registry rows that have none and whose
+    MediaMTX path this Pi serves (DEALER-PANEL-PLAN.md D4, D12). The camera API's tenant check
+    shows a row without adapterId to system administrators only, so until it is stamped a
+    customer doesn't see the camera. Only on a Pi whose adapter.env says ADOPT_UNSTAMPED_ROWS=yes
+    -- adapter-01, which served every camera registered before adapterId existed, and serves
+    those a VMS card registers; a second Pi never claims a row by itself. Each write is
+    conditional, so two Pis can't both stamp one row. Returns the camera IDs stamped."""
+    import config
+    if not config.ADOPT_UNSTAMPED_ROWS:
+        return []
+    import camera_control
+    import mediamtx_api
+    from aws_device_creds import get_session
+    table = get_session().resource("dynamodb").Table("cameras")
+    rows, kwargs = [], {"ProjectionExpression": "cameraId, adapterId, unregisteredAt, releasedFrom"}
+    while True:
+        page = table.scan(**kwargs)
+        rows += page.get("Items", [])
+        if "LastEvaluatedKey" not in page:
+            break
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    stamped = []
+    for row in sorted(rows, key=lambda r: r["cameraId"]):
+        if row.get("adapterId") or row.get("releasedFrom") or camera_control.is_unregistered(row):
+            continue
+        path = camera_control.mediamtx_path_name(row["cameraId"])
+        try:
+            served = (mediamtx_api.get_path_conf(path) is not None
+                      or mediamtx_api.get_path_state(path) is not None)
+        except Exception:  # noqa: BLE001 -- MediaMTX not answering: not provably ours, next run
+            served = False
+        if not served:
+            continue
+        if not dry_run:
+            try:
+                table.update_item(Key={"cameraId": row["cameraId"]}, UpdateExpression="SET adapterId = :a",
+                                  ConditionExpression="attribute_not_exists(adapterId)",
+                                  ExpressionAttributeValues={":a": config.THING_NAME})
+            except Exception as e:  # noqa: BLE001
+                if getattr(e, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+                log(f"{row['cameraId']}: stamped by someone else meanwhile -- left as is")
+                continue
+        log(f"{row['cameraId']}: {'would stamp' if dry_run else 'stamped'} adapterId {config.THING_NAME}")
+        stamped.append(row["cameraId"])
+    return stamped
 
 
 def rematch(cameras, found, dry_run=False):
@@ -148,6 +199,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     ap.add_argument("--timeout", type=int, default=5, help="WS-Discovery scan time, seconds")
     args = ap.parse_args()
+
+    try:
+        adopt_unstamped(args.dry_run)
+    except Exception as e:  # noqa: BLE001 -- AWS or MediaMTX unreachable: the next run tries again
+        log(f"adopting unstamped rows skipped ({type(e).__name__}: {e})")
 
     cameras = paths.load_cameras(args.dry_run)       # registry, or the local cache when offline
     if cameras is None:
