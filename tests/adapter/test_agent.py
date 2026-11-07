@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from awscrt import mqtt
 
+import activation
 import agent
 import aws_state
 import camera_control
@@ -20,6 +21,7 @@ from fakes import ModuleShim
 
 STATE = "adapter/test-thing/state"            # tests/fixtures/adapter.env: THING_NAME=test-thing
 CMD = "adapter/test-thing/cmd"
+CONFIG = "adapter/test-thing/config"
 NOW = 1_800_000_000
 UNREG = "2026-10-25T12:00:00Z"
 ROWS = [
@@ -268,7 +270,8 @@ def test_main_connects_subscribes_and_announces(world, monkeypatch):
     # The Last Will is not retained: a retained Will got the CONNECT rejected (#6).
     assert (kw["will"].topic, json.loads(kw["will"].payload), kw["will"].retain) == (STATE, {"online": False}, False)
     assert kw["cert_filepath"].endswith("certs/adapter.cert.pem")
-    assert conn.connected and conn.subscribed == [(CMD, mqtt.QoS.AT_LEAST_ONCE, agent.on_message)]
+    assert conn.connected and conn.subscribed == [(CMD, mqtt.QoS.AT_LEAST_ONCE, agent.on_message),
+                                                  (CONFIG, mqtt.QoS.AT_LEAST_ONCE, agent.on_config)]
     assert conn.published == [(STATE, {"online": True}, mqtt.QoS.AT_LEAST_ONCE, False)]
     assert order == ["stop live (before connecting)", "heartbeat", "wait"]
     assert aws_state.read_state()["online"] is True                   # first heartbeat written
@@ -279,3 +282,42 @@ def test_importing_the_agent_connects_nothing():
     # The point of main(): before Phase 4, importing agent.py opened the MQTT session. (The
     # `world` fixture puts conn back to this import-time value after every test.)
     assert agent.conn is None
+
+
+# --- the activation message (DEALER-PANEL-PLAN.md Phase 6.3) -----------------------------------------
+
+def test_the_retained_config_tells_the_admin_gui_whether_the_adapter_is_activated(capsys):
+    assert activation.registration_refusal().startswith("this adapter hasn't heard from the cloud")
+    agent.on_config(CONFIG, b'{"activated": false, "at": "2026-11-07T20:00:00Z"}')
+    assert "isn't activated" in activation.registration_refusal()
+    agent.on_config(CONFIG, b'{"activated": true, "at": "2026-11-07T20:05:00Z"}')
+    assert activation.registration_refusal() is None
+    assert activation.load()["at"] == "2026-11-07T20:05:00Z"
+    assert "the cloud says this adapter is activated" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("payload", [b"not json", b"[]", b'{"activated": "yes"}', b"{}"])
+def test_a_config_message_that_isnt_one_changes_nothing(capsys, payload):
+    agent.on_config(CONFIG, b'{"activated": true}')
+    agent.on_config(CONFIG, payload)
+    assert activation.registration_refusal() is None                    # what was known stands
+    assert "config message ignored" in capsys.readouterr().out
+
+
+class Resumable:
+    def __init__(self):
+        self.resubscribed = 0
+
+    def resubscribe_existing_topics(self):
+        self.resubscribed += 1
+        return SimpleNamespace(result=lambda: None), 1
+
+
+def test_ff91_a_session_aws_discarded_gets_its_subscriptions_back():
+    """FoundAndFixed.md #91: offline past the session expiry, the agent came back without its
+    subscriptions -- cmd and config messages no longer arrived until it restarted."""
+    conn = Resumable()
+    agent.on_connection_resumed(conn, mqtt.ConnectReturnCode.ACCEPTED, False)
+    assert conn.resubscribed == 1
+    agent.on_connection_resumed(conn, mqtt.ConnectReturnCode.ACCEPTED, True)   # kept: nothing to renew
+    assert conn.resubscribed == 1

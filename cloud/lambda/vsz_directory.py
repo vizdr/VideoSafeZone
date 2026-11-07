@@ -24,6 +24,11 @@ directory's rows. Two kinds of caller, told apart by the event:
       ping           connects and answers who it is
       claims_for     the claims an email would get now, without signing in
       operator_seed  the demo directory of Phase 2.3, from a spec; a second run changes nothing
+      adapters       every adapter's state (cloud/adapter-identity.sh, provision.sh adapters)
+      identity_made  an adapter's certificate id, from cloud/adapter-identity.sh
+
+  AWS IoT, through the rule vsz_adapter_presence (Phase 6.4): an adapter's lifecycle event,
+  {"clientId", "eventType": "connected" | "disconnected", "timestamp"} -- its last-seen time.
   Invoking this function at all needs IAM permission (Cognito for vsz-users, and the operator),
   so the actor names who asks rather than proving it. Phase 4's API will pass the signed-in
   caller, checked against their token, and every operation will scope by it.
@@ -31,9 +36,12 @@ directory's rows. Two kinds of caller, told apart by the event:
 Nothing it returns or raises carries a credential, and it logs nothing of its own.
 """
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import ssl
 import uuid
 
@@ -431,7 +439,9 @@ def op_me(con, actor, args):
     for org_id, role in actor["accounts"].items():
         name, dealer = con.run("SELECT c.name, d.name FROM vsz.org c JOIN vsz.org d ON d.id = c.parent_id "
                                "WHERE c.id = :o", o=org_id)[0]
-        out["accounts"].append({"id": org_id, "name": name, "role": role, "dealer": dealer})
+        sites = [{"id": i, "name": n, "timezone": t} for i, n, t in con.run(
+            "SELECT id, name, timezone FROM vsz.site WHERE customer_id = :o ORDER BY lower(name)", o=org_id)]
+        out["accounts"].append({"id": org_id, "name": name, "role": role, "dealer": dealer, "sites": sites})
     out["accounts"].sort(key=lambda a: a["name"].lower())
     return out
 
@@ -562,21 +572,33 @@ def op_list_customers(con, actor, args):
 
 
 def op_list_adapters(con, actor, args):
-    require(actor, "dealer", *SYSTEM)
-    dealer = actor["org"] if actor["role"] == "dealer" else None
+    """Adapters in the actor's scope (§6): owners and administrators every one; a dealer its stock and
+    those at its customers; a holder or Super Admin the adapters of their accounts (D15)."""
+    dealer, accounts = None, None
+    if actor["role"] == "dealer":
+        dealer = actor["org"]
+    elif actor["role"] == "customer":
+        accounts = [str(o) for o, r in actor["accounts"].items() if r in FULL_ACCESS]
+        if not accounts:
+            return []                                 # a user (customer_user) manages no adapter
+    else:
+        require(actor, *SYSTEM)
     rows = con.run(
         "SELECT a.id, a.thing_name, a.status, a.label, a.last_seen_at, a.created_at, d.id, d.name, "
-        "act.name, act.activated_at, c.id, c.name, s.name "
+        "act.name, act.activated_at, c.id, c.name, s.name, a.connected, a.cloud_id_hmac IS NOT NULL, "
+        "a.certificate_id IS NOT NULL, s.id "
         "FROM vsz.adapter a LEFT JOIN vsz.org d ON d.id = a.dealer_id "
         "LEFT JOIN vsz.adapter_activation act ON act.adapter_id = a.id AND act.released_at IS NULL "
         "LEFT JOIN vsz.org c ON c.id = act.customer_id LEFT JOIN vsz.site s ON s.id = act.site_id "
-        "WHERE CAST(:d AS uuid) IS NULL OR a.dealer_id = CAST(:d AS uuid) OR c.parent_id = CAST(:d AS uuid) "
-        "ORDER BY a.thing_name",
-        d=None if dealer is None else str(dealer))
+        "WHERE CASE WHEN CAST(:acc AS uuid[]) IS NOT NULL THEN act.customer_id = ANY(CAST(:acc AS uuid[])) "
+        "ELSE CAST(:d AS uuid) IS NULL OR a.dealer_id = CAST(:d AS uuid) OR c.parent_id = CAST(:d AS uuid) END "
+        "ORDER BY length(a.thing_name), a.thing_name",
+        d=None if dealer is None else str(dealer), acc=accounts)
     return [{"id": r[0], "thingName": r[1], "status": r[2], "label": r[3], "lastSeenAt": r[4], "createdAt": r[5],
              "dealer": {"id": r[6], "name": r[7]} if r[6] else None,
              "activation": {"name": r[8], "activatedAt": r[9], "customer": {"id": r[10], "name": r[11]},
-                            "site": r[12]} if r[10] else None} for r in rows]
+                            "site": r[12], "siteId": r[16]} if r[10] else None,
+             "connected": r[13], "hasCode": r[14], "identity": r[15]} for r in rows]
 
 
 def op_list_users(con, actor, args):
@@ -1060,6 +1082,303 @@ def op_update_own_dealer(con, actor, args):
     return {"id": actor["org"], "changed": sorted(f)}
 
 
+# --- adapters: Cloud IDs, activation, release, revoke (Phase 6, D15) --------------------------------
+
+CLOUD_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"     # Crockford base32: no I, L, O or U
+CLOUD_ID_LENGTH = 10                                        # about 50 bits
+REFUSED_CLOUD_ID = "this Cloud ID can't be activated"       # every failure, whatever the cause (D15)
+TRIES_PER_USER, TRIES_PER_ADDRESS = 5, 20                   # failures an hour, then refused for the hour
+NUMBERING_LOCK = 2026110606                                 # pg_advisory_xact_lock key: one numbering at a time
+
+
+class KeepAndRefuse(DirectoryError):
+    """A refusal whose transaction is committed all the same: a failed activation attempt must be
+    recorded, or the rate limit (D15) would count nothing."""
+
+
+def _cloud_id_key():
+    key = os.environ.get("CLOUD_ID_KEY", "")
+    try:
+        raw = bytes.fromhex(key)
+    except ValueError:
+        raw = b""
+    if len(raw) < 32:
+        raise DirectoryError("the directory has no CLOUD_ID_KEY (bash cloud/provision.sh adapters)", 500)
+    return raw
+
+
+def new_cloud_id():
+    """(shown, stored): a fresh Cloud ID as it is printed -- K7QM4-XRPZ9 -- and its keyed hash, the only
+    form the database keeps, so a copy of the database doesn't reveal the codes (D15)."""
+    code = "".join(secrets.choice(CLOUD_ID_ALPHABET) for _ in range(CLOUD_ID_LENGTH))
+    return f"{code[:5]}-{code[5:]}", _cloud_id_hash(code)
+
+
+def normalize_cloud_id(typed):
+    """The code as typed -- any case, dashes or spaces, O for 0, I or L for 1 (Crockford's reading
+    rules) -- or None when it can't be a Cloud ID."""
+    if not isinstance(typed, str):
+        return None
+    code = re.sub(r"[\s-]", "", typed).upper().translate(str.maketrans("OIL", "011"))
+    if len(code) != CLOUD_ID_LENGTH or any(ch not in CLOUD_ID_ALPHABET for ch in code):
+        return None
+    return code
+
+
+def _cloud_id_hash(code):
+    return hmac.new(_cloud_id_key(), code.encode(), hashlib.sha256).digest()
+
+
+def _adapter(con, adapter_id, lock=False):
+    rows = con.run("SELECT id, thing_name, status, dealer_id, certificate_id FROM vsz.adapter "
+                   "WHERE id = CAST(:a AS uuid)" + (" FOR UPDATE" if lock else ""), a=an_id(adapter_id, "adapter id"))
+    if not rows:
+        raise DirectoryError("no such adapter", 404)
+    return dict(zip(("id", "thing", "status", "dealer", "certificate"), rows[0]))
+
+
+def op_generate_adapters(con, actor, args):
+    """New adapters (D15): numbered by the directory (adapter-02, adapter-03, ...), each with its
+    Cloud ID, shown here once and kept only as a keyed hash. Optionally allocated to a dealer. Their
+    AWS identity is made by the owner's script (cloud/adapter-identity.sh, Phase 6 amendment)."""
+    require(actor, *SYSTEM)
+    count = args.get("count", 1)
+    if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 20:
+        raise DirectoryError("count: 1 to 20 adapters at a time")
+    label = args.get("label")
+    label = label.strip() if isinstance(label, str) and label.strip() else None
+    if label and len(label) > 100:
+        raise DirectoryError("the label is too long")
+    dealer = args.get("dealerId")
+    if dealer is not None:
+        if not con.run("SELECT 1 FROM vsz.org WHERE id = CAST(:d AS uuid) AND kind = 'dealer'", d=an_id(dealer, "dealer id")):
+            raise DirectoryError("no such dealer", 404)
+    con.run("SELECT pg_advisory_xact_lock(:k)", k=NUMBERING_LOCK)
+    taken = [int(m.group(1)) for (t,) in con.run("SELECT thing_name FROM vsz.adapter")
+             if (m := re.fullmatch(r"adapter-(\d+)", t))]
+    first = max(taken, default=0) + 1
+    made = []
+    for n in range(first, first + count):
+        thing = f"adapter-{n:02d}"
+        shown, stored = new_cloud_id()
+        aid = con.run("INSERT INTO vsz.adapter (thing_name, cloud_id_hmac, dealer_id, label) "
+                      "VALUES (:t, :h, CAST(:d AS uuid), :l) RETURNING id", t=thing, h=stored, d=dealer, l=label)[0][0]
+        made.append({"id": aid, "thingName": thing, "cloudId": shown})
+    audit(con, actor, "generate_adapters", detail={"things": [m["thingName"] for m in made], "dealerId": dealer})
+    return made
+
+
+def op_allocate_adapter(con, actor, args):
+    """Into a dealer's stock, or back out of it (dealerId null). Not while it is activated: it is then
+    its customer's dealer's (D15)."""
+    require(actor, *SYSTEM)
+    a = _adapter(con, args.get("id"), lock=True)
+    if a["status"] not in ("provisioned", "released"):
+        raise DirectoryError(f"an adapter that is {a['status']} can't be allocated", 409)
+    dealer = args.get("dealerId")
+    if dealer is not None and not con.run("SELECT 1 FROM vsz.org WHERE id = CAST(:d AS uuid) AND kind = 'dealer'",
+                                          d=an_id(dealer, "dealer id")):
+        raise DirectoryError("no such dealer", 404)
+    con.run("UPDATE vsz.adapter SET dealer_id = CAST(:d AS uuid) WHERE id = :a", d=dealer, a=a["id"])
+    audit(con, actor, "allocate_adapter", "adapter", a["id"], {"dealerId": dealer})
+    return {"id": a["id"], "thingName": a["thing"], "dealerId": dealer}
+
+
+def op_new_code(con, actor, args):
+    """A new Cloud ID for an adapter waiting to be activated (a lost label): the old one stops
+    working, and the new one is shown this once."""
+    require(actor, *SYSTEM)
+    a = _adapter(con, args.get("id"), lock=True)
+    if a["status"] not in ("provisioned", "released"):
+        raise DirectoryError(f"an adapter that is {a['status']} gets no code", 409)
+    shown, stored = new_cloud_id()
+    con.run("UPDATE vsz.adapter SET cloud_id_hmac = :h WHERE id = :a", h=stored, a=a["id"])
+    audit(con, actor, "new_code", "adapter", a["id"])
+    return {"id": a["id"], "thingName": a["thing"], "cloudId": shown}
+
+
+def _activation_target(con, actor, args):
+    """(customer id, its dealer id) the actor activates for (D6, D15): a holder or Super Admin one of
+    their accounts (accountId, or the only one); a dealer one of its customers; the system any."""
+    if actor["role"] == "customer":
+        mine = [o for o, r in actor["accounts"].items() if r in FULL_ACCESS]
+        wanted = args.get("accountId")
+        if wanted is None and len(mine) == 1:
+            wanted = str(mine[0])
+        if wanted is None or str(an_id(wanted, "account id")) not in {str(o) for o in mine}:
+            raise DirectoryError("give the account to activate it for (accountId): one you hold or are Super Admin of", 403)
+        customer = wanted
+    else:
+        require(actor, "dealer", *SYSTEM)
+        customer = _customer(con, actor, args.get("customerId"))[0]
+    rows = con.run("SELECT parent_id, status FROM vsz.org WHERE id = CAST(:c AS uuid)", c=str(customer))
+    if rows[0][1] != "active":
+        raise DirectoryError("this customer is suspended", 409)
+    return str(customer), rows[0][0]
+
+
+def op_activate_adapter(con, actor, args):
+    """Enter Cloud ID (D15): the code, then the site -- one of the customer's or a new one -- and a name.
+    Five wrong codes per person an hour and twenty per address, then refused for the hour; every
+    wrong code gets the same answer, whatever was wrong. The adapter starts its own trial (D19)."""
+    customer, dealer = _activation_target(con, actor, args)
+    ip = args.get("sourceIp")
+    ip = ip if isinstance(ip, str) and re.fullmatch(r"[0-9a-fA-F:.]{2,45}", ip) else None
+    fails = con.run(
+        "SELECT count(*) FILTER (WHERE user_id = :u), count(*) FILTER (WHERE source_ip = CAST(:ip AS inet)) "
+        "FROM vsz.activation_attempt WHERE NOT ok AND at > now() - interval '1 hour' "
+        "AND (user_id = :u OR source_ip = CAST(:ip AS inet))", u=actor["user_id"], ip=ip)[0]
+    if fails[0] >= TRIES_PER_USER or (ip and fails[1] >= TRIES_PER_ADDRESS):
+        raise DirectoryError("too many wrong Cloud IDs: try again in an hour", 429)
+    # What isn't the code is checked first: a mistake there costs no try.
+    name = args.get("name")
+    name = name.strip() if isinstance(name, str) and name.strip() else None
+    if name and len(name) > 60:
+        raise DirectoryError("the adapter's name: up to 60 characters")
+    site, new_site = args.get("siteId"), args.get("newSite")
+    if site is not None:
+        if not con.run("SELECT 1 FROM vsz.site WHERE id = CAST(:s AS uuid) AND customer_id = CAST(:c AS uuid)",
+                       s=an_id(site, "site id"), c=customer):
+            raise DirectoryError("no such site at this customer", 404)
+    else:
+        new_site = _site_fields(new_site)
+    code = normalize_cloud_id(args.get("cloudId"))
+    found = con.run("SELECT id, thing_name, dealer_id, status FROM vsz.adapter WHERE cloud_id_hmac = :h FOR UPDATE",
+                    h=_cloud_id_hash(code)) if code else []
+    if not found or found[0][3] not in ("provisioned", "released") or found[0][2] not in (None, dealer):
+        con.run("INSERT INTO vsz.activation_attempt (user_id, source_ip, ok) VALUES (:u, CAST(:ip AS inet), false)",
+                u=actor["user_id"], ip=ip)
+        raise KeepAndRefuse(REFUSED_CLOUD_ID, 400)
+    adapter, thing = found[0][0], found[0][1]
+    if site is None:
+        site = con.run("INSERT INTO vsz.site (customer_id, name, timezone) VALUES (CAST(:c AS uuid), :n, :t) RETURNING id",
+                       c=customer, n=new_site[0], t=new_site[1])[0][0]
+    # An adapter in nobody's stock joins the stock of its customer's dealer (D15).
+    con.run("UPDATE vsz.adapter SET status = 'activated', cloud_id_hmac = NULL, dealer_id = :d WHERE id = :a",
+            d=dealer, a=adapter)
+    activation = con.run("INSERT INTO vsz.adapter_activation (adapter_id, customer_id, site_id, name, activated_by) "
+                         "VALUES (:a, CAST(:c AS uuid), CAST(:s AS uuid), :n, :u) RETURNING id",
+                         a=adapter, c=customer, s=str(site), n=name, u=actor["user_id"])[0][0]
+    days = _setting(con, "retention_days") or [30]
+    plan = con.run("INSERT INTO vsz.plan (activation_id, version, status, retention_days, billing_interval, "
+                   "cents_period, currency, trial_ends_at, created_by) VALUES (:a, 1, 'trial', :d, 'monthly', 0, :cur, "
+                   "now() + make_interval(days => :trial), :u) RETURNING id",
+                   a=activation, d=30 if 30 in days else days[0], cur=_setting(con, "currency") or "EUR",
+                   trial=int(_setting(con, "trial_days") or 0), u=actor["user_id"])[0][0]
+    for r, c in CLASSES:                                  # no cameras yet: six lines at 0, as every version
+        con.run("INSERT INTO vsz.plan_line (plan_id, resolution, recording, quantity) VALUES (:p, :r, :c, 0)",
+                p=plan, r=r, c=c)
+    con.run("INSERT INTO vsz.activation_attempt (user_id, source_ip, ok) VALUES (:u, CAST(:ip AS inet), true)",
+            u=actor["user_id"], ip=ip)
+    audit(con, actor, "activate_adapter", "adapter", adapter, {"customerId": customer, "siteId": str(site)})
+    return {"adapterId": adapter, "thingName": thing, "customerId": customer, "siteId": site, "activationId": activation}
+
+
+def _end_activation(con, adapter_id):
+    """Ends the adapter's open activation and its plan (D19): a last version, ended, at no charge.
+    The trigger of 001 ends the shares of its cameras (D18). False when there was none."""
+    rows = con.run("SELECT id FROM vsz.adapter_activation WHERE adapter_id = :a AND released_at IS NULL FOR UPDATE",
+                   a=adapter_id)
+    if not rows:
+        return False
+    act = rows[0][0]
+    current = _current_plans(con, [act]).get(act)
+    if current and current["status"] != "ended":
+        con.run("INSERT INTO vsz.plan (activation_id, version, status, retention_days, billing_interval, "
+                "cents_period, currency, trial_ends_at) VALUES (:a, :v, 'ended', :d, :i, 0, :c, :t)",
+                a=act, v=current["version"] + 1, d=current["retentionDays"], i=current["interval"],
+                c=current["currency"], t=current["trialEndsAt"])
+        plan = con.run("SELECT id FROM vsz.plan WHERE activation_id = :a AND version = :v",
+                       a=act, v=current["version"] + 1)[0][0]
+        for line in current["lines"]:
+            con.run("INSERT INTO vsz.plan_line (plan_id, resolution, recording, quantity) VALUES (:p, :r, :c, :q)",
+                    p=plan, r=line["resolution"], c=line["recording"], q=line["quantity"])
+    con.run("UPDATE vsz.adapter_activation SET released_at = now() WHERE id = :a", a=act)
+    return True
+
+
+def op_release_adapter(con, actor, args):
+    """Release (D15; an adapter returned or resold): it leaves its customer, its plan ends, and a new
+    Cloud ID is issued for the next one. The API then takes its cameras out of the registry's view."""
+    require(actor, *SYSTEM)
+    a = _adapter(con, args.get("id"), lock=True)
+    if a["status"] != "activated" or not _end_activation(con, a["id"]):
+        raise DirectoryError("this adapter isn't activated", 409)
+    shown, stored = new_cloud_id()
+    con.run("UPDATE vsz.adapter SET status = 'released', cloud_id_hmac = :h WHERE id = :a", h=stored, a=a["id"])
+    audit(con, actor, "release_adapter", "adapter", a["id"])
+    return {"id": a["id"], "thingName": a["thing"], "cloudId": shown}
+
+
+def op_remove_adapter(con, actor, args):
+    """Remove from the account (a holder or Super Admin, D15): a release without a new code --
+    activating it again takes one from an owner or administrator."""
+    a = _adapter(con, args.get("id"), lock=True)
+    rows = con.run("SELECT customer_id FROM vsz.adapter_activation WHERE adapter_id = :a AND released_at IS NULL",
+                   a=a["id"])
+    mine = [o for o, r in actor["accounts"].items() if r in FULL_ACCESS]
+    if not rows or actor["role"] != "customer" or rows[0][0] not in mine:
+        raise DirectoryError("no such adapter on your account", 404)
+    _end_activation(con, a["id"])
+    con.run("UPDATE vsz.adapter SET status = 'released', cloud_id_hmac = NULL WHERE id = :a", a=a["id"])
+    audit(con, actor, "remove_adapter", "adapter", a["id"], {"customerId": str(rows[0][0])})
+    return {"id": a["id"], "thingName": a["thing"]}
+
+
+def op_revoke_adapter(con, actor, args):
+    """Revoke (lost or stolen, D15): released if it was activated, no code, never activated again. Its
+    certificate is deactivated by the owner's script (cloud/adapter-identity.sh revoke)."""
+    require(actor, *SYSTEM)
+    a = _adapter(con, args.get("id"), lock=True)
+    if a["status"] == "revoked":
+        raise DirectoryError("this adapter is revoked already", 409)
+    was_activated = _end_activation(con, a["id"])
+    con.run("UPDATE vsz.adapter SET status = 'revoked', cloud_id_hmac = NULL WHERE id = :a", a=a["id"])
+    audit(con, actor, "revoke_adapter", "adapter", a["id"])
+    return {"id": a["id"], "thingName": a["thing"], "wasActivated": was_activated, "identity": a["certificate"] is not None}
+
+
+def op_adapter_state(con, actor, args):
+    """What the adapter's retained config message says (D15): activated or not."""
+    require(actor, *SYSTEM)
+    a = _adapter(con, args.get("id"))
+    return {"id": a["id"], "thingName": a["thing"], "activated": a["status"] == "activated", "status": a["status"]}
+
+
+def record_presence(con, event):
+    """An IoT lifecycle event (Phase 6.4): the adapter's last-seen time and whether it is connected.
+    An event older than the one kept is ignored: AWS doesn't promise their order."""
+    thing, kind, ts = event.get("clientId"), event.get("eventType"), event.get("timestamp")
+    if not isinstance(thing, str) or kind not in ("connected", "disconnected") or not isinstance(ts, (int, float)):
+        raise DirectoryError("a lifecycle event has clientId, eventType connected|disconnected and timestamp")
+    updated = con.run("UPDATE vsz.adapter SET last_seen_at = to_timestamp(:ts / 1000.0), connected = :c "
+                      "WHERE thing_name = :t AND (last_seen_at IS NULL OR last_seen_at <= to_timestamp(:ts / 1000.0)) "
+                      "RETURNING id", ts=ts, c=kind == "connected", t=thing)
+    return {"updated": bool(updated)}
+
+
+def operator_identity_made(con, event):
+    """cloud/adapter-identity.sh, after making an adapter's certificate: its id, for the record."""
+    thing, cert = event.get("thingName"), event.get("certificateId")
+    if not isinstance(thing, str) or not isinstance(cert, str) or not re.fullmatch(r"[0-9a-f]{64}", cert):
+        raise DirectoryError("give thingName and certificateId (64 hex characters)")
+    done = con.run("UPDATE vsz.adapter SET certificate_id = :c WHERE thing_name = :t AND status <> 'revoked' RETURNING id",
+                   c=cert, t=thing)
+    if not done:
+        raise DirectoryError(f"no adapter {thing} that may get an identity", 404)
+    con.run("INSERT INTO vsz.audit_event (action, target_kind, target_id, detail) VALUES ('identity_made', 'adapter', "
+            ":a, CAST(:d AS jsonb))", a=done[0][0], d=json.dumps({"certificateId": cert}))
+    return {"thingName": thing}
+
+
+def operator_adapters(con):
+    """Every adapter's state, for cloud/adapter-identity.sh and provision.sh: which need an identity,
+    which are activated (their retained config), which are revoked."""
+    return [{"thingName": t, "status": st, "identity": c is not None, "label": lab}
+            for t, st, c, lab in con.run("SELECT thing_name, status, certificate_id, label FROM vsz.adapter "
+                                         "ORDER BY length(thing_name), thing_name")]
+
+
 # name: (function, writes) -- a writing operation runs in one transaction
 USER_OPS = {
     "me": (op_me, False), "overview": (op_overview, False),
@@ -1075,6 +1394,11 @@ USER_OPS = {
     "customer_users": (op_customer_users, False), "put_plan": (op_put_plan, True),
     "cancel_plan": (op_cancel_plan, True), "plan_history": (op_plan_history, False),
     "get_dealer": (op_get_dealer, False), "update_own_dealer": (op_update_own_dealer, True),
+    # adapters (Phase 6)
+    "generate_adapters": (op_generate_adapters, True), "allocate_adapter": (op_allocate_adapter, True),
+    "new_code": (op_new_code, True), "activate_adapter": (op_activate_adapter, True),
+    "release_adapter": (op_release_adapter, True), "remove_adapter": (op_remove_adapter, True),
+    "revoke_adapter": (op_revoke_adapter, True), "adapter_state": (op_adapter_state, False),
 }
 
 
@@ -1082,8 +1406,14 @@ def run_user_op(con, op, actor, args):
     fn, writes = USER_OPS[op]
 
     def work(c):
-        return fn(c, resolve_actor(c, actor), args if isinstance(args, dict) else {})
-    return in_transaction(con, work) if writes else work(con)
+        try:
+            return fn(c, resolve_actor(c, actor), args if isinstance(args, dict) else {})
+        except KeepAndRefuse as refusal:
+            return refusal                     # committed: what it wrote stands (an attempt)
+    out = in_transaction(con, work) if writes else work(con)
+    if isinstance(out, KeepAndRefuse):
+        raise out
+    return out
 
 
 # --- the handler -------------------------------------------------------------------------------------
@@ -1093,6 +1423,9 @@ def lambda_handler(event, context):
         return pre_token(event)                       # raising here is how a sign-in is refused
     event = event if isinstance(event, dict) else {}
     try:
+        if event.get("eventType") in ("connected", "disconnected") and "actor" not in event:
+            # An adapter's MQTT session, from the IoT rule vsz_adapter_presence (Phase 6.4).
+            return {"ok": True, **with_db(lambda con: record_presence(con, event))}
         kind, op = (event.get("actor") or {}).get("kind"), event.get("op")
         if kind == "user":
             if op not in USER_OPS:
@@ -1110,7 +1443,11 @@ def lambda_handler(event, context):
         if op == "operator_seed":
             return {"ok": True, "done": with_db(lambda con: in_transaction(
                 con, lambda c: operator_seed(c, event.get("spec"))))}
-        raise DirectoryError("op must be ping, claims_for or operator_seed")
+        if op == "adapters":
+            return {"ok": True, "adapters": jsonable(with_db(operator_adapters))}
+        if op == "identity_made":
+            return {"ok": True, **with_db(lambda con: in_transaction(con, lambda c: operator_identity_made(c, event)))}
+        raise DirectoryError("op must be ping, claims_for, operator_seed, adapters or identity_made")
     except DirectoryError as exc:
         return {"ok": False, "status": exc.status, "error": exc.args[0]}
     except Exception as exc:

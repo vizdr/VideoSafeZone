@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TellEachAdapterWhetherItIsActivated",
+      "Effect": "Allow",
+      "Action": ["iot:Publish", "iot:RetainPublish"],
+      "Resource": "arn:aws:iot:eu-central-1:596633517506:topic/adapter/*/config"
+    },
+    {
+      "Sid": "TakeAReleasedAdaptersCamerasOutOfView",
+      "Effect": "Allow",
+      "Action": "dynamodb:UpdateItem",
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/cameras"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from awscrt import mqtt
 from awsiot import mqtt_connection_builder
 
+import activation
 import aws_state
 import config
 import camera_control
@@ -15,6 +16,7 @@ VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path
 THING   = config.THING_NAME
 CMD_T   = f"{config.TOPIC_PREFIX}/cmd"
 STATE_T = f"{config.TOPIC_PREFIX}/state"
+CONFIG_T = f"{config.TOPIC_PREFIX}/config"   # retained: whether the adapter is activated (D15)
 
 # Camera existence/capabilities come from the "cameras" DynamoDB registry, not a
 # hardcoded set/dict -- the same registry the local ONVIF admin GUI (adapter/onvif-admin)
@@ -185,6 +187,24 @@ def on_connection_interrupted(connection, error, **kwargs):
 
 def on_connection_resumed(connection, return_code, session_present, **kwargs):
     _set_aws_online(True, f"rc={return_code}")
+    # A session AWS IoT has discarded -- offline longer than its expiry, an hour by default --
+    # comes back with no subscriptions, and awscrt doesn't renew them: cmd and config messages
+    # would stop arriving until the agent restarted (FoundAndFixed.md #91).
+    if return_code == mqtt.ConnectReturnCode.ACCEPTED and not session_present:
+        print("agent: the session didn't persist: subscribing again", flush=True)
+        connection.resubscribe_existing_topics()
+
+
+def on_config(topic, payload, **kwargs):
+    """The retained config message (Phase 6.3): whether this adapter is activated, for the admin
+    GUI (activation.py). A message that isn't one is logged and ignored."""
+    try:
+        state = activation.save(payload)
+    except ValueError as e:
+        print(f"agent: config message ignored: {e}", flush=True)
+        return
+    print(f"agent: the cloud says this adapter is {'activated' if state['activated'] else 'not activated'}",
+          flush=True)
 
 
 def _heartbeat_loop():
@@ -226,6 +246,7 @@ def main():
     _publish_aws_state()
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
     conn.subscribe(topic=CMD_T, qos=mqtt.QoS.AT_LEAST_ONCE, callback=on_message)[0].result()
+    conn.subscribe(topic=CONFIG_T, qos=mqtt.QoS.AT_LEAST_ONCE, callback=on_config)[0].result()
     conn.publish(topic=STATE_T, payload=json.dumps({"online": True}),
                  qos=mqtt.QoS.AT_LEAST_ONCE, retain=False)[0].result()
     threading.Event().wait()

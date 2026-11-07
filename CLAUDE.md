@@ -115,6 +115,8 @@ bash cloud/deploy.sh db-migrate --dry-run         # the directory database's mig
 bash cloud/provision.sh identity --dry-run        # the user pool vsz-users and its trigger vsz-directory
 bash cloud/provision.sh directory --dry-run       # the directory API /directory/* (vsz-directory-api)
 bash cloud/provision.sh portal --dry-run          # the dealer portal's registry read for vsz-directory-api
+bash cloud/provision.sh adapters --dry-run        # Cloud IDs' key, retained configs, the IoT rule for last seen
+bash cloud/adapter-identity.sh pending            # a new adapter's AWS identity: the owner's script (D15 amended)
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -434,6 +436,12 @@ DynamoDB access on `cameras`) — see `cloud/iam/kvs-producer-policy.json`. The 
 `cloud/iam/` must match what is deployed: when you change a policy in AWS, export it back
 (`aws iam get-role-policy … --query PolicyDocument`) in the same change
 (FoundAndFixed.md #41).
+
+Further adapters (`adapter-02`, …) get their identity from `cloud/adapter-identity.sh`, run by the
+owner with their own AWS login — never from a Lambda: IAM can't limit certificate permissions to
+this project's certificates (`DEALER-PANEL-PLAN.md` D15, amended). Each Pi learns from a retained
+MQTT message, `adapter/<thing>/config`, whether it is activated; `agent.py` keeps it in
+`adapter/activation.py`'s state file, and the admin GUI registers no new camera until it says so.
 
 ### Two GUIs, deliberately not one
 

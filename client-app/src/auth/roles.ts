@@ -6,6 +6,9 @@ import type { Role } from "../api/types";
  *  without vsz_role (the old pool, before the switch) is treated as before. */
 export const CAMERA_ROLES: ReadonlyArray<Role | null> = ["customer", "system_admin", null];
 export const DEALER_ROLES: ReadonlyArray<Role | null> = ["dealer"];
+/** An account's own pages: Add adapter, Settings → Cloud adapters (D15) -- holders and Super Admins
+ *  act there; a user with shared cameras sees the list empty. */
+export const CUSTOMER_ROLES: ReadonlyArray<Role | null> = ["customer"];
 /** The dealer portal (D7): dealers, and owners and administrators across every dealer. */
 export const PORTAL_ROLES: ReadonlyArray<Role | null> = ["dealer", "system_owner", "system_admin"];
 export const SYSTEM_ROLES: ReadonlyArray<Role | null> = ["system_owner", "system_admin"];

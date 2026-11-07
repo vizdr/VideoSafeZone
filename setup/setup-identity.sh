@@ -5,7 +5,8 @@
 #                                           # stick's backup if there is one. Else say what to do.
 #   bash setup/setup-identity.sh create     # a NEW certificate for the Thing (needs `aws login`)
 #   bash setup/setup-identity.sh backup     # copy certs/ to the stick, for the next fresh card
-#   bash setup/setup-identity.sh restore [DIR]   # copy a backup into certs/ (default: the stick)
+#   bash setup/setup-identity.sh restore [DIR]   # copy a backup into certs/ (default: the stick), or
+#                                           # an adapter's folder from cloud/adapter-identity.sh
 #   bash setup/setup-identity.sh check      # the four proofs only
 #
 # Four files must end up in certs/ (gitignored, so a fresh clone has none):
@@ -66,8 +67,17 @@ assert 'assumed-role' in get_session().client('sts').get_caller_identity()['Arn'
 }
 
 restore() {
-  local src="${1:-$BACKUP}"
+  local src="${1:-$BACKUP}" thing
   complete "$src" || die "no complete identity backup in $src"
+  # A folder from cloud/adapter-identity.sh names its Thing (DEALER-PANEL-PLAN.md Phase 6): the
+  # certificate works only as that Thing, so adapter.env must say the same before it is restored.
+  if [ -e "$src/thing-name" ]; then
+    thing=$(tr -d '[:space:]' < "$src/thing-name")
+    [[ "$thing" =~ ^adapter-[0-9]{2,6}$ ]] || die "$src/thing-name doesn't name an adapter: '$thing'"
+    [ "$thing" = "$THING_NAME" ] || die "this identity is $thing's, but /etc/adapter/adapter.env says THING_NAME=$THING_NAME. First:
+    sudo sed -i 's/^THING_NAME=.*/THING_NAME=$thing/' /etc/adapter/adapter.env
+  then run this again"
+  fi
   if complete "$CERTS" && cmp -s "$src/adapter.private.key" "$CERTS/adapter.private.key"; then
     ok "certs/ already holds this identity"; return 0
   fi

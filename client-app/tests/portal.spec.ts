@@ -342,8 +342,9 @@ describe("the plan", () => {
   it("says so when the customer has no adapter yet", async () => {
     const { w } = await page(CustomerPlan, "/dealer/customers/c-1/plan",
                              context({ ...ADAPTERS, adapters: [], total: { ...ADAPTERS.total, adapters: 0 } }));
-    expect(w.find("[data-test=no-adapter]").text()).toContain("Phase 6");
+    expect(w.find("[data-test=no-adapter]").text()).toBe("No adapter is activated for this customer yet.");
     expect(w.find("[data-test=price]").exists()).toBe(false);
+    expect(w.find("[data-test=start-activate]").text()).toBe("Activate an adapter");
   });
 });
 

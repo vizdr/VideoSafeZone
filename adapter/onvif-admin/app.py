@@ -32,6 +32,7 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import activation
 import camera_control
 import codec_caps
 import config
@@ -193,6 +194,10 @@ def register_camera():
 
     table = cameras_table()
     existing = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    # A new camera only on an activated adapter (DEALER-PANEL-PLAN.md D16): on one that isn't, no
+    # customer's token would reach it. Re-registering a camera that is already here stays possible.
+    if not existing and (refusal := activation.registration_refusal()):
+        return jsonify({"error": refusal}), 409
     mediamtx_path = camera_control.mediamtx_path_name(camera_id)
     display_name = None
     if name_given:

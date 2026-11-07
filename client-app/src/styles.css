@@ -96,3 +96,18 @@ h1, h2, h3 { line-height: 1.2; }
 @media (max-width: 800px) {
   .console-table { display: block; overflow-x: auto; }
 }
+
+/* Printable labels for new adapters (System → Adapters, DEALER-PANEL-PLAN.md D15): shown only on paper. */
+.print-labels { display: none; }
+@media print {
+  body * { visibility: hidden; }
+  .print-labels, .print-labels * { visibility: visible; }
+  .print-labels { display: grid; grid-template-columns: repeat(2, 8.5cm); gap: 0.5cm; position: absolute; top: 0; left: 0;
+                  color: #000; background: #fff; }
+  .print-labels .label { display: flex; flex-direction: column; gap: 0.15cm; padding: 0.4cm; border: 1px solid #000;
+                         border-radius: 0.2cm; font-family: sans-serif; }
+  .print-labels .brand { font-weight: 700; }
+  .print-labels .what { font-size: 9pt; }
+  .print-labels .code { font-family: monospace; font-size: 18pt; letter-spacing: 0.1em; }
+  .print-labels .thing { font-size: 9pt; }
+}

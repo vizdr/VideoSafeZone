@@ -152,6 +152,7 @@ _SANDBOXED_PATHS = {
     "camera_control": {"CHANNELS_DIR": "etc/adapter/channels"},
     "agent": {"LIVE_DIR": "run/vms-live"},          # the live view deadlines the producers read
     "aws_state": {"STATE_FILE": "run/vms/aws-state.json"},
+    "activation": {"STATE_FILE": "run/vms/activation.json"},   # whether the adapter is activated
     "outage_buffer": {
         "BUFFER_ROOT": "mnt/vms-buffer",
         "SENTINEL": "mnt/vms-buffer/.vms-buffer-ok",

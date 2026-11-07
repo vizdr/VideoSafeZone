@@ -3,8 +3,11 @@
 These touch everything at once -- MediaMTX, systemd, KVS and the registry -- in an order that
 matters, with rollbacks when a step fails. Each test checks what reached each of them.
 """
+from pathlib import Path
+
 import pytest
 
+import activation
 import onvif_discovery
 import sync_mediamtx_paths
 from fakes import FakeMediaMTX, path_state
@@ -197,6 +200,27 @@ def _known_gui(gui, host="192.0.2.13", **kw):
 
 REREG = {"cameraId": "cam-03", "host": "192.0.2.13", "user": "admin", "password": "pw3",
          "streamUri": "rtsp://192.0.2.13:554/main"}
+
+
+@pytest.mark.parametrize("config, phrase", [
+    (None, "hasn't heard from the cloud"),                       # the agent hasn't connected yet
+    (b'{"activated": false}', "isn't activated"),                # made, or released, not activated
+])
+def test_a_new_camera_only_on_an_activated_adapter(gui, config, phrase):
+    """DEALER-PANEL-PLAN.md D16: on an adapter no customer has activated, a camera would be nobody's."""
+    Path(activation.STATE_FILE).unlink()
+    if config:
+        activation.save(config)
+    g = _new_camera_gui(gui)
+    status, body = g.post("/api/cameras", NEW)
+    assert status == 409 and phrase in body["error"]
+    assert g.mtx.writes() == [] and systemctl_writes(g.system) == [] and g.table.row("cam-04") is None
+
+
+def test_a_known_camera_is_re_registered_on_an_adapter_not_activated(gui):
+    activation.save(b'{"activated": false}')
+    g = _known_gui(gui)
+    assert g.post("/api/cameras", REREG)[0] == 200
 
 
 def test_a_rescan_that_changes_nothing_costs_nothing(gui):

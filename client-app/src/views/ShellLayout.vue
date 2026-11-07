@@ -2,7 +2,7 @@
 import { computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import type { Role } from "../api/types";
-import { CAMERA_ROLES } from "../auth/roles";
+import { CAMERA_ROLES, CUSTOMER_ROLES } from "../auth/roles";
 import AppRail from "../components/AppRail.vue";
 import CameraList from "../components/CameraList.vue";
 import HevcNote from "../components/HevcNote.vue";
@@ -28,7 +28,8 @@ onMounted(() => {
   if (!userSettings.loaded) void userSettings.load();
 });
 
-const onSettings = computed(() => route.name === "settings" || route.name === "settings-live");
+const onSettings = computed(() => ["settings", "settings-live", "settings-adapters"].includes(route.name as string));
+const customer = computed(() => CUSTOMER_ROLES.includes(auth.role as Role | null));
 // The camera list belongs beside the camera pages only -- not beside Account, the dealer portal or
 // the System console.
 const showCameras = computed(() =>
@@ -48,8 +49,8 @@ watch(() => auth.signedIn, signedIn => {
 });
 
 function select(id: string): void {
-  // From Settings → Live view, a camera opens that camera's settings.
-  const name = route.name === "settings-live" ? "settings" : (route.name ?? "live");
+  // From Settings → Live view or Cloud adapters, a camera opens that camera's settings.
+  const name = route.name === "settings-live" || route.name === "settings-adapters" ? "settings" : (route.name ?? "live");
   void router.push({ name, params: { ...route.params, cameraId: id } });
 }
 </script>
@@ -61,6 +62,10 @@ function select(id: string): void {
       <RouterLink v-if="onSettings" :to="{ name: 'settings-live' }" class="yours"
                   :class="{ active: route.name === 'settings-live' }">
         <i class="pi pi-th-large" aria-hidden="true" /> Live view <span>(yours)</span>
+      </RouterLink>
+      <RouterLink v-if="onSettings && customer" :to="{ name: 'settings-adapters' }" class="yours"
+                  :class="{ active: route.name === 'settings-adapters' }" data-test="settings-adapters">
+        <i class="pi pi-server" aria-hidden="true" /> Cloud adapters
       </RouterLink>
       <CameraList :selected="cameraId" @select="select" />
     </aside>

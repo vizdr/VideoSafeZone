@@ -19,8 +19,10 @@ built and tested, provisioned by the user (`provision.sh directory-db`), verifie
 2026-11-07**: provisioned by the user and verified, the trigger's cold start included (1.09 s,
 FoundAndFixed.md #89). **Phase 3 done 2026-11-07**: the tenant check enforces and is verified,
 and `kvs-demo-api` accepts only `vsz-users`. **Phase 4 done 2026-11-07**: the directory API and the
-System console, deployed and verified by the user. **Phase 5 built 2026-11-07** (the dealer
-portal), tested, not yet deployed. Next: its deploy and *Verify*, then Phase 6.
+System console, deployed and verified by the user. **Phase 5 done 2026-11-07**: the dealer portal,
+deployed and verified by the user. **Phase 6 built 2026-11-07** (Cloud IDs and activation, with D15
+amended: the owner's script makes adapters' AWS identities), tested, not yet deployed. Next: its
+deploy and *Verify*, then Phase 7.
 
 ---
 
@@ -428,6 +430,17 @@ D15, where an admin registered adapters and dealers installed them.)
 *Considered:* AWS IoT fleet provisioning by claim, where a Pi makes its own certificate on first
 boot — no bundle to copy, but more AWS pieces (a provisioning template, a claim certificate, a
 pre-provisioning hook); later, behind the same Cloud ID screen.
+
+*Amended 2026-11-07 (the user, at Phase 6): the AWS identity is made by the owner's script, not the
+System console.* Making a certificate, attaching it to the Thing policy and to the Thing, and
+deactivating it on revoke need IAM permissions on certificates, and IAM can't limit those to this
+project's: a certificate's ARN is its random ID. A web function holding them could detach or
+deactivate any certificate in the shared account — VMS's `adapter-01`, the pico2w devices. So the
+System console makes the adapter (its directory row, its number, its Cloud ID and label), and
+`cloud/adapter-identity.sh`, run with the owner's own AWS login, makes the Thing, the certificate
+and the folder for that adapter's Pi (`create`), and deactivates the certificate after a revoke
+(`revoke`). `vsz-directory-api` gets no certificate permissions — only the retained config publish
+and the registry write of a release.
 
 **D16. Cameras are added from the web page, through the adapter.** The browser can't reach the
 customer's LAN and WS-Discovery works only on it, so the page asks the adapter, over the Pi's own
@@ -1182,6 +1195,9 @@ a version's price is the server's.
   stored, no `basedOn` check, the annual discount dropped (both sides), the scan's field list
   dropped, the registry's second page dropped, `basedOn` always 0, the portal for dealers only.
 
+*Deployed 2026-11-07* by the user (`deploy.sh lambda vsz-directory`, `lambda vsz-directory-api`,
+`provision.sh portal`, `deploy.sh page`); the user reports the *Verify* above passes.
+
 ### Phase 6: Adapters — Cloud IDs and activation (§4c D15)
 
 6.1 Directory: (the adapter columns and `activation_attempt` are in migration 001); operations to generate
@@ -1208,6 +1224,79 @@ the demo customer has two adapters: `adapter-02` starts its own trial plan, sett
 Release it, issue a new code, and activate it for another customer: the first no longer sees it,
 keeps its plan history, and the second starts a new one. `adapter-01`'s last seen follows
 the Pi going offline and back.
+
+*Built 2026-11-07* (1335 offline pytest, 117 tests_db, 238 Vitest), with D15 amended (above): the
+owner's script makes the AWS identities. Built across two sessions of the same conversation, after
+an SSH drop left the first one running unseen; the second took over at a clean point.
+- **6.1, the directory** (`vsz-directory`): `generate_adapters` (1–20 at a time, numbered from the
+  highest `adapter-NN` under an advisory lock — `adapter-02`, `adapter-03`, … — each with a Cloud ID:
+  10 Crockford base32 characters from `secrets`, stored only as HMAC-SHA256 under `CLOUD_ID_KEY`, a
+  64-hex key in the function's environment that `provision.sh adapters` makes once and never prints;
+  read back with Crockford's rules, O as 0, I and L as 1), `allocate_adapter`, `new_code`,
+  `activate_adapter`, `release_adapter` (the activation and its plan end — a last version `ended`,
+  lines kept — and a new code is issued), `remove_adapter` (the holder's or a Super Admin's release,
+  no code), `revoke_adapter`, `adapter_state`. **Activation:** the target first (a holder or Super
+  Admin one of their accounts, `accountId` when they have several; a dealer one of its customers;
+  owners and administrators any; a customer's user nobody), then what isn't the code (site, name —
+  a mistake there costs no try), then the code: unknown, used, revoked or another dealer's all get
+  "this Cloud ID can't be activated" and an `activation_attempt`. Five failures per person or
+  twenty per address in the last hour refuse everything with 429, and a refused try isn't counted.
+  A refusal that must keep its attempt is a `KeepAndRefuse`, which `run_user_op` commits before
+  raising. An adapter in nobody's stock joins the customer's dealer's; the activation starts plan
+  version 1 as a trial with six lines at 0. `list_adapters` serves customers too (the adapters of
+  accounts they hold or are Super Admin of), and every row says `connected`, `hasCode`, `identity`.
+  `me` lists each account's sites. Operator operations `adapters` and `identity_made` serve the
+  script; IoT lifecycle events (no actor) are presence. Migration 002 adds `adapter.connected`.
+- **6.2, the API** (`vsz-directory-api`): `POST adapters` (the codes, once, and the script command
+  to run), `adapters/activate` (the address for the rate limit is API Gateway's, never the body's),
+  `adapters/<id>/allocate | new-code | release | remove | revoke | sync`. After a change it publishes
+  the adapter's **retained** config (`adapter/<thing>/config`, `{"activated", "at"}`, qos 1); when an
+  adapter leaves a customer it releases its camera rows (`SET releasedFrom REMOVE adapterId`,
+  conditional on `adapterId`, so a camera rematched meanwhile is left alone) — and at activation too,
+  as a backstop against rows left over. A failed follow-up is reported (`registryError`,
+  `configUnsent`), never undone; `sync` does both again from the directory's state. Its policy
+  `adapters` (`cloud/iam/vsz-directory-api-adapters-policy.json`): `iot:Publish` and
+  `iot:RetainPublish` on `topic/adapter/*/config`, `dynamodb:UpdateItem` on `cameras`.
+  **`cloud/adapter-identity.sh`** (`pending`, `create THING…`, `revoke THING`, `--dry-run`): `create`
+  refuses `adapter-01` (shared with the VMS card), an adapter the directory doesn't know or has
+  revoked or already gave an identity, a Thing that already has certificates, and an existing
+  folder; it writes `~/.local/state/videosafezone/adapter-identities/<thing>/` (0700: the four files,
+  `.cert-arn`, `thing-name`), attaches `KVSAdapterThingPolicy`, proves the result and records the
+  certificate in the directory. `setup-identity.sh restore <folder>` refuses a folder whose
+  `thing-name` isn't `adapter.env`'s `THING_NAME`, and prints the line that fixes it.
+- **6.3, the Pi:** `agent.py` subscribes to its config topic and writes what it says to
+  `$XDG_RUNTIME_DIR/vms/activation.json` (`adapter/activation.py`, atomic); the admin GUI refuses to
+  register a **new** camera unless it says activated — unknown refuses too, with the reason;
+  re-registering a camera that is already there stays possible. Found while there: after an outage
+  longer than its MQTT session, the agent came back without its subscriptions (FoundAndFixed.md #91,
+  fixed).
+- **6.4, last seen:** the IoT rule `vsz_adapter_presence` (`cloud/iot/vsz-adapter-presence-rule.json`)
+  hands `$aws/events/presence/+/+` of `adapter-*` clients to `vsz-directory`, which keeps the newest
+  event (an older one is ignored): `last_seen_at` and `connected`.
+- **6.5, the screens:** System → Adapters (New adapters with count, label and a dealer's stock; the
+  codes and the script command shown once, with printable labels; per adapter Allocate, New code,
+  Release and Revoke after asking, Sync; connection, code, identity); the dealer portal's Cloud
+  adapters tab shows the same list read-only. **Enter Cloud ID** (`ActivateAdapter`: the field
+  upper-cases and adds the dash, a drawing of the label's place; then an existing location or a
+  new one with its time zone, and a name) for the customer (**Add adapter**, `#/adapters/add`, from
+  Live's empty state and Settings → Cloud adapters, which lists the account's adapters and removes
+  one after asking) and for a dealer's customer (the customer's Plan page: *Activate an adapter*).
+  After activating or removing, the page renews its token and reloads the cameras.
+- **Tests:** `tests_db/test_adapters.py` (26): codes kept only as keyed hashes, numbering, the
+  reading rules, activation at a new site with its own trial and the next token's claims, a code
+  used twice, five wrong codes then the hour's block (and another person still may), the hour's
+  window, twenty from one address, another dealer's adapter, mistakes that cost no try, who may
+  activate, a person in two accounts, release (plan ended, history kept, new code, the next
+  customer afresh), remove, revoke, allocation, presence in and out of order, the script's record,
+  what customers see. `tests/cloud/test_directory.py` (+5: the committed refusal, presence, the
+  operator's list, the key); `tests/cloud/test_directory_api.py` (+13); `tests/test_activation.py`,
+  `tests/adapter/test_agent.py`, `tests/admin/test_admin_registration.py` (the Pi side, #91);
+  `client-app/tests/adapters.spec.ts` (20). Broken on purpose once each, turning red: no rate
+  limit, another dealer's adapter accepted, the attempt rolled back, a release keeping the old code,
+  the body's address trusted, the registry write without its condition (which first went
+  unnoticed: the test faked the condition's failure itself, and now moves the camera between scan
+  and write instead), no token renewal, the actions shown to a dealer, a wrong code left on the
+  location step.
 
 ### Phase 7: Adding cameras from the web page (§4c D16, with D11 and D12)
 
@@ -1317,8 +1406,10 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 4: directory API, System console — built and tested (2026-11-07)
 - [x] Phase 4: deployed (`deploy.sh lambda vsz-directory`, `provision.sh directory`, `deploy.sh page`) and verified by the user (2026-11-07)
 - [x] Phase 5: Dealer portal — built and tested (2026-11-07)
-- [ ] Phase 5: deployed (`deploy.sh lambda vsz-directory`, `lambda vsz-directory-api`, `provision.sh portal`, `deploy.sh page`) and its *Verify* recorded
-- [ ] Phase 6: Adapters — Cloud IDs, activation, release, last seen
+- [x] Phase 5: deployed (`deploy.sh lambda vsz-directory`, `lambda vsz-directory-api`, `provision.sh portal`, `deploy.sh page`) and verified by the user (2026-11-07)
+- [x] D15 amended: AWS identities by the owner's script, `cloud/adapter-identity.sh` (the user, 2026-11-07)
+- [x] Phase 6: Adapters — Cloud IDs, activation, release, last seen — built and tested (2026-11-07)
+- [ ] Phase 6: deployed (db-migrate 002, both directory functions, `provision.sh adapters`, the Pi's agent and admin GUI restarted, `deploy.sh page`) and its *Verify* recorded
 - [ ] Phase 7: Adding cameras from the web page (allocated IDs, per-Pi filtering)
 - [ ] Phase 8: Billing seam with fakes
 - [ ] Phase 9: Account page and additional users

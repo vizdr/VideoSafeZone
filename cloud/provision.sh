@@ -27,6 +27,9 @@
 #   bash cloud/provision.sh portal                    the dealer portal's camera inventory (DEALER-PANEL-PLAN.md
 #                                                     Phase 5): vsz-directory-api reads the cameras table and
 #                                                     the thumbnails' times; checked as the demo dealer
+#   bash cloud/provision.sh adapters                  adapters' activation (DEALER-PANEL-PLAN.md Phase 6): the
+#                                                     Cloud ID key, the API's config publish and camera release,
+#                                                     the IoT rule for last seen, every adapter's config sent
 #   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
 #                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
 #                                                     on every function with the check, vsz-users beside
@@ -827,6 +830,95 @@ PY
   say "verified: the portal counts cameras from the registry (vsz-directory-api's camera-inventory policy)"
 }
 
+# --- adapters: Cloud IDs, the retained config, last seen (DEALER-PANEL-PLAN.md Phase 6, D15) ----------
+
+PRESENCE_RULE=vsz_adapter_presence
+
+# vsz-directory's key for the Cloud IDs' hashes: made here once, never printed, never changed --
+# a new key would make every Cloud ID not yet used worthless.
+ensure_cloud_id_key() {
+  local has
+  has=$(aws lambda get-function-configuration --function-name vsz-directory \
+    --query 'Environment.Variables.CLOUD_ID_KEY' --output text 2>/dev/null | sed 's/^None$//')
+  if [ -n "$has" ]; then say "vsz-directory: CLOUD_ID_KEY set already (left as is: a new one would void every unused Cloud ID)"; return; fi
+  if [ "$DRY" -eq 1 ]; then say "would set vsz-directory's CLOUD_ID_KEY (64 hex characters, made here, never printed)"; return; fi
+  aws lambda get-function-configuration --function-name vsz-directory --query 'Environment.Variables' --output json \
+    > "$TMP/vars.json"
+  ( umask 077; python3 - "$TMP/vars.json" "$TMP/env.json" <<'PY'
+import json, secrets, sys
+current = json.load(open(sys.argv[1])) or {}
+current["CLOUD_ID_KEY"] = secrets.token_hex(32)
+json.dump({"Variables": current}, open(sys.argv[2], "w"))
+PY
+  )
+  aws lambda update-function-configuration --function-name vsz-directory --environment "file://$TMP/env.json" >/dev/null
+  rm -f "$TMP/env.json"
+  aws lambda wait function-updated --function-name vsz-directory
+  CHANGED=1
+  say "set vsz-directory's CLOUD_ID_KEY (not shown; it lives in the function's environment only)"
+}
+
+ensure_presence_rule() {        # IoT lifecycle events of adapter-* -> vsz-directory
+  local policy
+  if aws iot get-topic-rule --rule-name "$PRESENCE_RULE" >/dev/null 2>&1; then
+    say "IoT rule $PRESENCE_RULE: exists, left as is"
+  else
+    create "IoT rule $PRESENCE_RULE (cloud/iot/vsz-adapter-presence-rule.json)" aws iot create-topic-rule \
+      --rule-name "$PRESENCE_RULE" --topic-rule-payload "file://$VMS_HOME/cloud/iot/vsz-adapter-presence-rule.json"
+  fi
+  policy=$(aws lambda get-policy --function-name vsz-directory --query Policy --output text 2>/dev/null || true)
+  if grep -qF "rule/$PRESENCE_RULE" <<<"$policy"; then say "vsz-directory: IoT may invoke it for $PRESENCE_RULE"; return; fi
+  create "permission for IoT to invoke vsz-directory, for $PRESENCE_RULE only" aws lambda add-permission \
+    --function-name vsz-directory --statement-id "iot-$PRESENCE_RULE" --action lambda:InvokeFunction \
+    --principal iot.amazonaws.com --source-arn "arn:aws:iot:$REGION:$ACCOUNT:rule/$PRESENCE_RULE" \
+    --source-account "$ACCOUNT"
+}
+
+# Every adapter's retained config, as the directory says: the Pi reads it at every connect. Run
+# once for the adapters that existed before Phase 6 (adapter-01: activated); afterwards
+# vsz-directory-api publishes on each change, and the System console's Sync sends one again.
+publish_adapter_configs() {
+  local endpoint at
+  printf '{"op": "adapters", "actor": {"kind": "operator"}}\n' > "$TMP/adapters-event.json"
+  if ! invoke_lambda vsz-directory "$TMP/adapters-event.json" >/dev/null; then
+    if [ "$DRY" -eq 1 ]; then say "would publish every adapter's config (listing them needs vsz-directory's Phase 6 code)"; return; fi
+    die "vsz-directory didn't list the adapters -- is its Phase 6 code deployed? (deploy.sh lambda vsz-directory)"
+  fi
+  endpoint=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  python3 -c '
+import json, sys
+for a in json.load(open(sys.argv[1]))["adapters"]:
+    print(a["thingName"], "true" if a["status"] == "activated" else "false")' "$TMP/vsz-directory-answer.json" |
+  while read -r thing activated; do
+    if [ "$DRY" -eq 1 ]; then say "would publish adapter/$thing/config (retained): activated $activated"; continue; fi
+    printf '{"activated": %s, "at": "%s"}' "$activated" "$at" > "$TMP/config.json"
+    aws iot-data publish --endpoint-url "https://$endpoint" --topic "adapter/$thing/config" --qos 1 --retain \
+      --cli-binary-format raw-in-base64-out --payload "fileb://$TMP/config.json"
+    say "published adapter/$thing/config (retained): activated $activated"
+  done
+}
+
+provision_adapters() {
+  aws lambda get-function-configuration --function-name vsz-directory >/dev/null 2>&1 ||
+    die "no function vsz-directory: bash cloud/provision.sh identity first"
+  aws iam get-role --role-name vsz-directory-api-role >/dev/null 2>&1 ||
+    die "no role vsz-directory-api-role: bash cloud/provision.sh directory first"
+  ensure_cloud_id_key
+  ensure_inline_policy vsz-directory-api-role adapters vsz-directory-api-adapters-policy.json
+  ensure_presence_rule
+  publish_adapter_configs
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  [ -n "$(aws lambda get-function-configuration --function-name vsz-directory \
+          --query 'Environment.Variables.CLOUD_ID_KEY' --output text | sed 's/^None$//')" ] &&
+    aws iam get-role-policy --role-name vsz-directory-api-role --policy-name adapters >/dev/null &&
+    aws iot get-topic-rule --rule-name "$PRESENCE_RULE" >/dev/null &&
+    aws lambda get-policy --function-name vsz-directory --query Policy --output text | grep -qF "rule/$PRESENCE_RULE" ||
+    die "adapters: the key, the API's policy, the rule or IoT's permission isn't there afterwards"
+  say "verified: CLOUD_ID_KEY set, vsz-directory-api may publish adapter configs and release cameras, adapters' presence reaches vsz-directory"
+  say "on each adapter's Pi, once: systemctl --user restart kvs-agent onvif-admin  (the agent then reads its config)"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -838,5 +930,6 @@ case "${1:-}" in
   tenancy)         preflight; provision_tenancy ;;
   directory)       preflight; provision_directory ;;
   portal)          preflight; find_pool; provision_portal ;;
-  *) sed -n '2,33p' "$0"; exit 1 ;;
+  adapters)        preflight; provision_adapters ;;
+  *) sed -n '2,36p' "$0"; exit 1 ;;
 esac

@@ -6,7 +6,7 @@
 // customer's first load doesn't carry them. The API checks every call again -- this is convenience.
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from "vue-router";
 import type { Role } from "./api/types";
-import { CAMERA_ROLES, DEALER_ROLES, PORTAL_ROLES, SYSTEM_ROLES, homeFor } from "./auth/roles";
+import { CAMERA_ROLES, CUSTOMER_ROLES, DEALER_ROLES, PORTAL_ROLES, SYSTEM_ROLES, homeFor } from "./auth/roles";
 import LoginView from "./views/LoginView.vue";
 import ShellLayout from "./views/ShellLayout.vue";
 import LiveView from "./views/LiveView.vue";
@@ -29,6 +29,11 @@ export function makeRoutes(role: () => Role | null): RouteRecordRaw[] {
         { path: "events/:cameraId?", name: "events", component: EventsView, meta: cameras },
         // Before the camera route, which would otherwise take "live-view" for a camera ID.
         { path: "settings/live-view", name: "settings-live", component: LiveViewSettings, meta: cameras },
+        // The account's adapters (DEALER-PANEL-PLAN.md D15): before the camera route too.
+        { path: "settings/adapters", name: "settings-adapters", component: () => import("./views/AdaptersSettings.vue"),
+          meta: { roles: CUSTOMER_ROLES } },
+        { path: "adapters/add", name: "add-adapter", component: () => import("./views/AddAdapterView.vue"),
+          meta: { roles: CUSTOMER_ROLES } },
         { path: "settings/:cameraId?/:section?", name: "settings", component: SettingsView, meta: cameras },
         { path: "account", name: "account", component: AccountView },   // DEALER-PANEL-PLAN.md D18
         {

@@ -6,6 +6,8 @@ model. What is pinned here: only the token's sub goes to the directory, never it
 becomes the right operation; an invitation Cognito refuses is taken back out of the directory; a
 disable signs every session out; every answer has CORS (invoke checks, #8).
 """
+import json
+
 import pytest
 
 from fakes import invoke
@@ -38,11 +40,12 @@ def directory(monkeypatch):
 @pytest.fixture
 def route(monkeypatch):
     """invoke() with the proxy path set, as API Gateway sends /directory/{proxy+}."""
-    def go(method, path, body=None, query=None, claims=ME):
+    def go(method, path, body=None, query=None, claims=ME, source_ip="203.0.113.7"):
         original = api.lambda_handler
 
         def with_path(event, context):
             event["pathParameters"] = {"proxy": path}
+            event.setdefault("requestContext", {})["identity"] = {"sourceIp": source_ip}   # API Gateway's
             return original(event, context)
         monkeypatch.setattr(api, "lambda_handler", with_path)
         try:
@@ -360,3 +363,129 @@ def test_the_registry_scan_never_reads_a_credential(aws, monkeypatch):
     assert not fields & {"rtspUrl", "liveRtspUrl", "onvifPassword", "onvifUser", "onvifHost", "webUrl"}
     assert rows and all(set(r) <= fields for r in rows)
     assert "cam-04" not in {r["cameraId"] for r in rows}                # unregistered: left out
+
+
+# --- adapters (Phase 6, D15) ------------------------------------------------------------------------
+
+@pytest.fixture
+def told(monkeypatch):
+    """Records each retained config the API publishes, as (thing, activated)."""
+    sent = []
+    monkeypatch.setattr(api, "publish_config", lambda thing, activated: sent.append((thing, activated)))
+    return sent
+
+
+@pytest.mark.parametrize("path, op, args", [
+    (f"adapters/{ADAPTER}/allocate", "allocate_adapter", {"dealerId": DEALER, "id": ADAPTER}),
+    (f"adapters/{ADAPTER}/new-code", "new_code", {"id": ADAPTER}),
+])
+def test_allocation_and_a_new_code_are_directory_operations(route, directory, path, op, args):
+    calls, _ = directory
+    assert route("POST", path, {"dealerId": DEALER} if "allocate" in path else None)[0] == 200
+    assert calls == [(op, ME["sub"], args)]
+
+
+def test_new_adapters_are_told_they_arent_activated_and_the_identity_command_is_given(route, directory, told):
+    calls, results = directory
+    results["generate_adapters"] = [{"id": "a-2", "thingName": "adapter-02", "cloudId": "K7QM4-XRPZ9"},
+                                    {"id": "a-3", "thingName": "adapter-03", "cloudId": "QQQQQ-RRRRR"}]
+    status, out = route("POST", "adapters", {"count": 2, "label": "Box"})
+    assert status == 201 and calls[0] == ("generate_adapters", ME["sub"], {"count": 2, "label": "Box"})
+    assert out["identityCommand"] == "bash cloud/adapter-identity.sh create adapter-02 adapter-03"
+    assert [a["cloudId"] for a in out["adapters"]] == ["K7QM4-XRPZ9", "QQQQQ-RRRRR"]
+    assert told == [("adapter-02", False), ("adapter-03", False)] and "configUnsent" not in out
+
+
+def test_the_retained_config_is_published_as_the_pi_reads_it(aws):
+    from botocore.stub import ANY
+    fake = aws(api)
+    fake.stub("iot-data").add_response("publish", {}, {"topic": "adapter/adapter-02/config", "qos": 1,
+                                                       "retain": True, "payload": ANY})
+    api.publish_config("adapter-02", True)
+
+
+def test_an_activation_takes_its_address_from_api_gateway_never_the_body(aws, route, directory, told):
+    calls, results = directory
+    results["activate_adapter"] = {"adapterId": ADAPTER, "thingName": "adapter-02", "customerId": CUSTOMER,
+                                   "siteId": "s-1", "activationId": "act-9"}
+    fake = aws(api, cameras=[{"cameraId": "cam-20", "adapterId": "adapter-02"}, {"cameraId": "cam-01", "adapterId": "adapter-01"}])
+    status, out = route("POST", "adapters/activate", {"cloudId": "k7qm4-xrpz9", "newSite": {"name": "Garage"},
+                                                      "sourceIp": "10.0.0.1"}, source_ip="198.51.100.4")
+    assert status == 200 and calls[0][2]["sourceIp"] == "198.51.100.4"
+    assert out["camerasReleased"] == 1                                    # a leftover from before: out of view
+    assert fake.tables["cameras"].row("cam-20") == {"cameraId": "cam-20", "releasedFrom": "adapter-02"}
+    assert fake.tables["cameras"].row("cam-01") == {"cameraId": "cam-01", "adapterId": "adapter-01"}
+    assert told == [("adapter-02", True)]
+
+
+def test_a_refused_activation_tells_nobody(route, directory, told):
+    _, results = directory
+    results["activate_adapter"] = api.Refused(400, "this Cloud ID can't be activated")
+    assert route("POST", "adapters/activate", {"cloudId": "x"}) == (400, {"error": "this Cloud ID can't be activated"})
+    assert told == []
+
+
+@pytest.mark.parametrize("path, op, result", [
+    ("release", "release_adapter", {"id": ADAPTER, "thingName": "adapter-02", "cloudId": "NEWCO-DE123"}),
+    ("remove", "remove_adapter", {"id": ADAPTER, "thingName": "adapter-02"}),
+])
+def test_an_adapter_leaving_its_customer_takes_its_cameras_out_of_view(aws, route, directory, told, path, op, result):
+    _, results = directory
+    results[op] = result
+    fake = aws(api, cameras=[{"cameraId": "cam-20", "adapterId": "adapter-02", "displayName": "Gate"},
+                             {"cameraId": "cam-21", "adapterId": "adapter-02"},
+                             {"cameraId": "cam-01", "adapterId": "adapter-01"}], page_size=1)
+    status, out = route("POST", f"adapters/{ADAPTER}/{path}")
+    assert status == 200 and out["camerasReleased"] == 2
+    assert fake.tables["cameras"].row("cam-20") == {"cameraId": "cam-20", "releasedFrom": "adapter-02", "displayName": "Gate"}
+    assert fake.tables["cameras"].row("cam-01")["adapterId"] == "adapter-01"
+    assert told == [("adapter-02", False)]
+
+
+def test_a_camera_moved_meanwhile_isnt_released(aws, monkeypatch, route, directory, told):
+    _, results = directory
+    results["release_adapter"] = {"id": ADAPTER, "thingName": "adapter-02", "cloudId": "X"}
+    fake = aws(api, cameras=[{"cameraId": "cam-20", "adapterId": "adapter-02"}])
+    table = fake.tables["cameras"]
+    scan = table.scan
+
+    def scan_then_move(**kwargs):            # rematched to another adapter between the scan and the write
+        page = scan(**kwargs)
+        table.items[0]["adapterId"] = "adapter-03"
+        return page
+    monkeypatch.setattr(table, "scan", scan_then_move)
+    assert route("POST", f"adapters/{ADAPTER}/release")[1]["camerasReleased"] == 0
+    assert table.items[0] == {"cameraId": "cam-20", "adapterId": "adapter-03"}     # the write's condition kept it
+
+
+def test_a_registry_or_iot_failure_is_reported_and_the_directory_stands(monkeypatch, route, directory):
+    _, results = directory
+    results["release_adapter"] = {"id": ADAPTER, "thingName": "adapter-02", "cloudId": "NEWCO-DE123"}
+
+    def broken(*args):
+        raise api.ClientError({"Error": {"Code": "AccessDeniedException"}}, "x")
+    monkeypatch.setattr(api, "release_cameras", broken)
+    monkeypatch.setattr(api, "publish_config", broken)
+    status, out = route("POST", f"adapters/{ADAPTER}/release")
+    assert status == 200 and out["cloudId"] == "NEWCO-DE123"
+    assert "sync it" in out["registryError"] and "sync it" in out["configUnsent"]
+
+
+def test_a_revoke_points_at_the_owners_script_for_the_certificate(monkeypatch, route, directory, told):
+    _, results = directory
+    results["revoke_adapter"] = {"id": ADAPTER, "thingName": "adapter-02", "wasActivated": False, "identity": True}
+    monkeypatch.setattr(api, "release_cameras", lambda thing: pytest.fail("never activated: no cameras to release"))
+    status, out = route("POST", f"adapters/{ADAPTER}/revoke")
+    assert status == 200 and out["identityCommand"] == "bash cloud/adapter-identity.sh revoke adapter-02"
+    assert told == [("adapter-02", False)]
+
+
+@pytest.mark.parametrize("activated", [True, False])
+def test_sync_says_again_what_the_directory_says(monkeypatch, route, directory, told, activated):
+    _, results = directory
+    results["adapter_state"] = {"id": ADAPTER, "thingName": "adapter-02", "activated": activated, "status": "x"}
+    released = []
+    monkeypatch.setattr(api, "release_cameras", lambda thing: released.append(thing) or 0)
+    status, out = route("POST", f"adapters/{ADAPTER}/sync")
+    assert status == 200 and told == [("adapter-02", activated)]
+    assert released == ([] if activated else ["adapter-02"])

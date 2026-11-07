@@ -16,12 +16,12 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-90 entries, from the first build (2026-08-20) through the move onto a second Pi
+91 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
 found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
-planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07).
+planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -115,6 +115,7 @@ planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-
 | 88 | tests_db passed on the Pi only because the shell exported AWS_REGION; CI failed them all | tests | 2026-11-07 | fixed 2026-11-07 |
 | 89 | The sign-in trigger's cold start took 4.26 s of the 5 s Cognito allows | Lambda / sign-in | 2026-11-07 | fixed 2026-11-07 |
 | 90 | A refused sign-in's message ended in ".." | Lambda / sign-in | 2026-11-07 | fixed 2026-11-07 |
+| 91 | After an outage longer than its MQTT session lasts, the agent came back without its subscriptions | agent | 2026-11-07 | fixed 2026-11-07, not yet deployed |
 
 ### What they have in common
 
@@ -1674,3 +1675,27 @@ strips the prefix and shows the rest, so people would have read the doubled stop
 deployed by the operator): the refusal now reads "…ask whoever manages your account." — one stop.
 
 **The rule:** text that another system wraps is written for the wrapped result.
+
+### #91 — After an outage longer than its MQTT session lasts, the agent came back without its subscriptions
+
+**Found:** 2026-11-07, by reading `agent.py` while adding its second subscription
+(`DEALER-PANEL-PLAN.md` Phase 6.3), against the AWS IoT Device SDK's own sample. Not observed on
+the Pi. **Referenced from:** `adapter/agent.py` (`on_connection_resumed`).
+
+The agent connects with `clean_session=False`, so AWS IoT keeps its subscription to `…/cmd` while
+the connection is down, and awscrt resumes the connection by itself. But AWS IoT keeps a persistent
+session only for a while: an hour by default. After a longer outage, the broker reports
+`session_present=False` and has no subscriptions for the client. awscrt doesn't renew them: the SDK
+leaves that to the application, and its `pubsub` sample calls `resubscribe_existing_topics()` in
+exactly this case. `on_connection_resumed` only recorded that AWS was reachable again. So after an
+outage of more than an hour, every Start, Stop, Live and IR press from the page would have gone
+unanswered until something restarted `kvs-agent`. The new retained activation message (Phase 6.3)
+would have been missed the same way. The outages measured so far (`OUTAGE.md`) lasted minutes,
+which is why nothing showed.
+
+**Fix:** when a connection resumes accepted but without its session, the agent subscribes again to
+every topic it had (`resubscribe_existing_topics()`); a resumed session that persisted needs nothing.
+`test_ff91_a_session_aws_discarded_gets_its_subscriptions_back` fails without the fix.
+
+**The rule:** a persistent MQTT session is a cache with an expiry. The client renews its
+subscriptions whenever the broker says the session is gone.

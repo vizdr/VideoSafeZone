@@ -10,6 +10,7 @@ import { endpoints } from "../../api";
 import { errorText } from "../../api/client";
 import type { BillingInterval, PlanLine, Pricing } from "../../api/types";
 import { useLoad } from "../../composables/useLoad";
+import ActivateAdapter from "../../components/adapters/ActivateAdapter.vue";
 import { CUSTOMER, adapterLabel, useAdapterChoice } from "../../dealer/customer";
 import { RECORDINGS, RECORDING_LABELS, RESOLUTIONS, RESOLUTION_LABELS, STATUS_LABELS, linesOf } from "../../dealer/plans";
 import { money, pricePlan } from "../../pricing";
@@ -66,6 +67,15 @@ const total = computed(() => ctx.adapters.value?.total);
 
 const message = ref(""), error = ref(""), busy = ref(false), confirming = ref(false);
 
+// Activate an adapter for this customer, with its Cloud ID (D15): it starts its own trial.
+const activating = ref(false);
+async function activated(a: { thingName: string; adapterId: string }): Promise<void> {
+  activating.value = false;
+  message.value = `${a.thingName} is activated for this customer, on a trial plan.`;
+  await ctx.reload();
+  choose(a.adapterId);
+}
+
 async function save(): Promise<void> {
   const a = selected.value;
   if (!a || !valid.value) { error.value = "Each camera count is a whole number from 0 to 100."; return; }
@@ -108,8 +118,17 @@ async function cancel(): Promise<void> {
 <template>
   <article class="console-card">
     <h2>Cloud plan<span class="dot">.</span></h2>
-    <Message v-if="ctx.adapters.value && !list.length" severity="info" size="small" variant="simple" data-test="no-adapter">
-      No adapter is activated for this customer yet. Activating one with its Cloud ID comes in Phase 6.</Message>
+    <Message v-if="ctx.adapters.value && !list.length && !activating" severity="info" size="small" variant="simple"
+             data-test="no-adapter">No adapter is activated for this customer yet.</Message>
+    <div class="console-actions activate-row">
+      <Button v-if="!activating" size="small" :severity="list.length ? 'secondary' : undefined"
+              :label="list.length ? 'Activate another adapter' : 'Activate an adapter'" data-test="start-activate"
+              @click="activating = true" />
+      <Button v-else size="small" severity="secondary" variant="text" label="Close" @click="activating = false" />
+    </div>
+    <ActivateAdapter v-if="activating && ctx.detail.value" :sites="ctx.detail.value.sites" :customer-id="ctx.customerId.value"
+                     @activated="activated" />
+    <Message v-if="message && !selected" severity="success" size="small" variant="simple">{{ message }}</Message>
     <template v-if="selected">
       <div class="console-form">
         <label>Adapter (one plan each)
@@ -181,4 +200,5 @@ async function cancel(): Promise<void> {
 .price { font-size: 1.1rem; }
 .price strong { font-size: 1.4rem; margin: 0 0.3rem; }
 .plan-status { margin: 0.5rem 0 1rem; }
+.activate-row { margin-bottom: 0.75rem; }
 </style>

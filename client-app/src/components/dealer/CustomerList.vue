@@ -11,6 +11,7 @@ import { endpoints } from "../../api";
 import { errorText } from "../../api/client";
 import type { CustomerSummary, Dealer } from "../../api/types";
 import { useLoad } from "../../composables/useLoad";
+import { browserZone, timeZones } from "../../dealer/zones";
 import { money } from "../../pricing";
 import { useAuthStore } from "../../stores/auth";
 
@@ -31,16 +32,9 @@ const shown = computed(() => {
 const camerasText = (c: CustomerSummary) => `${c.inPlans} / ${c.registered ?? "—"}`;
 
 // --- New customer ---
-const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-const zones = (() => {
-  try {
-    return (Intl as unknown as { supportedValuesOf: (k: string) => string[] }).supportedValuesOf("timeZone");
-  } catch {
-    return [browserZone, "UTC"];
-  }
-})();
+const zones = timeZones();
 const creating = ref(false);
-const form = ref({ name: "", reference: "", email: "", phone: "", siteName: "Main site", timezone: browserZone,
+const form = ref({ name: "", reference: "", email: "", phone: "", siteName: "Main site", timezone: browserZone(),
                    holderEmail: "", holderName: "", dealerId: "" });
 const message = ref(""), warning = ref(""), error = ref(""), busy = ref(false);
 

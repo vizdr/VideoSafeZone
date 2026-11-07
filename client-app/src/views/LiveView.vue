@@ -6,6 +6,7 @@ import LayoutPicker from "../components/live/LayoutPicker.vue";
 import LiveTile from "../components/live/LiveTile.vue";
 import type { SettingStatus } from "../composables/useSavedSetting";
 import { LAYOUTS, bringToLarge, cameraOrder, pageOf, type Cell, type LayoutId } from "../layouts/grid";
+import { useAuthStore } from "../stores/auth";
 import { useCamerasStore } from "../stores/cameras";
 import { useUserSettingsStore } from "../stores/userSettings";
 
@@ -15,6 +16,7 @@ import { useUserSettingsStore } from "../stores/userSettings";
 const route = useRoute();
 const router = useRouter();
 const cameras = useCamerasStore();
+const auth = useAuthStore();
 const settings = useUserSettingsStore();
 
 const layoutId = computed(() => settings.liveLayout);
@@ -80,7 +82,8 @@ async function setLayout(id: LayoutId): Promise<void> {
     <p v-if="layoutStatus && layoutStatus.tone !== 'ok'" class="layout-status" :class="layoutStatus.tone">
       {{ layoutStatus.text }}</p>
 
-    <p v-if="cameras.loaded && !cameras.cameras.length" class="muted">No cameras registered yet.</p>
+    <p v-if="cameras.loaded && !cameras.cameras.length" class="muted" data-test="no-cameras">No cameras registered yet.
+      <RouterLink v-if="auth.role === 'customer'" :to="{ name: 'add-adapter' }">Add your Cloud Adapter</RouterLink></p>
     <div v-else class="grid">
       <LiveTile v-for="(t, i) in tiles" :key="t.cameraId ?? `empty-${i}`" :camera="cameras.byId(t.cameraId ?? undefined)"
                 :cell="t.cell" :selected="!!t.cameraId && t.cameraId === selected"

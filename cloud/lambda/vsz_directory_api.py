@@ -21,6 +21,11 @@ one of vsz-directory's operations; invitations and account changes also go to Co
   POST  /directory/adapters/<id>/plan/cancel  {basedOn}
   GET   /directory/adapters/<id>/plans        the plan's history at its current customer
   GET   /directory/dealer · PATCH             the dealer's own details
+  Adapters (Phase 6, D15):
+  POST  /directory/adapters                   {count, label?, dealerId?} -- new adapters, their Cloud IDs once
+  POST  /directory/adapters/activate          {cloudId, accountId? | customerId?, siteId? | newSite?, name?}
+  POST  /directory/adapters/<id>/allocate     {dealerId | null}
+  POST  /directory/adapters/<id>/new-code | release | remove | revoke | sync
 
 An invitation: vsz-directory adds the person, invited, with their membership; Cognito creates the
 user and emails a temporary password (AdminCreateUser); the new sub goes back to the directory. If
@@ -34,12 +39,20 @@ picture size, recording mode, when the last thumbnail was taken -- never the pic
 credential: the scan reads only the fields below). A registry that can't be read leaves those out
 and says so; the rest of the answer stands.
 
+After an adapter's state changes, this function publishes its retained config message --
+adapter/<thing>/config, {"activated": true|false} -- which the Pi reads at every connect (D15);
+and when an adapter leaves its customer (release, remove, revoke), its camera rows lose adapterId
+and get releasedFrom, so the next customer starts with none and never sees the last one's
+recordings. Either can fail after the directory changed: the answer then says so (configUnsent,
+registryError), and `sync` does both again. An adapter's AWS identity is the owner's script's,
+cloud/adapter-identity.sh -- this function has no certificate permissions (Phase 6 amendment).
+
 Every answer carries CORS headers, errors included (FoundAndFixed.md #8).
 """
 import json
 import os
 import re
-from datetime import timezone
+from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
@@ -73,6 +86,14 @@ ROUTES = [
     ("GET", f"adapters/(?P<adapterId>{ID})/plans", "plan_history"),
     ("GET", "dealer", "get_dealer"),
     ("PATCH", "dealer", "update_own_dealer"),
+    ("POST", "adapters", "generate"),
+    ("POST", "adapters/activate", "activate"),
+    ("POST", f"adapters/(?P<id>{ID})/allocate", "allocate_adapter"),
+    ("POST", f"adapters/(?P<id>{ID})/new-code", "new_code"),
+    ("POST", f"adapters/(?P<id>{ID})/release", "release"),
+    ("POST", f"adapters/(?P<id>{ID})/remove", "remove"),
+    ("POST", f"adapters/(?P<id>{ID})/revoke", "revoke"),
+    ("POST", f"adapters/(?P<id>{ID})/sync", "sync"),
     ("GET", "adapters", "list_adapters"),
     ("GET", "users", "list_users"),
     ("POST", "users", "invite"),
@@ -80,7 +101,7 @@ ROUTES = [
     ("GET", "pricing", "get_pricing"),
     ("PUT", "pricing", "put_pricing"),
 ]
-CREATED = {"create_dealer", "invite", "create_customer"}
+CREATED = {"create_dealer", "invite", "create_customer", "generate"}
 
 
 class Refused(Exception):
@@ -271,7 +292,105 @@ def create_customer(sub, body):
     return out
 
 
-SPECIAL = {"customers": customers, "customer_adapters": customer_adapters, "create_customer": create_customer}
+# --- adapters: the retained config and the registry's view (Phase 6, D15) -----------------------------
+
+def publish_config(thing, activated):
+    """The adapter's retained config message: what the Pi reads whenever it connects."""
+    boto3.client("iot-data", region_name=REGION).publish(
+        topic=f"adapter/{thing}/config", qos=1, retain=True,
+        payload=json.dumps({"activated": activated,
+                            "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}).encode())
+
+
+def release_cameras(thing):
+    """The adapter's camera rows leave its customer: adapterId removed, releasedFrom set (D15) -- so
+    no customer's token reaches them, and the Pi's rematch never adopts them again (D12). Field by
+    field and conditional, as the registry's contract asks. Returns how many."""
+    table = boto3.resource("dynamodb", region_name=REGION).Table(CAMERAS_TABLE)
+    released, kwargs = 0, {"ProjectionExpression": "cameraId, adapterId"}
+    while True:
+        page = table.scan(**kwargs)
+        for row in page.get("Items", []):
+            if row.get("adapterId") == thing:
+                try:
+                    table.update_item(Key={"cameraId": row["cameraId"]},
+                                      UpdateExpression="SET releasedFrom = :t REMOVE adapterId",
+                                      ConditionExpression="adapterId = :t", ExpressionAttributeValues={":t": thing})
+                    released += 1
+                except ClientError as exc:
+                    if error_code(exc) != "ConditionalCheckFailedException":   # moved meanwhile: not ours
+                        raise
+        if "LastEvaluatedKey" not in page:
+            return released
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+def _follow_up(out, thing, activated, release):
+    """After the directory changed: the registry (when the adapter left a customer), then the config.
+    A failure is reported, never undone: the directory's state is the one that holds."""
+    if release:
+        try:
+            out["camerasReleased"] = release_cameras(thing)
+        except Exception as exc:  # noqa: BLE001
+            out["registryError"] = f"its cameras are still in the registry under {thing} ({error_code(exc)}): sync it"
+    try:
+        publish_config(thing, activated)
+    except Exception as exc:  # noqa: BLE001
+        out["configUnsent"] = f"the adapter wasn't told ({error_code(exc)}): sync it"
+    return out
+
+
+def generate(sub, args):
+    made = call_directory("generate_adapters", sub, args)
+    out = {"adapters": made,
+           "identityCommand": "bash cloud/adapter-identity.sh create " + " ".join(m["thingName"] for m in made)}
+    unsent = []
+    for m in made:
+        try:
+            publish_config(m["thingName"], False)
+        except Exception:  # noqa: BLE001
+            unsent.append(m["thingName"])
+    if unsent:
+        out["configUnsent"] = f"not told yet that they aren't activated: {', '.join(unsent)} (sync them)"
+    return out
+
+
+def activate(sub, args):
+    """The activation, then (a backstop) any camera rows still under this adapter from before are
+    taken out of view, then the Pi is told -- before that, its admin GUI registers no camera."""
+    done = call_directory("activate_adapter", sub, args)
+    return _follow_up(dict(done), done["thingName"], True, release=True)
+
+
+def release(sub, args):
+    done = call_directory("release_adapter", sub, args)
+    return _follow_up(dict(done), done["thingName"], False, release=True)
+
+
+def remove(sub, args):
+    done = call_directory("remove_adapter", sub, args)
+    return _follow_up(dict(done), done["thingName"], False, release=True)
+
+
+def revoke(sub, args):
+    done = call_directory("revoke_adapter", sub, args)
+    out = _follow_up(dict(done), done["thingName"], False, release=done["wasActivated"])
+    if done.get("identity"):
+        out["identityCommand"] = f"bash cloud/adapter-identity.sh revoke {done['thingName']}"
+    return out
+
+
+def sync(sub, args):
+    """Both follow-ups again, from the directory's state: the config, and for an adapter that isn't
+    activated, the registry's view of its cameras."""
+    state = call_directory("adapter_state", sub, args)
+    return _follow_up({"thingName": state["thingName"], "activated": state["activated"]},
+                      state["thingName"], state["activated"], release=not state["activated"])
+
+
+SPECIAL = {"customers": customers, "customer_adapters": customer_adapters, "create_customer": create_customer,
+           "generate": generate, "activate": activate, "release": release, "remove": remove, "revoke": revoke,
+           "sync": sync}
 
 
 def lambda_handler(event, context):
@@ -301,6 +420,8 @@ def lambda_handler(event, context):
             params = m.groupdict()
             args = {**{k: v for k, v in query.items() if k == "dealerId"}, **params} if method == "GET" \
                 else {**body, **params}
+            if what == "activate":            # the rate limit's address is API Gateway's, never the body's
+                args["sourceIp"] = ((event.get("requestContext") or {}).get("identity") or {}).get("sourceIp")
             if what == "invite":
                 result = invite(sub, body)
             elif what == "account":

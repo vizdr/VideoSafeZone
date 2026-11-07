@@ -31,6 +31,8 @@ export const useAuthStore = defineStore("auth", () => {
     changeEmail: (email: string) => session.changeEmail(email),
     confirmEmail: (code: string) => session.confirmEmail(code),
     restore: () => session.restore(),
+    /** A new ID token now: after an adapter is activated or removed, its claims change (D4, D15). */
+    refresh: () => session.refresh(),
     signOut: () => session.signOut(),
   };
 });

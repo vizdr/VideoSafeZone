@@ -496,7 +496,11 @@ and grants in `cloud/db/migrations/`. A fake can't check those, so they run agai
   tests), the dealer portal's (`tests_db/test_portal.py`): another dealer's customer refused as
   unknown, plan versions priced by the server, a stale edit refused, a plan belonging to one
   adapter activation, the customer totals. Their shared helpers, `ask` and `refused_op`, are in
-  `tests_db/dbhelpers.py`.
+  `tests_db/dbhelpers.py`. Since Phase 6 (117 tests), adapters' activation
+  (`tests_db/test_adapters.py`): Cloud IDs kept only as keyed hashes and used once, the rate limit
+  (five a person, twenty an address, an hour), another dealer's adapter, release, removal, revoke,
+  presence. A refused activation must keep its attempt, which the handler commits; there the
+  operation is called directly, since `refused_op`'s savepoint would roll the attempt back.
 - **Proved to catch regressions:** granting `vsz_app` UPDATE on plans turns two tests red;
   dropping the bootstrap's `REVOKE SET OPTION` turns one red here and two in
   `tests/cloud/test_db_admin.py`. They found one bug before anything was deployed: a trigger

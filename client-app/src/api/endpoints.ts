@@ -1,7 +1,7 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  AdapterSummary, Address, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
+  ActivationRequest, Activation, AdapterChange, AdapterSummary, Address, NewAdapters, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
   CustomerDetail, CustomerPerson, CustomerSummary, Dealer, DealerDetails, DirectoryUser, HlsSession, IrMode, Me,
   MemberRole, NewCustomer, Overview, Plan, PlanLine, Price, Pricing, RecordingMode, StorageTier, UserAction,
   UserSettings,
@@ -98,6 +98,16 @@ export function makeEndpoints(api: ApiClient) {
     getDealer: () => api.request<DealerDetails>("GET", "/directory/dealer"),
     updateOwnDealer: (change: Partial<Pick<DealerDetails, "name" | "email" | "phone">> & { address?: Address | null }) =>
       api.request<{ id: string; changed: string[] }>("PATCH", "/directory/dealer", change),
+
+    // Adapters (DEALER-PANEL-PLAN.md Phase 6, D15).
+    generateAdapters: (count: number, label?: string, dealerId?: string) =>
+      api.request<NewAdapters>("POST", "/directory/adapters", { count, label, dealerId }),
+    activateAdapter: (activation: ActivationRequest) =>
+      api.request<Activation>("POST", "/directory/adapters/activate", activation),
+    allocateAdapter: (id: string, dealerId: string | null) =>
+      api.request<AdapterChange>("POST", `/directory/adapters/${q(id)}/allocate`, { dealerId }),
+    adapterAction: (id: string, action: "new-code" | "release" | "remove" | "revoke" | "sync") =>
+      api.request<AdapterChange>("POST", `/directory/adapters/${q(id)}/${action}`),
   };
 }
 

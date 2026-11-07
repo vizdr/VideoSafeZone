@@ -844,6 +844,42 @@ bash cloud/deploy.sh page                         # the portal's pages
 `provision.sh portal` checks itself as the demo dealer: its customer list must carry camera counts
 from the registry.
 
+### Adapters: Cloud IDs and activation
+
+Every adapter is activated with a Cloud ID (`DEALER-PANEL-PLAN.md` Phase 6, D15). In this order,
+once:
+
+```bash
+bash cloud/deploy.sh lambda vsz-db-admin          # ships migration 002 (an adapter's presence) ...
+bash cloud/deploy.sh db-migrate                   # ... and applies it
+bash cloud/deploy.sh lambda vsz-directory         # Cloud IDs, activation, release, revoke, presence
+bash cloud/deploy.sh lambda vsz-directory-api     # their routes, the retained config, the registry release
+bash cloud/provision.sh adapters --dry-run        # what it would add, changing nothing
+bash cloud/provision.sh adapters                  # the Cloud ID key, the API's policy, the IoT rule for
+                                                  # last seen, every adapter's retained config
+systemctl --user restart kvs-agent onvif-admin    # on each adapter's Pi: the agent reads its config
+bash cloud/deploy.sh page                         # Add adapter, Settings → Cloud adapters, System → Adapters
+```
+
+Until the agent has read its adapter's config (`activated: true` for `adapter-01`), the admin GUI
+refuses to register a new camera and says why; re-registering one that is there still works.
+
+**A new adapter**, from the System console to a running Pi:
+1. System → Adapters → *New adapters*: write down or print the Cloud IDs (shown once).
+2. With your own AWS login, make each one's AWS identity — the page shows the command:
+   ```bash
+   bash cloud/adapter-identity.sh pending                     # which adapters still need one
+   bash cloud/adapter-identity.sh create adapter-02 --dry-run # then without --dry-run
+   ```
+   It writes `~/.local/state/videosafezone/adapter-identities/adapter-02/`. Whoever holds that
+   folder holds the adapter's identity.
+3. On that adapter's Pi: `THING_NAME=adapter-02` in `/etc/adapter/adapter.env`, copy the folder
+   over, `bash setup/setup-identity.sh restore <folder>`, and delete every other copy.
+4. The customer (or their dealer) activates it with the Cloud ID on the web page.
+
+**Lost or stolen:** System → Adapters → *Revoke*, then deactivate its certificate:
+`bash cloud/adapter-identity.sh revoke adapter-02`.
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

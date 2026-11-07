@@ -1,0 +1,11 @@
+{
+  "sql": "SELECT clientId, eventType, timestamp FROM '$aws/events/presence/+/+' WHERE startswith(clientId, 'adapter-')",
+  "description": "An adapter's MQTT session connected or disconnected: its last-seen time in the directory (DEALER-PANEL-PLAN.md Phase 6.4)",
+  "awsIotSqlVersion": "2016-03-23",
+  "ruleDisabled": false,
+  "actions": [{
+    "lambda": {
+      "functionArn": "arn:aws:lambda:eu-central-1:596633517506:function:vsz-directory"
+    }
+  }]
+}

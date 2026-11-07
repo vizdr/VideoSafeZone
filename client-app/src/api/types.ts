@@ -113,7 +113,8 @@ export interface Me {
   email: string;
   role: Role;
   org: { id: string; kind: "platform" | "dealer"; name: string } | null;
-  accounts: Array<{ id: string; name: string; role: MemberRole; dealer: string }>;
+  accounts: Array<{ id: string; name: string; role: MemberRole; dealer: string;
+                    sites: Array<{ id: string; name: string; timezone: string }> }>;
 }
 
 export interface Overview {
@@ -141,9 +142,37 @@ export interface CustomerSummary {
 }
 
 export interface AdapterSummary {
-  id: string; thingName: string; status: string; label: string | null; lastSeenAt: string | null;
-  dealer: { id: string; name: string } | null;
-  activation: { name: string | null; activatedAt: string; customer: { id: string; name: string }; site: string } | null;
+  id: string; thingName: string; status: "provisioned" | "activated" | "released" | "revoked";
+  label: string | null; lastSeenAt: string | null; dealer: { id: string; name: string } | null;
+  activation: { name: string | null; activatedAt: string; customer: { id: string; name: string }; site: string;
+                siteId: string } | null;
+  /** Connected now (the last IoT lifecycle event); null: not seen since Phase 6. */
+  connected: boolean | null;
+  /** A Cloud ID is waiting to be used; identity: the owner's script made its certificate. */
+  hasCode: boolean; identity: boolean;
+}
+
+// --- adapters' activation (DEALER-PANEL-PLAN.md Phase 6, D15) ---------------------------------------
+
+/** What follows a change: cameras taken out of view, and what couldn't be done (Sync does it again). */
+export interface AdapterFollowUp {
+  camerasReleased?: number; registryError?: string; configUnsent?: string;
+  /** For the owner: the script to run (a new identity, or deactivating one). */
+  identityCommand?: string;
+}
+export interface NewAdapters extends AdapterFollowUp {
+  adapters: Array<{ id: string; thingName: string; cloudId: string }>;
+  identityCommand: string;
+}
+export interface AdapterChange extends AdapterFollowUp {
+  id: string; thingName: string; cloudId?: string; dealerId?: string | null; activated?: boolean;
+}
+export interface Activation extends AdapterFollowUp {
+  adapterId: string; thingName: string; customerId: string; siteId: string; activationId: string;
+}
+export interface ActivationRequest {
+  cloudId: string; accountId?: string; customerId?: string;
+  siteId?: string; newSite?: { name: string; timezone: string }; name?: string;
 }
 
 export interface DirectoryUser {

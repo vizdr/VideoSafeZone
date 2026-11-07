@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import activation
 import camera_control
 import live_view
 import mediamtx_api
@@ -21,6 +22,13 @@ import onvif_discovery
 import onvif_media2
 from fakes import FakeClock, FakeMediaMTX, ModuleShim
 from gui_world import PRODUCERS, ROWS, Unreachable, admin, no_detection
+
+
+@pytest.fixture(autouse=True)
+def _activated(_sandbox_paths):
+    """The adapter is activated unless a test says otherwise (activation.py, Phase 6.3): the
+    registration tests predate the gate and are about everything after it."""
+    activation.save(b'{"activated": true}')
 
 
 @pytest.fixture(autouse=True)

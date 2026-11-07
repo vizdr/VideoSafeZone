@@ -86,7 +86,7 @@ def test_operations_are_named(monkeypatch):
     monkeypatch.setattr(directory, "with_db", lambda work: pytest.fail("reached the database"))
     operator = {"kind": "operator"}
     assert directory.lambda_handler({"op": "drop", "actor": operator}, None)["error"] == \
-        "op must be ping, claims_for or operator_seed"
+        "op must be ping, claims_for, operator_seed, adapters or identity_made"
     assert directory.lambda_handler({"op": "claims_for", "actor": operator}, None)["error"] == "give email"
 
 
@@ -176,3 +176,76 @@ def test_ff90_the_refusal_leaves_the_full_stop_to_cognito():
     """FoundAndFixed.md #90: Cognito appends "." to a trigger's message; ours ended with one too."""
     assert directory.REFUSED.endswith("account") and not directory.REFUSED.endswith(".")
 
+
+
+# --- adapters (Phase 6): a refusal that keeps its attempt; presence from IoT -------------------------
+
+class RecordingCon:
+    def __init__(self):
+        self.sent = []
+
+    def run(self, sql, **params):
+        self.sent.append(sql)
+        return []
+
+
+def _signed_in(monkeypatch):
+    monkeypatch.setattr(directory, "resolve_actor", lambda con, actor: {
+        "user_id": "u-1", "email": "x@example.test", "role": "customer", "org": None, "accounts": {}})
+
+
+def test_a_refused_activation_is_committed_so_its_attempt_counts(monkeypatch):
+    """D15's rate limit counts failed attempts: the refusal must not roll its attempt back."""
+    _signed_in(monkeypatch)
+    con = RecordingCon()
+
+    def refusing(c, actor, args):
+        c.run("INSERT INTO vsz.activation_attempt ...")
+        raise directory.KeepAndRefuse(directory.REFUSED_CLOUD_ID, 400)
+    monkeypatch.setitem(directory.USER_OPS, "activate_adapter", (refusing, True))
+    monkeypatch.setattr(directory, "with_db", lambda work: work(con))
+    out = directory.lambda_handler({"op": "activate_adapter", "actor": {"kind": "user", "sub": "s"}, "args": {}}, None)
+    assert out == {"ok": False, "status": 400, "error": directory.REFUSED_CLOUD_ID}
+    assert con.sent == ["BEGIN", "INSERT INTO vsz.activation_attempt ...", "COMMIT"]
+
+
+def test_any_other_refusal_rolls_back(monkeypatch):
+    _signed_in(monkeypatch)
+    con = RecordingCon()
+
+    def refusing(c, actor, args):
+        c.run("INSERT INTO vsz.site ...")
+        raise directory.DirectoryError("no such site at this customer", 404)
+    monkeypatch.setitem(directory.USER_OPS, "activate_adapter", (refusing, True))
+    monkeypatch.setattr(directory, "with_db", lambda work: work(con))
+    out = directory.lambda_handler({"op": "activate_adapter", "actor": {"kind": "user", "sub": "s"}, "args": {}}, None)
+    assert out["status"] == 404 and con.sent == ["BEGIN", "INSERT INTO vsz.site ...", "ROLLBACK"]
+
+
+def test_an_iot_lifecycle_event_is_an_adapters_presence(monkeypatch):
+    seen = []
+    monkeypatch.setattr(directory, "with_db", lambda work: work(object()))
+    monkeypatch.setattr(directory, "record_presence", lambda con, event: seen.append(event) or {"updated": True})
+    event = {"clientId": "adapter-01", "eventType": "disconnected", "timestamp": 1_700_000_000_000}
+    assert directory.lambda_handler(event, None) == {"ok": True, "updated": True}
+    assert seen == [event]
+    # an event naming an actor is never taken for one: it must be an operation, or nothing
+    assert directory.lambda_handler({**event, "actor": {"kind": "user", "sub": "s"}, "op": "drop"}, None)["status"] == 404
+
+
+def test_the_owners_script_asks_for_every_adapters_state(monkeypatch):
+    monkeypatch.setattr(directory, "with_db", lambda work: work(object()))
+    monkeypatch.setattr(directory, "operator_adapters", lambda con: [{"thingName": "adapter-01", "status": "activated"}])
+    assert directory.lambda_handler({"op": "adapters", "actor": {"kind": "operator"}}, None) == \
+        {"ok": True, "adapters": [{"thingName": "adapter-01", "status": "activated"}]}
+
+
+def test_a_new_cloud_id_is_ten_crockford_characters_and_reads_back(monkeypatch):
+    monkeypatch.setenv("CLOUD_ID_KEY", "ab" * 32)
+    shown, stored = directory.new_cloud_id()
+    assert len(shown) == 11 and shown[5] == "-" and len(stored) == 32
+    assert directory.normalize_cloud_id(shown.lower()) == shown.replace("-", "")
+    assert directory._cloud_id_hash(shown.replace("-", "")) == stored
+    monkeypatch.setenv("CLOUD_ID_KEY", "ab" * 8)                      # too short to be a key
+    with pytest.raises(directory.DirectoryError, match="CLOUD_ID_KEY"):
+        directory.new_cloud_id()
