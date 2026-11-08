@@ -480,6 +480,30 @@ def test_a_camera_removed_here_comes_back_with_its_id_and_an_added_one_is_refuse
     assert w.sent(REGISTRATION)[-1]["error"] == "this camera is added already, as cam-02" and w.registered == []
 
 
+def test_ff94_a_device_whose_identity_changed_is_known_at_its_cameras_address(web):
+    # cam-02's camera now announces a new identity; cam-05's (unregistered) device another; a device
+    # at another adapter's camera's address is on another LAN: new here.
+    w = web(found=[Found(REF["d0"], "192.0.2.12"), Found("urn:uuid:new-b5", "192.0.2.15"),
+                   Found("urn:uuid:new-c9", "192.0.2.19")])
+    agent.on_message(CMD, json.dumps({"action": "discover", "requestId": "1234abcd"}).encode())
+    devices = {d["host"]: d for d in w.sent(DISCOVERY)[0]["devices"]}
+    assert (devices["192.0.2.12"]["state"], devices["192.0.2.12"]["cameraId"]) == ("added", "cam-02")
+    assert (devices["192.0.2.15"]["state"], devices["192.0.2.15"]["cameraId"]) == ("removed", "cam-05")
+    assert devices["192.0.2.19"]["state"] is None and "cameraId" not in devices["192.0.2.19"]
+
+
+def test_ff94_adding_a_camera_in_use_under_another_identity_is_refused(web):
+    # At cam-02's address, announcing the identity unregistered cam-05 still holds -- what made the
+    # PTZ camera a second camera: the camera in use wins.
+    w = web(requests=[{**REQUEST, "xaddr": "http://192.0.2.12:80/onvif/device_service", "endpointRef": REF["b5"]}])
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert w.sent(REGISTRATION)[-1]["error"] == "this camera is added already, as cam-02" and w.registered == []
+    # At an unregistered camera's address under a new identity: it comes back as itself.
+    w = web(requests=[{**REQUEST, "xaddr": "http://192.0.2.15:80/onvif/device_service", "endpointRef": "urn:uuid:new"}])
+    agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    assert w.registered[0][0]["cameraId"] == "cam-05" and w.registered[0][0]["endpointRef"] == "urn:uuid:new"
+
+
 def test_a_wrong_login_or_a_refused_registration_is_reported(web):
     w = web(requests=[REQUEST], details=RuntimeError("401"))
     agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())

@@ -49,8 +49,8 @@ const irStatus = ref<SettingStatus | null>(null);
 
 // Unregister (DEALER-PANEL-PLAN.md D16; the user, 2026-11-08): whoever controls the camera on an
 // account asks its adapter to unregister it, the soft mark -- any camera, the USB camera too. It
-// leaves Live and stays in the camera list, marked; its recordings and settings stay, and
-// Re-register brings it back as it was.
+// leaves Live and the camera list (this page then points to Cloud adapters → Cameras, the one place
+// that lists it); its recordings and settings stay, and Re-register there brings it back as it was.
 const auth = useAuthStore();
 const canRemove = computed(() => canManage(props.camera, auth.role));
 const confirmRemove = ref(false), removing = ref(false);
@@ -130,8 +130,8 @@ async function setIr(mode: IrMode, label: string): Promise<void> {
 
   <SettingCard v-if="canRemove" icon="pi-trash">
     <SettingRow title="Unregister camera" :status="removeStatus">
-      It leaves Live and stays in the camera list, marked unregistered. Its recordings and settings stay,
-      and Re-register brings it back as it was.
+      It leaves Live and the camera list. Its recordings and settings stay, and Re-register under
+      Cloud adapters → Cameras brings it back as it was.
       <template #control>
         <div class="remove-buttons">
           <Button v-if="!confirmRemove" size="small" severity="danger" variant="outlined" label="Unregister"

@@ -41,7 +41,8 @@ export const useCamerasStore = defineStore("cameras", () => {
     error.value = null;
   }
 
-  /** The cameras in Live: an unregistered one stays in the list, marked, with Re-register. */
+  /** The cameras in use -- Live and the camera list. An unregistered one is listed under Cloud
+   *  adapters → Cameras alone, with Re-register. */
   const active = computed(() => cameras.value.filter(c => !c.unregisteredAt));
 
   return { cameras, active, loaded, loading, error, load, byId, patch, clear };

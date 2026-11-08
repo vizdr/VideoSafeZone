@@ -529,8 +529,9 @@ immediately, with no code change and no redeploy**.
 
 Use this when a camera's credentials changed, to bring back an unregistered camera (E7), or
 for a camera registered from the **other SD card** (VMS shares the registry, E8). (A moved IP
-is followed automatically — see below.) A discovered device is matched to its row by its
-WS-Discovery identity first, then by address. Re-register updates the MediaMTX path source
+is followed automatically — see below.) A discovered device is matched to its row — a
+camera in use before an unregistered one — by its WS-Discovery identity first, then by address: an
+identity can change (FoundAndFixed.md #94). Re-register updates the MediaMTX path source
 and the registry row. It never re-provisions `cam-01`/`cam-02`, which predate the `kvs-cam@`
 template — a second producer on the same KVS stream would conflict — but a camera with **no
 producer on this Pi** (the status column says "no producer on this Pi: Re-register", and
@@ -898,7 +899,9 @@ bash cloud/deploy.sh page                         # Add cameras, Remove camera i
 
 Unregistering and re-registering any camera from the adapter's Cameras page came after (the USB
 camera included); to bring it in after the above: `deploy.sh lambda list-cameras`, `deploy.sh lambda
-adapter-cameras`, the agent and admin GUI restarted, `deploy.sh page`.
+adapter-cameras`, the agent and admin GUI restarted, `deploy.sh page`. After that, an unregistered
+camera left the camera list too, and a camera whose identity changed stopped being offered as new
+(FoundAndFixed.md #94): the agent restarted, `deploy.sh page`.
 
 `provision.sh cameras` checks itself: `/adapters` answers the demo holder for `adapter-01`, and
 "no such adapter" to the demo dealer. New camera IDs are allocated (`cam-06`, …, up to `cam-9999`);

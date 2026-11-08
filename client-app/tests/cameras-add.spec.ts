@@ -237,37 +237,36 @@ describe("Unregister camera (Settings)", () => {
   });
 });
 
-// --- unregistered cameras: listed, out of Live, re-registered (the user, 2026-11-08) ------------------
+// --- unregistered cameras: out of Live and the camera list, re-registered (the user, 2026-11-08) ------
 
 describe("an unregistered camera", () => {
   const USB = cam({ id: "cam-01", mode: "transcode", displayName: null as never });
   const GONE = cam({ id: "cam-05", unregisteredAt: "2026-11-08T10:00:00Z" });
 
-  it("stays in the camera list, marked, and out of Live", async () => {
+  it("is out of Live and out of the camera list", async () => {
     const store = useCamerasStore();
     store.cameras = [USB, GONE];
     store.loaded = true;
     expect(store.active.map(c => c.id)).toEqual(["cam-01"]);
     const { default: CameraList } = await import("../src/components/CameraList.vue");
     const w = mount(CameraList, { global: { plugins: [[OpenVue, { unstyled: true }]] } });
-    expect(w.findAll("button.cam").map(b => b.text())).toEqual(["cam-01", "cam-05unregistered"]);
+    expect(w.findAll("button.cam").map(b => b.text())).toEqual(["cam-01"]);
+    expect(w.find("h2").text()).toBe("Cameras (1)");
   });
 
-  it("comes back with Re-register in its Settings", async () => {
-    vi.useFakeTimers();
-    e.reregisterCamera.mockReturnValue(ok({ cameraId: "cam-05" }));
-    e.listCameras.mockReturnValue(ok({ cameras: [cam({ id: "cam-05" })] }));
+  it("an old link to its Settings points to the adapter's Cameras page, the one place listing it", async () => {
     const store = useCamerasStore();
-    store.cameras = [GONE];
-    const { default: UnregisteredCard } = await import("../src/components/settings/UnregisteredCard.vue");
-    const w = mount(UnregisteredCard, { props: { camera: GONE }, global: { plugins: [[OpenVue, { unstyled: true }]] } });
-    expect(w.text()).toContain("isn't in Live and records nothing");
-    await w.find("[data-test=reregister]").trigger("click");
+    store.cameras = [USB, GONE];
+    store.loaded = true;
+    const router = makeRouter(() => true, () => "customer");
+    await router.push("/settings/cam-05");
+    const { default: SettingsView } = await import("../src/views/SettingsView.vue");
+    const w = mount(SettingsView, { global: { plugins: plugins(router) } });
     await flushPromises();
-    expect(e.reregisterCamera).toHaveBeenCalledWith("adapter-01", "cam-05");
-    await vi.advanceTimersByTimeAsync(3000);
-    await flushPromises();
-    expect(w.text()).toContain("Back. Press Start to record it again.");
+    const note = w.find("[data-test=unregistered]");
+    expect(note.text()).toContain("cam-05 is unregistered. Re-register it under Cloud adapters → Cameras.");
+    expect(note.find("a").attributes("href")).toBe("#/cameras/add/adapter-01");
+    expect(w.find("[data-test=remove-camera]").exists()).toBe(false);          // none of its settings
   });
 
   it("the adapter's Cameras page unregisters any of them, the USB camera too, and re-registers", async () => {

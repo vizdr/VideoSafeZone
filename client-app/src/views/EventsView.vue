@@ -15,8 +15,8 @@ const requested = computed(() =>
 const cam = computed(() => cameras.byId(requested.value));
 
 watchEffect(() => {
-  if (!requested.value && cameras.cameras.length) {
-    void router.replace({ name: "events", params: { cameraId: cameras.cameras[0].id } });
+  if (!requested.value && cameras.active.length) {
+    void router.replace({ name: "events", params: { cameraId: cameras.active[0].id } });
   }
 });
 </script>

@@ -1425,7 +1425,17 @@ sessions after an SSH drop; the second took over at a clean point.
 matched neither the tree nor HEAD; `provision.sh cameras` made everything, and its self-check failed
 once on a deployment still reaching the edges (FoundAndFixed.md #92, fixed); re-run, verified: the
 demo holder reaches `/adapters/adapter-01/discovery` ("no scan yet"), the demo dealer gets "no such
-adapter". Left: the Pi's agent and admin GUI restarted, `deploy.sh page`, the *Verify*.
+adapter". Left: the Pi's agent and admin GUI restarted, `deploy.sh page`, the *Verify*. Done the
+same day: the Lambdas live, the agent and admin GUI restarted, the page deployed.
+
+*Changed 2026-11-08, at the user's request* (after trying it): **an unregistered camera is out of the
+camera list too** — only the adapter's Cameras page (Cloud adapters → Cameras) lists it, with
+Re-register. The camera list and the default camera of Settings and Events take cameras in use
+(`cameras.active`); an old link to an unregistered camera's Settings says so and links to that page,
+and the Re-register card in Settings is gone. Tests: `client-app/tests/cameras-add.spec.ts` (the list
+leaves it out; the old link), each broken on purpose once. Found in the same try: the PTZ camera had
+been added a second time from the web page as `cam-05` — it announced a new WS-Discovery identity,
+and the web scan matched by identity alone (FoundAndFixed.md #94: fixed, the duplicate removed).
 
 ### Phase 8: Billing seam (fakes)
 

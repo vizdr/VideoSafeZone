@@ -216,12 +216,14 @@ function deviceHost(d) {
   return d.xaddr ? d.xaddr.split("://")[1].split("/")[0].split(":")[0] : "?";
 }
 
-// {id, hidden}: the registry row a discovered device is -- identity first, then address.
+// {id, hidden}: the registry row a discovered device is -- a camera in use before an unregistered
+// one, identity before address. A device's identity can change, and an unregistered row may still
+// hold its old one: the camera in use at its address wins (FoundAndFixed.md #94, as match_device).
 function matchDevice(d) {
   const host = deviceHost(d);
-  const byRef = d.epr && (registeredByRef[d.epr] || unregisteredByRef[d.epr]);
-  if (byRef) return { id: byRef, hidden: !!unregisteredByRef[d.epr] };
+  if (d.epr && registeredByRef[d.epr]) return { id: registeredByRef[d.epr], hidden: false };
   if (registeredByHost[host]) return { id: registeredByHost[host], hidden: false };
+  if (d.epr && unregisteredByRef[d.epr]) return { id: unregisteredByRef[d.epr], hidden: true };
   if (unregisteredByHost[host]) return { id: unregisteredByHost[host], hidden: true };
   return { id: null, hidden: false };
 }

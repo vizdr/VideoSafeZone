@@ -198,3 +198,40 @@ def test_ff93_a_row_that_isnt_a_camera_is_never_adopted(registry, adopting, monk
     monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(state={"cam01": {"ready": True}}))
     assert rc.adopt_unstamped() == ["cam-01"]
     assert "adapterId" not in table.row("cam01")
+
+
+# --- #94: a camera whose announced identity changed ---------------------------------------------------
+
+NEW = "urn:uuid:5dd0ffe6-5a80-4b84-dc66-0000000000c4"      # the old one's MAC part, a new front
+
+
+def test_ff94_an_identity_that_changed_is_learned_at_the_cameras_own_address(registry):
+    table = registry([_cam("cam-04", "192.0.2.14", EPR2)])
+    cams = [_cam("cam-04", "192.0.2.14", EPR2)]
+    assert rc.rematch(cams, {NEW: ("192.0.2.14", 80)}) == (True, [])
+    assert table.row("cam-04")["onvifEndpointRef"] == NEW and cams[0]["onvifEndpointRef"] == NEW
+    assert table.writes[0][1]["ConditionExpression"] == "onvifHost = :expect AND onvifEndpointRef = :expect_ref"
+    # ... so it is followed when its address changes too
+    changed, moved = rc.rematch(cams, {NEW: ("192.0.2.44", 80)})
+    assert [c["cameraId"] for c in moved] == ["cam-04"] and table.row("cam-04")["onvifHost"] == "192.0.2.44"
+
+
+@pytest.mark.parametrize("cams, found", [
+    # another ONVIF port at that address: another service, not provably the camera
+    ([_cam("cam-04", "192.0.2.14", EPR2)], {NEW: ("192.0.2.14", 8080)}),
+    # the identity there is another camera's
+    ([_cam("cam-04", "192.0.2.14", EPR2), _cam("cam-03", "192.0.2.13", NEW)], {NEW: ("192.0.2.14", 80)}),
+], ids=["another port", "another camera's identity"])
+def test_ff94_an_identity_is_never_learned_by_guessing(registry, cams, found):
+    table = registry([dict(c) for c in cams])
+    assert rc.rematch(cams, found) == (False, [])
+    assert table.row("cam-04")["onvifEndpointRef"] == EPR2
+
+
+def test_ff94_a_camera_still_announcing_its_identity_moves_and_keeps_it(registry):
+    # Its own identity answers at a new address, and another device took the old one: a move.
+    table = registry([_cam("cam-04", "192.0.2.14", EPR2)])
+    changed, moved = rc.rematch([_cam("cam-04", "192.0.2.14", EPR2)],
+                                {EPR2: ("192.0.2.40", 80), NEW: ("192.0.2.14", 80)})
+    assert [c["cameraId"] for c in moved] == ["cam-04"]
+    assert (table.row("cam-04")["onvifHost"], table.row("cam-04")["onvifEndpointRef"]) == ("192.0.2.40", EPR2)

@@ -67,7 +67,7 @@ describe("the Live grid", () => {
     expect(w.findAll(".tile").map(t => t.classes("large"))).toEqual([true, true, false, false, false, false, false, false]);
   });
 
-  it("leaves an unregistered camera out of the grid -- it stays in the camera list, with Re-register", async () => {
+  it("leaves an unregistered camera out of the grid", async () => {
     const { w } = await mountLive([cam("cam-01"), cam("cam-02", { unregisteredAt: "2026-11-08T10:00:00Z" }), cam("cam-03")]);
     expect(tileNames(w)).toEqual(["cam-01", "cam-03", "-", "-", "-", "-", "-", "-"]);
     expect(sent("live").sort()).toEqual(["cam-01", "cam-03"]);                  // nothing plays it

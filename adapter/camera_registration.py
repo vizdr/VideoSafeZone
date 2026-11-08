@@ -752,17 +752,43 @@ def body_from_discovery(request, details):
     return body
 
 
-def mine_by_endpoint(table, endpoint_ref):
-    """This Pi's row for a device (by its WS-Discovery identity), unregistered ones included -- or
-    None. Adding a camera this Pi has unregistered brings it back as it was (Re-register)."""
-    if not endpoint_ref:
+def _port(value):
+    try:
+        return int(value or 80)
+    except (TypeError, ValueError):
         return None
-    rows, kw = [], {}
+
+
+def match_device(rows, endpoint_ref, host, port):
+    """This Pi's row for a discovered device, or None: by its WS-Discovery identity, or at its ONVIF
+    address -- a camera in use before an unregistered one, then by identity before address. A
+    device's announced identity can change (the PTZ camera's did, keeping only its MAC part), and two
+    devices can't answer at one address at once, so a device at a camera's address is that camera
+    (FoundAndFixed.md #94; the admin GUI matches the same way). Only this Pi's rows: the same private
+    address on another adapter's LAN is another device."""
+    def rank(row):
+        by_ref = bool(endpoint_ref) and row.get("onvifEndpointRef") == endpoint_ref
+        at_address = bool(host) and row.get("onvifHost") == host and _port(row.get("onvifPort")) == _port(port)
+        if not (by_ref or at_address):
+            return None
+        return camera_control.is_unregistered(row), not by_ref, row["cameraId"]
+    ranked = [(r, row) for row in rows if camera_control.is_mine(row) and (r := rank(row)) is not None]
+    return min(ranked, key=lambda pair: pair[0])[1] if ranked else None
+
+
+def all_rows(table, projection=None):
+    """Every registry row (every page of the scan), with only the projected fields if given."""
+    rows, kw = [], ({"ProjectionExpression": projection} if projection else {})
     while True:
         page = table.scan(**kw)
-        rows += [r for r in page["Items"] if r.get("onvifEndpointRef") == endpoint_ref]
+        rows += page["Items"]
         if "LastEvaluatedKey" not in page:
             break
         kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-    mine = [r for r in rows if camera_control.is_mine(r)]
-    return mine[0] if mine else None
+    return rows
+
+
+def mine_for_device(table, endpoint_ref, host, port):
+    """match_device over the whole registry. Adding a camera this Pi has unregistered brings it
+    back as it was (Re-register); adding one it has in use is refused."""
+    return match_device(all_rows(table), endpoint_ref, host, port)

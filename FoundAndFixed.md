@@ -118,6 +118,7 @@ planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-
 | 91 | After an outage longer than its MQTT session lasts, the agent came back without its subscriptions | agent | 2026-11-07 | fixed 2026-11-07, not yet deployed |
 | 92 | `provision.sh` reported a route it had just made as broken: its check asked once, before the deployment reached every edge | cloud tooling | 2026-11-08 | fixed 2026-11-08 |
 | 93 | `stream-codec.py`, given a path name, made a registry row that rematch adopted and the page showed as a fifth camera | registry | 2026-11-08 | fixed 2026-11-08 (the Pi's scripts run from the clone); the stray row deleted |
+| 94 | The web page's scan offered a camera in use as new — it announced a new WS-Discovery identity — and adding it made a second camera | agent / registry | 2026-11-08 | fixed 2026-11-08, the agent restarted and the page deployed to apply it; the duplicate removed |
 
 ### What they have in common
 
@@ -1753,3 +1754,45 @@ neither `mode` nor `kvsStreamArn`, so no camera could be hit).
 **The rule:** a write that means "update this camera" carries `attribute_exists(cameraId)`: UpdateItem
 never refuses a new key on its own, and a row, once there, is taken for a camera by every reader.
 
+### #94 — The web page's scan offered a camera in use as new — it announced a new WS-Discovery identity — and adding it made a second camera
+
+**Found:** 2026-11-08, by the user: the camera list showed `PTZ` (`cam-04`) and `Bullet` (`cam-05`),
+one camera. **Referenced from:** `adapter/camera_registration.py` (`match_device`, `mine_for_device`),
+`adapter/agent.py` (`discover_devices`, `run_registration`), `adapter/rematch_cameras.py` (`rematch`),
+`adapter/onvif-admin/static/index.html` (`matchDevice`).
+
+`cam-04`, the PTZ camera at `192.168.178.243:8888`, was registered in October with the identity
+`urn:uuid:22fb3a6d-8e99-9e05-ecd5-9ca3a99dcb20`. It now announces
+`urn:uuid:5dd0ffe6-5a80-4b84-dc66-9ca3a99dcb20`: the same last part (`9ca3a99dcb20`, apparently its
+MAC), a new front — presumably since a restart. The admin GUI matches a scanned device by identity,
+then by address; the web page's scan and add flow (Phase 7: the agent's `discover_devices` and
+`run_registration`) matched by identity alone. So the page showed the camera as new, and adding it
+registered `cam-05` (10:20 CET: a claimed ID, KVS streams `cam-05` and `cam-05-live`, a unit
+instance); the user unregistered it at 11:02. Two more faults sat behind it. The admin GUI's order
+put an identity match on an *unregistered* row before an address match on a camera in use, so with
+both rows there it would have named the device "Unregistered: cam-05". And `rematch_cameras.py`
+could no longer follow `cam-04`: its stored identity is announced nowhere, so an address change would
+have left it pointing at nothing.
+
+**Fix:** `camera_registration.match_device`: this Pi's rows only, by identity or at the ONVIF address
+(host and port), a camera in use before an unregistered one, identity before address — two devices
+can't answer at one address at once. The agent's scan listing and its add flow (`mine_for_device`) use
+it; the admin GUI's `matchDevice` takes the same order. Another adapter's camera is still matched by
+identity only: the same private address on its LAN is another device. `rematch_cameras.py` learns a
+changed identity — when a row's own is announced nowhere and the device at its address and ONVIF
+port announces one no camera has — with a write conditional on the row still holding the old one.
+`test_ff94_a_device_whose_identity_changed_is_known_at_its_cameras_address` and
+`test_ff94_adding_a_camera_in_use_under_another_identity_is_refused` (`tests/adapter/test_agent.py`),
+`test_ff94_an_identity_that_changed_is_learned_at_the_cameras_own_address`,
+`test_ff94_an_identity_is_never_learned_by_guessing` and
+`test_ff94_a_camera_still_announcing_its_identity_moves_and_keeps_it`
+(`tests/adapter/test_rematch_cameras.py`) fail without it — each part broken on purpose once.
+
+The duplicate was removed on the user's request, 2026-11-08: the KVS streams `cam-05` and
+`cam-05-live`, `thumbs/cam-05.jpg` and the registry row (under the condition that it was unregistered,
+on `adapter-01`, with the new identity); it had no clips. `/etc/adapter/channels/cam05.env` is root's
+to delete. `cam-04`'s identity is relearned by the next rematch run.
+
+**The rule:** a WS-Discovery identity is usually stable, not always — it never decides alone that a
+device is new. A device answering at a camera's own address is that camera; an identity no longer
+announced is relearned at the camera's address, never guessed elsewhere.

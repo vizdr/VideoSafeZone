@@ -203,22 +203,19 @@ def agent_env():
 def discover_devices(table):
     """What WS-Discovery finds on this LAN, each device marked against the registry: added here (its
     camera ID), removed here (unregistered: adding it brings it back), another adapter's, or new."""
-    rows, kw = [], {"ProjectionExpression": "cameraId, adapterId, onvifEndpointRef, unregisteredAt, releasedFrom, displayName"}
-    while True:
-        page = table.scan(**kw)
-        rows += page["Items"]
-        if "LastEvaluatedKey" not in page:
-            break
-        kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    rows = camera_registration.all_rows(table, "cameraId, adapterId, onvifEndpointRef, onvifHost, onvifPort, "
+                                               "unregisteredAt, releasedFrom, displayName")
     devices = []
     for svc in onvif_discovery.scan(timeout=DISCOVERY_SEC):
         xaddrs, epr = svc.getXAddrs(), svc.getEPR()
         scopes = [x.getValue() if hasattr(x, "getValue") else str(x) for x in svc.getScopes()]
-        known = [r for r in rows if epr and r.get("onvifEndpointRef") == epr]
-        here = next((r for r in known if camera_control.is_mine(r)), None)
-        state = ("removed" if camera_control.is_unregistered(here) else "added") if here else \
-            ("elsewhere" if known else None)
         host, port = onvif_discovery.xaddr_host_port(xaddrs[0]) if xaddrs else (None, None)
+        # By identity or at this Pi's camera's address (FoundAndFixed.md #94); another adapter's by
+        # identity only -- its LAN's addresses aren't this one's.
+        here = camera_registration.match_device(rows, epr, host, port)
+        elsewhere = any(epr and r.get("onvifEndpointRef") == epr and not camera_control.is_mine(r) for r in rows)
+        state = ("removed" if camera_control.is_unregistered(here) else "added") if here else \
+            ("elsewhere" if elsewhere else None)
         device = {"endpointRef": epr, "xaddr": xaddrs[0] if xaddrs else None, "host": host, "port": port,
                   "name": camera_registration.scope_value(scopes, "name"),
                   "hardware": camera_registration.scope_value(scopes, "hardware"), "state": state}
@@ -258,7 +255,7 @@ def run_registration(request_id):
     if not body["streamUri"]:
         return report("failed", error="the camera reports no video stream")
     table = get_cameras_table()
-    existing = camera_registration.mine_by_endpoint(table, req.get("endpointRef"))
+    existing = camera_registration.mine_for_device(table, req.get("endpointRef"), body["host"], body["port"])
     if existing and not camera_control.is_unregistered(existing):
         return report("failed", error=f"this camera is added already, as {existing['cameraId']}",
                       cameraId=existing["cameraId"])

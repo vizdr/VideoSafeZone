@@ -405,7 +405,8 @@ reader that *acts* on cameras must skip such a row — the admin GUI's controls,
 stop/live-stop/reregister), the outage supervisor (through its registry cache), the event watcher,
 `sync_mediamtx_paths.py` (no path, not in its cache), `rematch_cameras.py`, `codec_caps.py` — and
 every route or Lambda that changes a camera answers 409 for one. `list-cameras` lists it, marked
-(`unregisteredAt`): the page keeps it in the camera list, out of Live, with Re-register. Unregister
+(`unregisteredAt`): the page lists it only on the adapter's Cameras page (Cloud adapters → Cameras),
+with Re-register — out of Live and the camera list. Unregister
 needs `systemctl disable`, which the sudo rule allows since #80. A new reader of the table that
 acts on cameras must skip it too. **Each Pi acts only on its own rows**
 (`DEALER-PANEL-PLAN.md` D12): `camera_control.is_mine(row)` — `adapterId` is this Pi's Thing, or none
@@ -490,7 +491,10 @@ second, conflicting producer), and local control (Start/Stop, IR mode, the camer
 
 A camera's identity is its WS-Discovery endpoint reference (`onvifEndpointRef`,
 `urn:uuid:…`), not its IP address. The GUI stores it at registration and matches scan
-results by it first. `adapter/rematch_cameras.py` (`kvs-camera-rematch.timer`, every
+results by it first — but an identity can change (cam-04's did, FoundAndFixed.md #94), so a device
+at a camera's own address is that camera too, a camera in use before an unregistered one
+(`camera_registration.match_device`, the agent's scan and add; the admin GUI's `matchDevice`), and
+rematch relearns a changed identity there. `adapter/rematch_cameras.py` (`kvs-camera-rematch.timer`, every
 5 min) learns it for older rows and follows a camera to a new address: it rewrites
 `onvifHost` and the host in `rtspUrl` with a conditional registry write, then updates the
 MediaMTX path. It must never guess: duplicate identities and address clashes are skipped.

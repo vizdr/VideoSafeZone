@@ -18,7 +18,9 @@ passthrough camera:
   * ref found at a different address -> move it: onvifHost/onvifPort, and the host part of
     rtspUrl and of liveRtspUrl, the live view's sub stream (credentials, RTSP port and path
     unchanged) -- registry first, then MediaMTX, both paths
-  * ref not found -> nothing. The camera may just be off; absence proves nothing.
+  * ref not found, but the device at its onvifHost (same ONVIF port) announces a ref no camera
+    has -> learn that one: the identity changed, as the PTZ camera's did (FoundAndFixed.md #94)
+  * ref not found otherwise -> nothing. The camera may just be off; absence proves nothing.
 Before that, on adapter-01 only (ADOPT_UNSTAMPED_ROWS=yes), rows without an adapterId whose
 MediaMTX path this Pi serves get this Thing's name stamped (adopt_unstamped, DEALER-PANEL-PLAN.md
 D4, D12). Unregistered cameras are not in the list at all (sync_mediamtx_paths.load_cameras leaves
@@ -60,7 +62,7 @@ def move_url(url, old_host, new_host):
     return urlunsplit(parts._replace(netloc=netloc))
 
 
-def registry_update(camera_id, fields, expect_host, require_no_ref=False):
+def registry_update(camera_id, fields, expect_host, require_no_ref=False, expect_ref=None):
     """Conditional write: only if the row still shows the address we read, so a Re-register
     in the GUI between our read and our write is never overwritten."""
     from aws_device_creds import get_session   # also loads /etc/adapter/adapter.env
@@ -70,6 +72,9 @@ def registry_update(camera_id, fields, expect_host, require_no_ref=False):
     condition = "onvifHost = :expect"
     if require_no_ref:
         condition += " AND attribute_not_exists(onvifEndpointRef)"
+    if expect_ref:
+        condition += " AND onvifEndpointRef = :expect_ref"
+        values[":expect_ref"] = expect_ref
     get_session().resource("dynamodb").Table("cameras").update_item(
         Key={"cameraId": camera_id},
         UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in fields),
@@ -161,6 +166,20 @@ def rematch(cameras, found, dry_run=False):
             log(f"{camera_id}: identity {ref} is on {ref_count[ref]} registry rows -- skipped, fix the registry")
             continue
         if ref not in found:
+            # Its identity is announced nowhere, and the device at its own address (same ONVIF
+            # port) announces one no camera has: the identity changed (FoundAndFixed.md #94).
+            # Learn it, or the camera can't be followed when its address changes.
+            new_ref = at_host.get(host)
+            if new_ref and new_ref not in ref_count and found[new_ref][1] == int(cam.get("onvifPort") or 80):
+                log(f"{camera_id}: identity changed {ref} -> {new_ref} at {host}{suffix}")
+                if not dry_run:
+                    try:
+                        registry_update(camera_id, {"onvifEndpointRef": new_ref}, host, expect_ref=ref)
+                    except Exception as e:  # noqa: BLE001 -- retried next run
+                        log(f"{camera_id}: registry write failed ({type(e).__name__}: {e}); will retry")
+                    cam["onvifEndpointRef"] = new_ref
+                    ref_count[new_ref] += 1
+                    changed = True
             continue
         new_host, new_port = found[ref]
         if new_host == host:

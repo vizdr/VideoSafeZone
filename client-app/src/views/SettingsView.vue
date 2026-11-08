@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch, watchEffect } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import type { Role } from "../api/types";
+import { CUSTOMER_ROLES } from "../auth/roles";
 import { cameraName, modeLabel } from "../cameras/list";
 import CameraSection from "../components/settings/CameraSection.vue";
 import CloudRecording from "../components/settings/CloudRecording.vue";
 import RecordingSection from "../components/settings/RecordingSection.vue";
-import UnregisteredCard from "../components/settings/UnregisteredCard.vue";
+import { useAuthStore } from "../stores/auth";
 import { useCamerasStore } from "../stores/cameras";
 
 // WEB-PANEL-PLAN.md §4.2: the camera's name, thumbnail, Cloud recording and the section links in
@@ -18,9 +20,15 @@ const SECTIONS = [
 const route = useRoute();
 const router = useRouter();
 const cameras = useCamerasStore();
+const auth = useAuthStore();
 const requested = computed(() =>
   typeof route.params.cameraId === "string" ? route.params.cameraId : undefined);
-const cam = computed(() => cameras.byId(requested.value));
+// Cameras in use only. An unregistered one -- an old link -- is pointed to Cloud adapters → Cameras,
+// the one place that lists it, with Re-register (the user, 2026-11-08).
+const found = computed(() => cameras.byId(requested.value));
+const cam = computed(() => (found.value?.unregisteredAt ? undefined : found.value));
+const unregistered = computed(() => (found.value?.unregisteredAt ? found.value : undefined));
+const customer = computed(() => CUSTOMER_ROLES.includes(auth.role as Role | null));
 const section = computed(() => (route.params.section === "recording" ? "recording" : "camera"));
 
 // The Pi's latest frame (thumbnails.py, every 10 minutes). Its link lasts an hour: an expired or
@@ -32,8 +40,8 @@ const takenAt = computed(() => cam.value?.thumbnailAt
 
 // Settings always shows a camera: the first one until another is picked.
 watchEffect(() => {
-  if (!requested.value && cameras.cameras.length) {
-    void router.replace({ name: "settings", params: { cameraId: cameras.cameras[0].id } });
+  if (!requested.value && cameras.active.length) {
+    void router.replace({ name: "settings", params: { cameraId: cameras.active[0].id } });
   }
 });
 </script>
@@ -54,8 +62,8 @@ watchEffect(() => {
           <template v-else><i class="pi pi-image" aria-hidden="true" /><span>No picture yet</span></template>
           <figcaption v-if="cam.thumbnailUrl && !thumbFailed && takenAt">{{ takenAt }}</figcaption>
         </figure>
-        <CloudRecording v-if="!cam.unregisteredAt" :camera="cam" />
-        <nav v-if="!cam.unregisteredAt" class="sections" aria-label="Settings sections">
+        <CloudRecording :camera="cam" />
+        <nav class="sections" aria-label="Settings sections">
           <RouterLink v-for="s in SECTIONS" :key="s.name"
                       :to="{ name: 'settings', params: { cameraId: cam.id, section: s.name } }"
                       :class="{ active: section === s.name }"
@@ -67,11 +75,16 @@ watchEffect(() => {
         </nav>
       </div>
       <div class="cards">
-        <UnregisteredCard v-if="cam.unregisteredAt" :camera="cam" />
-        <CameraSection v-else-if="section === 'camera'" :camera="cam" />
+        <CameraSection v-if="section === 'camera'" :camera="cam" />
         <RecordingSection v-else :camera="cam" />
       </div>
     </div>
+    <p v-else-if="unregistered" data-test="unregistered">
+      {{ cameraName(unregistered) }} is unregistered.
+      <template v-if="customer && unregistered.adapterId">Re-register it under
+        <RouterLink :to="{ name: 'add-cameras', params: { thing: unregistered.adapterId } }">Cloud adapters → Cameras</RouterLink>.
+      </template>
+    </p>
     <p v-else-if="requested && cameras.loaded">There is no camera “{{ requested }}”.</p>
     <p v-else-if="cameras.loaded" class="muted">No cameras registered yet.</p>
   </section>
