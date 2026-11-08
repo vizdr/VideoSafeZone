@@ -116,11 +116,11 @@ def lambda_handler(event, context):
         table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
         # Scan, not Query -- this table has no sort key and is expected to stay small
         # (a handful of cameras on one adapter), so a full scan is the right tool here.
-        # Unregistered cameras are left out entirely, which is all the page needs to hide them
-        # (VMS-PORT-PLAN.md D4). Their clips stay in S3 and the clips table, reachable again
-        # once the camera is re-registered. VMS's page reads its own copy (pir-list-cameras),
-        # so this filter can't affect it. Scanned page by page: the table is small, but a
-        # single Scan stops at 1 MB.
+        # Unregistered cameras are listed too, marked (unregisteredAt): the page keeps them in its
+        # camera list, out of Live, with Re-register (DEALER-PANEL-PLAN.md Phase 7; until then they
+        # were left out, VMS-PORT-PLAN.md D4). Every route that changes a camera still answers 409
+        # for one. VMS's page reads its own copy (pir-list-cameras), so this can't affect it.
+        # Scanned page by page: the table is small, but a single Scan stops at 1 MB.
         items, kw = [], {}
         while True:
             page = table.scan(**kw)
@@ -128,7 +128,6 @@ def lambda_handler(event, context):
             if "LastEvaluatedKey" not in page:
                 break
             kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-        items = [i for i in items if not i.get("unregisteredAt")]
         # Tenancy (DEALER-PANEL-PLAN.md D4): only the cameras the caller's token reaches, each with
         # what the caller may do on it. Under TENANCY=report every camera stays, as before.
         items = [i for i in items if tenancy_refusal(event, i, "view") is None]
@@ -206,6 +205,8 @@ def lambda_handler(event, context):
                     # The adapter that serves it (D4): the page groups by adapter and asks it to
                     # remove the camera (D16, adapter-cameras).
                     "adapterId": i.get("adapterId"),
+                    # Unregistered (soft mark): listed, out of Live, with Re-register.
+                    "unregisteredAt": i.get("unregisteredAt"),
                 }
                 for i in items
             ),

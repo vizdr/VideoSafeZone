@@ -25,7 +25,7 @@ const order = ref<string[]>([]);
 const selected = ref<string | null>(null);
 // A new order from the settings (they arrive after the first layout, or were changed) starts the
 // selection over at the first tile, or the camera picked in the list.
-watch(() => cameraOrder(cameras.cameras, settings.largeCells, layoutId.value),
+watch(() => cameraOrder(cameras.active, settings.largeCells, layoutId.value),
       o => { order.value = o; selected.value = null; }, { immediate: true });
 const page = ref(0);
 const view = computed(() => pageOf(order.value, layoutId.value, page.value));
@@ -82,7 +82,7 @@ async function setLayout(id: LayoutId): Promise<void> {
     <p v-if="layoutStatus && layoutStatus.tone !== 'ok'" class="layout-status" :class="layoutStatus.tone">
       {{ layoutStatus.text }}</p>
 
-    <p v-if="cameras.loaded && !cameras.cameras.length" class="muted" data-test="no-cameras">No cameras registered yet.
+    <p v-if="cameras.loaded && !cameras.active.length" class="muted" data-test="no-cameras">No cameras registered yet.
       <template v-if="auth.role === 'customer'">
         <RouterLink :to="{ name: 'add-cameras' }" data-test="add-cameras">Add cameras</RouterLink> ·
         <RouterLink :to="{ name: 'add-adapter' }">Add your Cloud Adapter</RouterLink></template></p>

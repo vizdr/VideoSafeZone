@@ -43,6 +43,7 @@ soft-failing and on a hard time budget so AWS can never delay a start:
     UpdateStream, not a new stream -- the archive and ARN stay (codec-phase0.md §3).
 """
 import argparse
+import re
 import datetime as dt
 import os
 import sys
@@ -145,21 +146,31 @@ def record_registry(table, camera_id: str, codec: str, sub: bool = False,
     if (prev and prev != codec) or (prev_active and picture(prev_active) != picture(active)):
         sets.append("videoCodecActiveSince = :t")
         values[":t"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if sets:
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET " + ", ".join(sets),
-                          ExpressionAttributeValues=values)
+    if sets and _update_camera(table, camera_id, "SET " + ", ".join(sets), values):
         print(f"stream-codec.py: {camera_id} now streams {codec} {active} "
               f"(was {prev or 'unrecorded'} {prev_active or ''})", file=sys.stderr)
 
 
 def record_live_registry(table, camera_id: str, codec: str) -> None:
     prev = (table.get_item(Key={"cameraId": camera_id}).get("Item") or {}).get("liveVideoCodecActive")
-    if prev != codec:
-        table.update_item(Key={"cameraId": camera_id},
-                          UpdateExpression="SET liveVideoCodecActive = :c",
-                          ExpressionAttributeValues={":c": codec})
+    if prev != codec and _update_camera(table, camera_id, "SET liveVideoCodecActive = :c", {":c": codec}):
         print(f"stream-codec.py: {camera_id} live view now {codec} (was {prev or 'unrecorded'})",
               file=sys.stderr)
+
+
+def _update_camera(table, camera_id: str, expression: str, values: dict) -> bool:
+    """An update of an existing camera's row only. DynamoDB's UpdateItem creates the item when the
+    key is new: a mistyped ID -- a MediaMTX path, cam01 for cam-01 -- made a registry row that the
+    readers then took for a camera (FoundAndFixed.md #93)."""
+    try:
+        table.update_item(Key={"cameraId": camera_id}, UpdateExpression=expression,
+                          ConditionExpression="attribute_exists(cameraId)", ExpressionAttributeValues=values)
+        return True
+    except Exception as e:  # noqa: BLE001
+        if "ConditionalCheckFailed" not in type(e).__name__ + str(getattr(e, "response", "")):
+            raise
+        print(f"stream-codec.py: no registry row for {camera_id}: nothing recorded", file=sys.stderr)
+        return False
 
 
 def record_media_type(kv, stream: str, codec: str) -> None:
@@ -180,6 +191,11 @@ def main() -> int:
     ap.add_argument("--live", action="store_true",
                     help="the camera's live-view path and KVS stream")
     args = ap.parse_args()
+    # A camera ID, never a MediaMTX path: cam-01, not cam01 (FoundAndFixed.md #93).
+    if not re.fullmatch(r"cam-\d{2,4}", args.camera_id):
+        print(f"stream-codec.py: '{args.camera_id}' isn't a camera ID (cam-01, not the path cam01)",
+              file=sys.stderr)
+        return 2
 
     if args.live:
         path = camera_control.live_path_name(args.camera_id)

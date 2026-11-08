@@ -11,6 +11,7 @@ exists (cam-01 and cam-02 run as their own units). Each caller hands over its co
 list -- made at call time, so each process keeps its own (and the admin GUI's tests their fakes).
 """
 import asyncio
+import os
 import re
 import secrets
 import subprocess
@@ -541,6 +542,11 @@ def check_display_name(raw, camera_id, names):
 # --- collaborators the admin GUI and the agent share (Phase 7.3) ------------------------------------
 
 PROVISION_SH = str(Path(__file__).resolve().parent / "bin" / "provision-camera.sh")
+# The USB camera's capture: a user unit running publish-cam01.sh into MediaMTX (setup-user.sh). Its
+# unregistration is kept on this Pi as well as in the registry -- a file publish-cam01.sh checks at
+# every start, since the USB camera must start, or stay off, while AWS is unreachable.
+USB_CAPTURE_UNITS = {"cam-01": "kvs-camera-publish.service"}
+UNREGISTERED_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "videosafezone" / "unregistered"
 WIRE_WAIT_SEC = 15       # registration: how long to wait for the new path's video before probing
 DEFAULT_FPS = 10         # what a camera registered from the web page gets, as the admin form's default
 
@@ -613,27 +619,40 @@ def foreign_error(item):
     return {"error": f"'{item['cameraId']}' isn't this adapter's camera ({owner})"}, 409
 
 
+def usb_mark(camera_id, unregistered):
+    """The USB camera's unregistration on this Pi: the file publish-cam01.sh checks at every start."""
+    mark = UNREGISTERED_DIR / camera_control.mediamtx_path_name(camera_id)
+    if unregistered:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.write_text(now() + "\n")
+    else:
+        mark.unlink(missing_ok=True)
+
+
 def unregister(table, camera_id, run=subprocess.run):
-    """Hide a camera from both GUIs and stop everything that acts on it, keeping what it has.
+    """Hide a camera from Live and stop everything that acts on it, keeping what it has.
 
     The row stays: the registry is shared with VMS, so rows are updated field by field. So do
-    the KVS stream, the clips and every setting, which is what lets Re-register (Discover, then
-    the button on the matching device) bring the camera back as it was. Three things change:
-      1. unregisteredAt is set, the mark every reader skips (camera_control.is_unregistered);
+    the KVS stream, the clips and every setting, which is what lets Re-register bring the camera
+    back as it was. What changes:
+      1. unregisteredAt is set, the mark every reader that acts on cameras skips
+         (camera_control.is_unregistered); the web page still lists the camera, marked;
       2. the producer is stopped and disabled: it costs nothing and doesn't start at boot;
-      3. the MediaMTX paths are deleted (recording and live view), so the Pi stops pulling.
+      3. the Pi stops pulling it: an ONVIF camera's MediaMTX paths (recording and live view) are
+         deleted; the USB camera's capture is stopped, and marked on this Pi so that it stays
+         off at every start (usb_mark).
     The registry goes first: with AWS unreachable nothing has changed yet, and the cloud page
-    couldn't learn of it anyway. Returns (the answer, its HTTP status).
-
-    ONVIF cameras only, because Re-register finds a camera by discovery, which can't see the
-    USB camera. Unregistering here hides the camera in VMS's GUIs as well (D4).
+    couldn't learn of it anyway. Returns (the answer, its HTTP status). Unregistering here hides
+    the camera in VMS's GUIs as well (D4).
     """
     item = table.get_item(Key={"cameraId": camera_id}).get("Item")
     if not item:
         return {"error": "unknown camera"}, 404
-    if item.get("mode") != "passthrough" or not item.get("onvifHost"):
-        return {"error": f"only ONVIF cameras can be unregistered: Re-register finds "
-                         f"them again by discovery, which can't see '{camera_id}'"}, 409
+    usb = item.get("mode") == "transcode"
+    if usb and camera_id not in USB_CAPTURE_UNITS:
+        return {"error": f"'{camera_id}' is a USB camera this Pi has no capture unit for"}, 409
+    if not usb and (item.get("mode") != "passthrough" or not item.get("onvifHost")):
+        return {"error": f"'{camera_id}' isn't a camera this Pi can unregister (no ONVIF address)"}, 409
     if not camera_control.is_mine(item):
         return foreign_error(item)
     if camera_control.is_unregistered(item):
@@ -649,6 +668,11 @@ def unregister(table, camera_id, run=subprocess.run):
     camera_control.set_boot_start(camera_id, False)
     run(["sudo", "systemctl", "stop", camera_control.live_unit_name(camera_id)], check=False, capture_output=True)
     result = {"cameraId": camera_id, "unregisteredAt": stamp}
+    if usb:
+        usb_mark(camera_id, True)
+        run(["systemctl", "--user", "stop", USB_CAPTURE_UNITS[camera_id]], check=False, capture_output=True)
+        refresh_path_cache()
+        return result, 200
     try:
         # The live view's path too (live_view.py). Its registry field stays, like everything
         # else, until Re-register sets the live view up again.
@@ -658,6 +682,42 @@ def unregister(table, camera_id, run=subprocess.run):
         result["warning"] = f"MediaMTX path not removed ({e}); it goes at the next MediaMTX restart"
     refresh_path_cache()
     return result, 200
+
+
+def reregister(env, camera_id, run=subprocess.run):
+    """Bring an unregistered camera back from what its row holds -- no discovery, no login typed
+    again. An ONVIF camera goes through register's re-registration (path, producer, codecs,
+    detection, live view; the camera must answer with its stored login); the USB camera, which
+    discovery can't find, gets its capture back. Either way the producer stays stopped until
+    someone presses Start, as after a reboot (FoundAndFixed.md #81). Returns (the answer, status)."""
+    table = env.table
+    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item:
+        return {"error": "unknown camera"}, 404
+    if not camera_control.is_mine(item):
+        return foreign_error(item)
+    if not camera_control.is_unregistered(item):
+        return {"cameraId": camera_id, "reactivated": False, "registered": True}, 200
+    if item.get("mode") == "transcode":
+        unit = USB_CAPTURE_UNITS.get(camera_id)
+        if not unit:
+            return {"error": f"'{camera_id}' is a USB camera this Pi has no capture unit for"}, 409
+        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET updatedAt = :t REMOVE unregisteredAt",
+                          ExpressionAttributeValues={":t": now()})
+        usb_mark(camera_id, False)
+        started = run(["systemctl", "--user", "start", unit], check=False, capture_output=True)
+        refresh_path_cache()
+        return {"cameraId": camera_id, "reactivated": True,
+                "capture": "started" if getattr(started, "returncode", 1) == 0 else "not started"}, 200
+    if item.get("mode") != "passthrough" or not item.get("onvifHost") or not item.get("rtspUrl"):
+        return {"error": f"'{camera_id}' has no stored ONVIF address and stream to come back with: register it again"}, 409
+    body = {"cameraId": camera_id, "host": item["onvifHost"], "port": int(item.get("onvifPort") or 80),
+            "user": item.get("onvifUser") or "", "password": item.get("onvifPassword") or "",
+            "streamUri": item["rtspUrl"], "hasIrControl": bool(item.get("hasIrControl")),
+            "endpointRef": item.get("onvifEndpointRef")}
+    if "audioCapable" in item:
+        body["audioCapable"] = bool(item["audioCapable"])
+    return register(body, env)
 
 
 # --- the web page's registration, through the agent (D16) ---------------------------------------------

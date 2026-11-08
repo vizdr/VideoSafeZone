@@ -36,7 +36,7 @@ const showCameras = computed(() =>
   typeof route.name === "string" && ["live", "events", "settings"].some(n => (route.name as string).startsWith(n)));
 
 // One controller per camera, following the list (stores/players.ts).
-watch(() => cameras.cameras, list => players.sync(list), { immediate: true });
+watch(() => cameras.active, list => players.sync(list), { immediate: true });
 
 // Signed out from anywhere -- Exit, or a refresh Cognito refused: everything goes (any Live view
 // is ended), then back to sign-in.
@@ -49,8 +49,11 @@ watch(() => auth.signedIn, signedIn => {
 });
 
 function select(id: string): void {
-  // From Settings → Live view or Cloud adapters, a camera opens that camera's settings.
-  const name = route.name === "settings-live" || route.name === "settings-adapters" ? "settings" : (route.name ?? "live");
+  // From Settings → Live view or Cloud adapters, a camera opens that camera's settings; so does an
+  // unregistered camera picked in Live, which isn't in the grid (it offers Re-register there).
+  const unregisteredInLive = route.name === "live" && !!cameras.byId(id)?.unregisteredAt;
+  const name = route.name === "settings-live" || route.name === "settings-adapters" || unregisteredInLive
+    ? "settings" : (route.name ?? "live");
   void router.push({ name, params: { ...route.params, cameraId: id } });
 }
 </script>

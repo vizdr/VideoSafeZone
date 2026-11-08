@@ -9,6 +9,7 @@ import { cloudCodec, codecLabel } from "../../cameras/list";
 import { IR_MODES, audioHint, audioSaved } from "../../cameras/settings";
 import { useSavedSetting, type SettingStatus } from "../../composables/useSavedSetting";
 import { hevcSupport, mseSupported } from "../../player/hevc";
+import { canManage, changeRegistration } from "../../cameras/registration";
 import { useAuthStore } from "../../stores/auth";
 import { useCamerasStore } from "../../stores/cameras";
 import { usePlayersStore } from "../../stores/players";
@@ -25,7 +26,6 @@ const id = computed(() => props.camera.id);
 // Video: display only. The codec is set on the camera, in the admin GUI (guide §21.3); here it
 // matters for whether this browser can play the camera at all.
 const canPlayHevc = hevcSupport(mseSupported()).live;
-const REMOVE_RELOAD_MS = 5_000;
 const recordedHevcWarning = computed(() => cloudCodec(props.camera) === "h265" && !canPlayHevc);
 const liveHevcWarning = computed(() => props.camera.liveView === "sub"
   && props.camera.liveVideoCodec === "h265" && props.camera.videoCodec !== "h265" && !canPlayHevc);
@@ -47,23 +47,20 @@ const audioStatus = computed<SettingStatus | null>(() => audio.status.value
 const irBusy = ref(false);
 const irStatus = ref<SettingStatus | null>(null);
 
-// Remove camera (DEALER-PANEL-PLAN.md D16): the holder or a Super Admin -- whoever controls the
-// camera on an account -- asks its adapter to unregister it, the soft mark: the recordings and
-// settings stay, and adding it again from Add cameras brings it back as it was. ONVIF cameras only,
-// as in the admin GUI: adding finds a camera again by discovery, which can't see the USB camera.
+// Unregister (DEALER-PANEL-PLAN.md D16; the user, 2026-11-08): whoever controls the camera on an
+// account asks its adapter to unregister it, the soft mark -- any camera, the USB camera too. It
+// leaves Live and stays in the camera list, marked; its recordings and settings stay, and
+// Re-register brings it back as it was.
 const auth = useAuthStore();
-const canRemove = computed(() => auth.role === "customer" && props.camera.access === "control"
-  && !!props.camera.adapterId && props.camera.mode === "passthrough");
+const canRemove = computed(() => canManage(props.camera, auth.role));
 const confirmRemove = ref(false), removing = ref(false);
 const removeStatus = ref<SettingStatus | null>(null);
 async function removeCamera(): Promise<void> {
   removing.value = true;
+  removeStatus.value = { text: "Asked the adapter…", tone: "info" };
   try {
-    const r = await endpoints.removeCamera(props.camera.adapterId!, id.value);
-    removeStatus.value = r.ok
-      ? { text: "Asked the adapter: it leaves Live and Settings in a few seconds.", tone: "ok" }
-      : { text: errorText(r), tone: "error" };
-    if (r.ok) setTimeout(() => void cameras.load(), REMOVE_RELOAD_MS);
+    const problem = await changeRegistration(props.camera, false);
+    removeStatus.value = problem ? { text: problem, tone: "error" } : { text: "Unregistered.", tone: "ok" };
   } finally {
     removing.value = false;
     confirmRemove.value = false;
@@ -132,14 +129,15 @@ async function setIr(mode: IrMode, label: string): Promise<void> {
   </SettingCard>
 
   <SettingCard v-if="canRemove" icon="pi-trash">
-    <SettingRow title="Remove camera" :status="removeStatus">
-      It leaves Live and Settings. Its recordings stay, and adding it again from Add cameras brings it back as it was.
+    <SettingRow title="Unregister camera" :status="removeStatus">
+      It leaves Live and stays in the camera list, marked unregistered. Its recordings and settings stay,
+      and Re-register brings it back as it was.
       <template #control>
         <div class="remove-buttons">
-          <Button v-if="!confirmRemove" size="small" severity="danger" variant="outlined" label="Remove"
+          <Button v-if="!confirmRemove" size="small" severity="danger" variant="outlined" label="Unregister"
                   data-test="remove-camera" @click="confirmRemove = true" />
           <template v-else>
-            <Button size="small" severity="danger" label="Yes, remove it" :loading="removing" data-test="confirm-remove-camera"
+            <Button size="small" severity="danger" label="Yes, unregister it" :loading="removing" data-test="confirm-remove-camera"
                     @click="removeCamera" />
             <Button size="small" severity="secondary" variant="text" label="Keep it" @click="confirmRemove = false" />
           </template>

@@ -3,6 +3,13 @@
 # this script lives in (systemd units do not read ~/.bashrc).
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 source "${VMS_HOME}/adapter/bin/detect-hw.sh"
+# Unregistered (camera_registration.unregister, either GUI): stay off, AWS reachable or not. A clean
+# exit, so Restart=on-failure leaves it; Re-register removes the mark and starts the unit again.
+UNREGISTERED_MARK="${XDG_STATE_HOME:-$HOME/.local/state}/videosafezone/unregistered/cam01"
+if [ -e "$UNREGISTERED_MARK" ]; then
+  echo "publish-cam01: cam-01 is unregistered ($(cat "$UNREGISTERED_MARK" 2>/dev/null)): not capturing" >&2
+  exit 0
+fi
 camera_setup cam01 || exit 1            # sets CAM (detected, or pinned in /etc/adapter/cameras/cam01.env)
 : "${CAPS:=image/jpeg,width=1280,height=720,framerate=30/1}"
 

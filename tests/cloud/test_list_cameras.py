@@ -42,8 +42,12 @@ def test_never_returns_a_credential(aws, monkeypatch):
         assert not {"rtspUrl", "liveRtspUrl", "onvifPassword", "onvifUser"} & set(cam)
 
 
-def test_unregistered_cameras_are_left_out(aws):
-    assert [c["id"] for c in _list(aws)] == ["cam-01", "cam-02"]
+def test_unregistered_cameras_are_listed_marked(aws):
+    """DEALER-PANEL-PLAN.md Phase 7 (the user, 2026-11-08): an unregistered camera stays in the page's
+    camera list, out of Live, with Re-register -- so it is listed, with its unregisteredAt."""
+    cams = {c["id"]: c for c in _list(aws)}
+    assert sorted(cams) == ["cam-01", "cam-02", "cam-05"]
+    assert [i for i, c in cams.items() if c["unregisteredAt"]] == ["cam-05"]
 
 
 def test_ff82_registry_numbers_become_json(aws):
@@ -72,7 +76,8 @@ def test_fields_the_page_uses(aws):
         "recordQuality": None, "recordQualityActive": None, "recordQualityOptions": [],
         "thumbnailUrl": None, "thumbnailAt": None,      # no bucket configured in this test: none
         "access": "control",            # DEALER-PANEL-PLAN.md D4; TENANCY=report here, so as before
-        "adapterId": None}              # the row predates it: an administrator's alone (D4)
+        "adapterId": None,              # the row predates it: an administrator's alone (D4)
+        "unregisteredAt": None}
     assert cams["cam-01"]["recordingMode"] == "manual"          # the default
     assert cams["cam-01"]["supportsDetection"] is False         # no ONVIF: manual only
     assert (cams["cam-01"]["videoCodec"], cams["cam-01"]["videoEncode"]) == ("h264", "pi-hw")

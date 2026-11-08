@@ -56,9 +56,9 @@ async function remove(a: AdapterSummary): Promise<void> {
             <td class="muted">{{ a.activation ? new Date(a.activation.activatedAt).toLocaleDateString() : "" }}</td>
             <td class="console-actions">
               <RouterLink :to="{ name: 'add-cameras', params: { thing: a.thingName } }" class="p-button p-button-sm"
-                          data-test="add-cameras">Add cameras</RouterLink>
-              <Button v-if="confirming !== a.id" size="small" severity="danger" variant="text" label="Remove"
-                      @click="confirming = a.id" />
+                          data-test="add-cameras" title="Add, unregister and re-register its cameras">Cameras</RouterLink>
+              <Button v-if="confirming !== a.id" size="small" severity="danger" variant="text" label="Remove adapter"
+                      data-test="remove-adapter" @click="confirming = a.id" />
               <template v-else>
                 <span class="muted">Remove it from your account? Its cameras stay behind.</span>
                 <Button size="small" severity="danger" label="Yes, remove it" :loading="busy" data-test="confirm-remove" @click="remove(a)" />
@@ -69,6 +69,7 @@ async function remove(a: AdapterSummary): Promise<void> {
         </tbody>
       </table>
       <p v-else-if="list.data.value" class="muted">No adapter on your account yet.</p>
+      <p class="muted hint">An adapter's <em>Cameras</em>: add new ones, unregister one (out of Live, recordings kept) or re-register it.</p>
       <RouterLink :to="{ name: 'add-adapter' }" class="p-button add" data-test="add-adapter">Add adapter</RouterLink>
     </article>
   </section>
@@ -76,4 +77,5 @@ async function remove(a: AdapterSummary): Promise<void> {
 
 <style scoped>
 .add { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem; text-decoration: none; }
+.hint { margin: 1rem 0 0; }
 </style>

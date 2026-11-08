@@ -249,6 +249,19 @@ deploy_stage() {
   aws apigateway create-deployment --rest-api-id "$API" --stage-name "$STAGE" --description "provision.sh $1" >/dev/null
 }
 
+# A call without a token is turned away by the authorizer: 401. Asked again for up to 40 s -- right
+# after a deployment, one request can reach an edge that has it and the next one an edge that
+# doesn't yet (FoundAndFixed.md #92) -- and the answer it got is said when it never comes.
+expect_401() {      # expect_401 METHOD URL WHAT
+  local code="" i
+  for i in 1 2 3 4 5 6 7 8; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X "$1" "$2")
+    [ "$code" = 401 ] && return 0
+    sleep 5
+  done
+  die "$3 without a token: expected 401 from the authorizer, got $code"
+}
+
 # The route answers through API Gateway: the preflight with CORS, a call without a token is turned
 # away by the authorizer (an unknown route would say "Missing Authentication Token" instead), and
 # test-invoke -- which skips the authorizer and sends no body -- reaches the function, whose
@@ -263,7 +276,7 @@ verify_route() {      # verify_route PATH PHRASE METHOD...
   done
   grep -qi '^access-control-allow-origin: \*' "$TMP/h" || die "OPTIONS $path: no CORS answer"
   for m in "$@"; do
-    [ "$(curl -s -o /dev/null -w '%{http_code}' -X "$m" "$url")" = 401 ] || die "$m $path without a token: expected 401 from the authorizer"
+    expect_401 "$m" "$url" "$m $path"
   done
   rid=$(resource_id "$path")
   out=$(aws apigateway test-invoke-method --rest-api-id "$API" --resource-id "$rid" --http-method "$1" --query '[status, body]' --output text)
@@ -762,7 +775,7 @@ provision_directory() {
     sleep 5                        # a new deployment takes a few seconds to reach the edge
   done
   grep -qi '^access-control-allow-origin: \*' "$TMP/h" || die "OPTIONS /directory/me: no CORS answer"
-  [ "$(curl -s -o /dev/null -w '%{http_code}' "$url")" = 401 ] || die "GET /directory/me without a token: expected 401"
+  expect_401 GET "$url" "GET /directory/me"
   python3 - "$url" "$DEMO_FILE" "$REGION" "$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
       --query "UserPoolClients[?ClientName=='$CLIENT_NAME'].ClientId" --output text)" <<'PY' || die "the directory API didn't answer the demo owner -- is vsz-directory's new code deployed? (bash cloud/deploy.sh lambda vsz-directory)"
 import json, sys, urllib.error, urllib.request
@@ -995,7 +1008,7 @@ provision_cameras() {
     sleep 5
   done
   grep -qi '^access-control-allow-origin: \*' "$TMP/h" || die "OPTIONS /adapters/...: no CORS answer"
-  [ "$(curl -s -o /dev/null -w '%{http_code}' "$url")" = 401 ] || die "GET /adapters/... without a token: expected 401"
+  expect_401 GET "$url" "GET /adapters/adapter-01/discovery"
   find_pool
   python3 - "$url" "$DEMO_FILE" "$REGION" "$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
       --query "UserPoolClients[?ClientName=='$CLIENT_NAME'].ClientId" --output text)" <<'PY' || die "adapter-cameras didn't answer as it should -- see above"

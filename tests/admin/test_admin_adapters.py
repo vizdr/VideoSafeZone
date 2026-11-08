@@ -154,3 +154,54 @@ def test_a_claim_is_skipped_by_every_reader_until_the_camera_is_ready():
     assert "registering" in table.row(cid)
     camera_registration.abandon_claim(table, cid, token)
     assert table.row(cid)["abandonedAt"] and "registering" not in table.row(cid)
+
+
+# --- unregister any camera, re-register from what the row holds (the user, 2026-11-08) ---------------
+
+import camera_registration as reg  # noqa: E402
+from gui_world import CAM05  # noqa: E402
+
+USB_MARK = lambda: reg.UNREGISTERED_DIR / "cam01"  # noqa: E731
+
+
+def test_the_usb_camera_can_be_unregistered_its_capture_stopped_and_kept_off(gui):
+    g = gui()
+    status, body = g.post("/api/cameras/cam-01/unregister")
+    assert status == 200 and body["unregisteredAt"]
+    assert g.table.row("cam-01")["unregisteredAt"] == body["unregisteredAt"]
+    assert systemctl_writes(g.system) == [
+        ["sudo", "systemctl", "stop", "kvs-cam01.service"], ["sudo", "systemctl", "disable", "kvs-cam01.service"],
+        ["sudo", "systemctl", "stop", "kvs-live@cam01.service"],
+        ["systemctl", "--user", "stop", "kvs-camera-publish.service"]]
+    assert USB_MARK().exists()                              # publish-cam01.sh stays off at every start
+    assert g.mtx.writes() == []                             # its path is published, never configured
+
+
+def test_the_usb_camera_comes_back_with_re_register(gui):
+    unregistered = {**ROWS[0], "unregisteredAt": "2026-11-08T10:00:00Z"}
+    g = gui(rows=[unregistered] + ROWS[1:])
+    reg.usb_mark("cam-01", True)
+    status, body = g.post("/api/cameras/cam-01/reregister")
+    assert (status, body) == (200, {"cameraId": "cam-01", "reactivated": True, "capture": "started"})
+    assert "unregisteredAt" not in g.table.row("cam-01") and not USB_MARK().exists()
+    assert systemctl_writes(g.system) == [["systemctl", "--user", "start", "kvs-camera-publish.service"]]
+    # its producer stays stopped until Start, as after a reboot (#81)
+
+
+def test_a_network_camera_comes_back_from_its_row_without_a_form(gui):
+    g = gui(mtx=FakeMediaMTX(state={"cam05": path_state("H264")}, flowing={"cam05"}),
+            camera=media2("192.0.2.15", main="H264", sub=False))
+    status, body = g.post("/api/cameras/cam-05/reregister")
+    assert status == 200 and body["reactivated"] is True, body
+    row = g.table.row("cam-05")
+    assert "unregisteredAt" not in row and row["displayName"] == "Garage" and row["onvifPassword"] == "pw5"
+    assert g.mtx.writes()[0] == ("POST", "/v3/config/paths/add/cam05", {"source": CAM05["rtspUrl"], "rtspTransport": "tcp"})
+    assert not any(c[:3] == ["sudo", "systemctl", "start"] for c in g.system.calls)
+
+
+def test_re_register_refuses_another_adapters_camera_and_leaves_a_registered_one(gui):
+    g = gui(rows=ROWS + [{**FOREIGN, "unregisteredAt": "x"}])
+    assert g.post("/api/cameras/cam-07/reregister")[0] == 409
+    assert g.post("/api/cameras/cam-02/reregister") == (200, {"cameraId": "cam-02", "reactivated": False, "registered": True})
+    assert g.post("/api/cameras/cam-99/reregister")[0] == 404
+    assert systemctl_writes(g.system) == [] and g.mtx.writes() == []

@@ -30,6 +30,7 @@
   .badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 1rem; background: #2a7d2a; color: #fff; margin-left: 0.35rem; }
   .badge-registered { background: #555; }
   .badge-unregistered { background: #b8860b; }
+  .unregistered-row td { opacity: 0.75; }
   .badge-muted { background: #999; }
   .trigger-note { font-size: 0.75rem; color: #666; max-width: 240px; margin: 0.2rem 0; }
   button.danger { color: #c0392b; }
@@ -498,6 +499,22 @@ async function loadCameras() {
       if (c.onvifEndpointRef) (hidden ? unregisteredByRef : registeredByRef)[c.onvifEndpointRef] = c.cameraId;
     }
     body.innerHTML = "";
+    // Unregistered cameras: listed after the others, each with Re-register from what the registry
+    // holds -- the USB camera too, which Discover can't find (DEALER-PANEL-PLAN.md Phase 7).
+    for (const c of all.cameras.filter(c => c.unregisteredAt)) {
+      const id = c.cameraId;
+      const tr = document.createElement("tr");
+      tr.className = "unregistered-row";
+      tr.innerHTML = `
+        <td>${camHtml(id)} <span class="badge badge-unregistered">Unregistered</span></td>
+        <td>${esc(c.mode)}</td>
+        <td>${c.hasIrControl ? "yes" : "no"}</td>
+        <td>${esc(c.onvifHost || "")}</td>
+        <td colspan="4">since ${esc(c.unregisteredAt)}
+          <button onclick="reregisterCamera('${id}')" title="Bring it back as it was: its stream, clips and settings. Its producer stays stopped until Start.">Re-register</button>
+          <span id="ctlStatus-${id}" class="status"></span></td>`;
+      body.appendChild(tr);
+    }
     for (const c of data.cameras) {
       const id = c.cameraId;
       const tr = document.createElement("tr");
@@ -601,11 +618,10 @@ async function loadCameras() {
             <button onclick="setIr('${id}','ON')" title="IR-cut filter in: colour, IR illuminator off">Day</button>
             <button onclick="setIr('${id}','OFF')" title="IR-cut filter out: black-and-white, IR illuminator on">Night</button>
           </div>` : ""}
-          ${c.mode === "passthrough" && c.onvifHost ? `
           <div class="ctl-row">
             <button class="danger" onclick="unregisterCamera('${id}')"
-                    title="Hide this camera from both GUIs and stop its KVS push. Its stream, clips and settings are kept: Discover finds it again, with a Re-register button.">Unregister</button>
-          </div>` : ""}
+                    title="Take this camera out of Live and stop everything that pulls or pushes it (the USB camera's capture too). Its stream, clips and settings are kept: it stays listed below with a Re-register button.">Unregister</button>
+          </div>
           <span id="ctlStatus-${id}" class="status"></span>
         </td>`;
       body.appendChild(tr);
@@ -1001,10 +1017,22 @@ async function streamAction(id, action) {
   }
 }
 
+async function reregisterCamera(id) {
+  const status = document.getElementById(`ctlStatus-${id}`);
+  status.textContent = "re-registering…";
+  try {
+    const r = await api(`/api/cameras/${id}/reregister`, { method: "POST" });
+    status.textContent = r.reactivated ? "back" : "registered already";
+    await loadCameras();
+  } catch (e) {
+    status.textContent = String(e.message || e);
+  }
+}
+
 async function unregisterCamera(id) {
-  if (!confirm(`Unregister ${camLabel(id)}?\n\nIt disappears from this page and the cloud page (in VMS too: ` +
-      `the registry is shared), its KVS push stops and the Pi stops pulling its video. Its KVS stream, ` +
-      `clips and settings are kept.\n\nTo bring it back: Scan LAN above, then Re-register on the matching device.`)) return;
+  if (!confirm(`Unregister ${camLabel(id)}?\n\nIt leaves Live on the cloud page (and VMS's GUIs: the registry is ` +
+      `shared), its KVS push stops and the Pi stops pulling its video -- the USB camera's capture too. Its KVS ` +
+      `stream, clips and settings are kept.\n\nTo bring it back: Re-register, in its row marked Unregistered.`)) return;
   const el = document.getElementById(`ctlStatus-${id}`);
   el.textContent = "unregistering…";
   try {

@@ -40,7 +40,7 @@ build at `/app/index.html`, a preview to look at first.
 | `src/auth/roles.ts`, `src/views/system/`, `src/composables/useLoad.ts` | what each role sees and where it lands; the System console (`/directory/*`, DEALER-PANEL-PLAN.md Phase 4) |
 | `src/views/dealer/`, `src/components/dealer/`, `src/dealer/` | the dealer portal (DEALER-PANEL-PLAN.md Phase 5): customers, a plan per adapter, plan history, cameras, people |
 | `src/components/adapters/`, `src/views/AddAdapterView.vue`, `src/views/AdaptersSettings.vue`, `src/dealer/cloudid.ts` | Enter Cloud ID and the account's adapters (DEALER-PANEL-PLAN.md Phase 6); System → Adapters makes them |
-| `src/views/AddCamerasView.vue`, `src/cameras/poll.ts` | Add cameras through an adapter, polling for its answers (DEALER-PANEL-PLAN.md Phase 7); Remove camera is in `components/settings/CameraSection.vue` |
+| `src/views/AddCamerasView.vue`, `src/cameras/poll.ts`, `src/cameras/registration.ts` | an adapter's Cameras: add, unregister, re-register through the adapter, polling for its answers (DEALER-PANEL-PLAN.md Phase 7); in Settings, `CameraSection.vue`'s Unregister and `UnregisteredCard.vue`'s Re-register |
 | `src/pricing.ts` | a plan's price for the editor's preview; the server's `price_plan` is tested against the same vectors (`../tests/fixtures/pricing-cases.json`) |
 | `src/theme.ts` | the OpenVue preset: Aura, sky accent, slate dark surfaces |
 | `tests/` | Vitest; `camera-controller.spec.ts` keeps the FoundAndFixed fixes the player carries |

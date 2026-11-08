@@ -14,7 +14,7 @@ const players = usePlayersStore();
 const canPlay = hevcSupport(mseSupported()).live;
 const windows = hevcOnWindows();
 const show = computed(() =>
-  (!canPlay && cameras.cameras.some(c => cloudCodec(c) === "h265"))
+  (!canPlay && cameras.active.some(c => cloudCodec(c) === "h265"))
   || Object.values(players.states).some(s => s.hevcHelp));
 </script>
 

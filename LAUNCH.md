@@ -896,6 +896,10 @@ systemctl --user restart kvs-agent onvif-admin    # on each adapter's Pi: discov
 bash cloud/deploy.sh page                         # Add cameras, Remove camera in Settings
 ```
 
+Unregistering and re-registering any camera from the adapter's Cameras page came after (the USB
+camera included); to bring it in after the above: `deploy.sh lambda list-cameras`, `deploy.sh lambda
+adapter-cameras`, the agent and admin GUI restarted, `deploy.sh page`.
+
 `provision.sh cameras` checks itself: `/adapters` answers the demo holder for `adapter-01`, and
 "no such adapter" to the demo dealer. New camera IDs are allocated (`cam-06`, …, up to `cam-9999`);
 from `cam-100` on, the sudo rule must allow the longer names — `bash setup/setup-system.sh` once

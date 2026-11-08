@@ -100,3 +100,18 @@ def test_main_prints_the_path_the_producer_must_pull(registry, mtx, monkeypatch,
     assert sc.main() == 0
     out = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
     assert (out["VIDEO_PATH"], out["VIDEO_CODEC"]) == ("cam03_live", "h264")
+
+
+def test_ff93_a_path_name_is_refused_and_no_update_creates_a_row(registry, monkeypatch, capsys):
+    """FoundAndFixed.md #93: run with the MediaMTX path (cam01) instead of the camera ID (cam-01),
+    the script's UpdateItem made a registry row cam01, which the readers took for a camera."""
+    table = registry([row()])
+    monkeypatch.setattr(sys, "argv", ["stream-codec.py", "cam01"])
+    assert sc.main() == 2
+    assert "isn't a camera ID" in capsys.readouterr().err
+    sc.record_registry(table, "cam-99", "h264")                 # no such row: nothing recorded
+    sc.record_live_registry(table, "cam-99", "h264")
+    assert table.row("cam-99") is None and [r["cameraId"] for r in table.items] == ["cam-03"]
+    assert "no registry row for cam-99" in capsys.readouterr().err
+    sc.record_registry(table, "cam-03", "h265")                 # an existing camera still updates
+    assert table.row("cam-03")["videoCodecActive"] == "h265"

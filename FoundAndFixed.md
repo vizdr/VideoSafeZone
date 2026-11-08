@@ -16,12 +16,12 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-91 entries, from the first build (2026-08-20) through the move onto a second Pi
+93 entries, from the first build (2026-08-20) through the move onto a second Pi
 (2026-09-24/25) and the codec-selection work (2026-09-26) to the fixes ported from the base
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
 found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
-planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07).
+planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07); #92 deploying Phase 7 (2026-11-08); #93 on the cloud page after it (2026-11-08).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -116,6 +116,8 @@ planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-
 | 89 | The sign-in trigger's cold start took 4.26 s of the 5 s Cognito allows | Lambda / sign-in | 2026-11-07 | fixed 2026-11-07 |
 | 90 | A refused sign-in's message ended in ".." | Lambda / sign-in | 2026-11-07 | fixed 2026-11-07 |
 | 91 | After an outage longer than its MQTT session lasts, the agent came back without its subscriptions | agent | 2026-11-07 | fixed 2026-11-07, not yet deployed |
+| 92 | `provision.sh` reported a route it had just made as broken: its check asked once, before the deployment reached every edge | cloud tooling | 2026-11-08 | fixed 2026-11-08 |
+| 93 | `stream-codec.py`, given a path name, made a registry row that rematch adopted and the page showed as a fifth camera | registry | 2026-11-08 | fixed 2026-11-08 (the Pi's scripts run from the clone); the stray row deleted |
 
 ### What they have in common
 
@@ -1699,3 +1701,55 @@ every topic it had (`resubscribe_existing_topics()`); a resumed session that per
 
 **The rule:** a persistent MQTT session is a cache with an expiry. The client renews its
 subscriptions whenever the broker says the session is gone.
+
+### #92 — `provision.sh` reported a route it had just made as broken: its check asked once, before the deployment reached every edge
+
+**Found:** 2026-11-08, by the user's first `bash cloud/provision.sh cameras` (`DEALER-PANEL-PLAN.md`
+Phase 7). **Referenced from:** `cloud/provision.sh` (`expect_401`).
+
+Everything was created and the stage deployed, and then the self-check ended the run with
+`ERROR: GET /adapters/... without a token: expected 401`. A minute later the same request answered
+401 and the route worked. The check waits for the CORS preflight to answer — retrying for half a
+minute, "a new deployment takes a few seconds to reach the edge" — and then asked for the 401 only
+once. But a deployment doesn't reach every edge at the same moment, and consecutive requests can
+land on different ones: the preflight had found an edge that had the new route, and the GET one
+that didn't yet. API Gateway's own error answers carry no CORS header, so the preflight wait itself
+was sound. `provision.sh directory` and `verify_route` had the same single try and had simply been
+lucky.
+
+**Fix:** `expect_401` asks again for up to 40 seconds and, when the 401 never comes, says what it got
+instead. All three checks use it. Re-running `provision.sh cameras` after the failure was safe: every
+resource is left as it is, and with nothing changed the stage isn't deployed again.
+
+**The rule:** right after an API Gateway deployment, every request a check makes is retried, not
+only the first — each one can reach an edge that hasn't caught up.
+
+### #93 — `stream-codec.py`, given a path name, made a registry row that rematch adopted and the page showed as a fifth camera
+
+**Found:** 2026-11-08, by the user: the cloud page listed `cam-01` and `cam01`, the second one's
+tile failing with "not authorized to perform kinesisvideo:GetDataEndpoint on resource cam01-live".
+**Referenced from:** `adapter/bin/stream-codec.py` (`_update_camera`, `main`),
+`adapter/rematch_cameras.py` (`adopt_unstamped`).
+
+The trigger was a manual check on 2026-11-07, during Phase 7's handover: `stream-codec.py cam01`,
+the MediaMTX path where the script takes a camera ID (`cam-01`). The script records the codec it
+sees with `UpdateItem` — and DynamoDB's UpdateItem creates the item when the key is new. So the
+registry got a row `cam01` holding only `videoCodecActive` and `recordQualityActive`. Then each
+reader did what it does with a row: the admin GUI's start-up codec check added its codec fields;
+`rematch_cameras.adopt_unstamped`, on a Pi with `ADOPT_UNSTAMPED_ROWS=yes`, stamped it with
+`adapterId` because MediaMTX does serve a path named `cam01` (cam-01's); `thumbnails.py` began
+uploading `thumbs/cam01.jpg`; and `list-cameras`, now that the row had an owner, showed it to the
+account holder. No KVS stream or clip was made — the IAM wildcard `stream/cam-*` refused
+`cam01-live`, which is the error the tile showed. Nothing removes such a row from the page: Remove is
+offered for ONVIF cameras only, and the row has no `mode`.
+
+**Fix:** the script refuses an argument that isn't a camera ID (`cam-NN`), and its two registry
+updates carry `attribute_exists(cameraId)`, so they change only a row that is there; `adopt_unstamped`
+never stamps a row without a camera's `mode`. `test_ff93_a_path_name_is_refused_and_no_update_creates_a_row`
+and `test_ff93_a_row_that_isnt_a_camera_is_never_adopted` fail without the fix. The stray row and its
+thumbnail were deleted by hand on 2026-11-08, with the user's agreement (the row under the condition that it has
+neither `mode` nor `kvsStreamArn`, so no camera could be hit).
+
+**The rule:** a write that means "update this camera" carries `attribute_exists(cameraId)`: UpdateItem
+never refuses a new key on its own, and a row, once there, is taken for a camera by every reader.
+

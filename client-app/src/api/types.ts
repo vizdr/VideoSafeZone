@@ -15,6 +15,8 @@ export interface Camera {
   adapterId?: string | null;
   /** "control", or "view" for a camera shared with the caller to watch (DEALER-PANEL-PLAN.md D18). */
   access?: "control" | "view";
+  /** Unregistered (the soft mark): listed, out of Live, with Re-register. */
+  unregisteredAt?: string | null;
   id: string;                                  // "cam-01": KVS stream, registry key, API field
   mode: "transcode" | "passthrough" | null;
   hasIrControl: boolean;

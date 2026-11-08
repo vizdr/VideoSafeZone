@@ -100,15 +100,16 @@ class FakeTable:
             resp["LastEvaluatedKey"] = self._key_of(page[-1])
         return resp
 
-    def scan(self, ExclusiveStartKey=None, Limit=None, ProjectionExpression=None, **kw):
+    def scan(self, ExclusiveStartKey=None, Limit=None, ProjectionExpression=None, ExpressionAttributeNames=None, **kw):
         if kw:
             raise NotImplementedError(f"FakeTable.scan: {sorted(kw)}")
-        return self._project(self._page(self.items, ExclusiveStartKey, Limit), ProjectionExpression)
+        return self._project(self._page(self.items, ExclusiveStartKey, Limit), ProjectionExpression,
+                             ExpressionAttributeNames)
 
     @staticmethod
-    def _project(resp, projection):
+    def _project(resp, projection, names=None):
         if projection:
-            keep = [a.strip() for a in projection.split(",")]
+            keep = [(names or {}).get(a.strip(), a.strip()) for a in projection.split(",")]
             resp["Items"] = [{a: i[a] for a in keep if a in i} for i in resp["Items"]]
         return resp
 

@@ -153,6 +153,7 @@ _SANDBOXED_PATHS = {
     "agent": {"LIVE_DIR": "run/vms-live"},          # the live view deadlines the producers read
     "aws_state": {"STATE_FILE": "run/vms/aws-state.json"},
     "activation": {"STATE_FILE": "run/vms/activation.json"},   # whether the adapter is activated
+    "camera_registration": {"UNREGISTERED_DIR": "state/videosafezone/unregistered"},   # the USB camera's mark
     "outage_buffer": {
         "BUFFER_ROOT": "mnt/vms-buffer",
         "SENTINEL": "mnt/vms-buffer/.vms-buffer-ok",

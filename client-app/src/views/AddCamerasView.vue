@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// Add cameras (DEALER-PANEL-PLAN.md §7.3, D16): the adapter (picked for you when there is one)
-// looks for cameras on its own network; the ones already added are marked; per camera a name and
-// its ONVIF login; then progress until it is registered, and it shows in Live and Settings. The
-// page never reaches the customer's LAN: everything goes through the adapter's outbound MQTT
-// session. The password is sent once, with the request, and not kept here.
+// An adapter's cameras (DEALER-PANEL-PLAN.md §7.3, D16; the user, 2026-11-08), from Cloud adapters.
+// Its cameras -- the USB camera too -- each with Unregister (out of Live, still listed, recordings
+// kept) or Re-register (back from what the registry holds). Below, Find new cameras: the adapter
+// looks on its own network; the ones already added are marked; per camera a name and its ONVIF
+// login; then progress until it is registered. The page never reaches the customer's LAN:
+// everything goes through the adapter's outbound MQTT session. The password is sent once, with the
+// request, and not kept here.
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import Button from "openvue/button";
@@ -12,8 +14,11 @@ import Message from "openvue/message";
 import Password from "openvue/password";
 import { endpoints } from "../api";
 import { errorText } from "../api/client";
-import type { AdapterSummary, CameraRequest, CameraScan, FoundDevice } from "../api/types";
+import type { AdapterSummary, Camera, CameraRequest, CameraScan, FoundDevice } from "../api/types";
+import { cameraName } from "../cameras/list";
 import { pollUntil } from "../cameras/poll";
+import { canManage, changeRegistration } from "../cameras/registration";
+import { useAuthStore } from "../stores/auth";
 import { useLoad } from "../composables/useLoad";
 import { useCamerasStore } from "../stores/cameras";
 
@@ -26,6 +31,7 @@ const PROGRESS: Record<CameraRequest["status"], string> = {
 
 const route = useRoute();
 const cameras = useCamerasStore();
+const auth = useAuthStore();
 const adapters = useLoad<AdapterSummary[]>(() => endpoints.listAdapters());
 const mine = computed(() => (adapters.data.value ?? []).filter(a => a.status === "activated"));
 const thing = ref(typeof route.params.thing === "string" ? route.params.thing : "");
@@ -103,21 +109,70 @@ async function add(): Promise<void> {
   await cameras.load();
 }
 
+// --- the adapter's own cameras: Unregister / Re-register -------------------------------------------
+const own = computed(() => cameras.cameras.filter(c => c.adapterId === thing.value));
+const changing = ref<string | null>(null), confirming = ref<string | null>(null);
+const rowNote = ref<Record<string, { text: string; tone: "ok" | "error" | "info" }>>({});
+
+async function setRegistered(c: Camera, register: boolean): Promise<void> {
+  changing.value = c.id;
+  confirming.value = null;
+  rowNote.value = { ...rowNote.value, [c.id]: { text: "Asked the adapter…", tone: "info" } };
+  try {
+    const problem = await changeRegistration(c, register, () => !alive);
+    rowNote.value = { ...rowNote.value, [c.id]: problem ? { text: problem, tone: "error" }
+      : { text: register ? "Back. Press Start to record it again." : "Unregistered.", tone: "ok" } };
+  } finally {
+    changing.value = null;
+  }
+}
+const kind = (c: Camera) => (c.mode === "transcode" ? "USB" : "network");
+
 function another(): void {
   added.value = chosen.value = null;
   phase.value = "idle";
   void lookForCameras();
 }
 
-const STATE_TEXT: Record<string, string> = { added: "Added", removed: "Removed: add it back", elsewhere: "On another adapter" };
+const STATE_TEXT: Record<string, string> = { added: "Added", removed: "Unregistered", elsewhere: "On another adapter" };
 const label = (d: FoundDevice) => d.displayName || d.name || d.hardware || d.host || d.endpointRef;
 </script>
 
 <template>
   <section class="view">
-    <h1>Add cameras</h1>
+    <h1>Cameras</h1>
+    <article v-if="adapter" class="console-card" data-test="own-cameras">
+      <h2>On {{ adapterName(adapter) }}<span class="dot">.</span></h2>
+      <table v-if="own.length" class="console-table">
+        <thead><tr><th>Camera</th><th>Kind</th><th>State</th><th></th></tr></thead>
+        <tbody>
+          <tr v-for="c in own" :key="c.id" :data-test="`own-${c.id}`">
+            <td>{{ cameraName(c) }}<span v-if="c.displayName" class="muted"> · {{ c.id }}</span></td>
+            <td class="muted">{{ kind(c) }}</td>
+            <td><span v-if="c.unregisteredAt" class="status suspended">unregistered</span>
+              <span v-else class="status active">in Live</span></td>
+            <td class="console-actions">
+              <template v-if="canManage(c, auth.role)">
+                <Button v-if="c.unregisteredAt" size="small" label="Re-register" :loading="changing === c.id"
+                        :disabled="!!changing && changing !== c.id" @click="setRegistered(c, true)" />
+                <template v-else-if="confirming === c.id">
+                  <span class="muted">Out of Live; its recordings stay.</span>
+                  <Button size="small" severity="danger" label="Yes, unregister it" :loading="changing === c.id"
+                          data-test="confirm-unregister" @click="setRegistered(c, false)" />
+                  <Button size="small" severity="secondary" variant="text" label="Keep it" @click="confirming = null" />
+                </template>
+                <Button v-else size="small" severity="danger" variant="outlined" label="Unregister"
+                        :disabled="!!changing" @click="confirming = c.id" />
+              </template>
+              <span v-if="rowNote[c.id]" class="note" :class="rowNote[c.id].tone">{{ rowNote[c.id].text }}</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">No camera on this adapter yet: find them below.</p>
+    </article>
     <article class="console-card">
-      <h2>Cameras on the adapter's network<span class="dot">.</span></h2>
+      <h2>Find new cameras<span class="dot">.</span></h2>
       <p v-if="adapters.error.value" role="alert">{{ adapters.error.value }}</p>
       <p v-else-if="adapters.data.value && !mine.length" class="muted" data-test="no-adapter">
         No activated adapter on your account. <RouterLink :to="{ name: 'add-adapter' }">Add your Cloud Adapter</RouterLink> first.</p>
@@ -144,8 +199,12 @@ const label = (d: FoundDevice) => d.displayName || d.name || d.hardware || d.hos
               <td class="console-actions">
                 <span v-if="d.state === 'added' || d.state === 'elsewhere'" class="muted">
                   {{ STATE_TEXT[d.state] }}{{ d.state === "added" ? ` as ${d.displayName || d.cameraId}` : "" }}</span>
-                <Button v-else size="small" :label="d.state === 'removed' ? 'Add it back' : 'Add'" :disabled="!d.xaddr"
-                        @click="choose(d)" />
+                <template v-else-if="d.state === 'removed'">
+                  <span class="muted">Unregistered: {{ d.displayName || d.cameraId }}</span>
+                  <Button v-if="cameras.byId(d.cameraId)" size="small" label="Re-register" :loading="changing === d.cameraId"
+                          @click="setRegistered(cameras.byId(d.cameraId)!, true)" />
+                </template>
+                <Button v-else size="small" label="Add" :disabled="!d.xaddr" @click="choose(d)" />
               </td>
             </tr>
             <tr v-if="!scan.devices.length"><td colspan="3" class="muted">No camera answered on the adapter's network.</td></tr>
@@ -180,6 +239,10 @@ const label = (d: FoundDevice) => d.displayName || d.name || d.hardware || d.hos
 </template>
 
 <style scoped>
+.note { font-size: 0.85rem; }
+.note.ok { color: var(--p-green-400); }
+.note.error { color: var(--p-red-400); }
+.note.info { color: var(--p-text-muted-color); }
 .add-form { margin-top: 1rem; padding: 1rem; border: 1px solid var(--p-content-border-color); border-radius: 0.5rem; }
 .who { flex-basis: 100%; margin: 0 0 0.25rem; font-weight: 600; }
 .p-button { padding: 0.5rem 1rem; text-decoration: none; }

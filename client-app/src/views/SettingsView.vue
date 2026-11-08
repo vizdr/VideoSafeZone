@@ -5,6 +5,7 @@ import { cameraName, modeLabel } from "../cameras/list";
 import CameraSection from "../components/settings/CameraSection.vue";
 import CloudRecording from "../components/settings/CloudRecording.vue";
 import RecordingSection from "../components/settings/RecordingSection.vue";
+import UnregisteredCard from "../components/settings/UnregisteredCard.vue";
 import { useCamerasStore } from "../stores/cameras";
 
 // WEB-PANEL-PLAN.md §4.2: the camera's name, thumbnail, Cloud recording and the section links in
@@ -53,8 +54,8 @@ watchEffect(() => {
           <template v-else><i class="pi pi-image" aria-hidden="true" /><span>No picture yet</span></template>
           <figcaption v-if="cam.thumbnailUrl && !thumbFailed && takenAt">{{ takenAt }}</figcaption>
         </figure>
-        <CloudRecording :camera="cam" />
-        <nav class="sections" aria-label="Settings sections">
+        <CloudRecording v-if="!cam.unregisteredAt" :camera="cam" />
+        <nav v-if="!cam.unregisteredAt" class="sections" aria-label="Settings sections">
           <RouterLink v-for="s in SECTIONS" :key="s.name"
                       :to="{ name: 'settings', params: { cameraId: cam.id, section: s.name } }"
                       :class="{ active: section === s.name }"
@@ -66,7 +67,8 @@ watchEffect(() => {
         </nav>
       </div>
       <div class="cards">
-        <CameraSection v-if="section === 'camera'" :camera="cam" />
+        <UnregisteredCard v-if="cam.unregisteredAt" :camera="cam" />
+        <CameraSection v-else-if="section === 'camera'" :camera="cam" />
         <RecordingSection v-else :camera="cam" />
       </div>
     </div>

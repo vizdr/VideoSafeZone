@@ -358,7 +358,7 @@ def test_unregister_twice_changes_nothing_more(gui):
     assert (g.table.writes, systemctl_writes(g.system), g.mtx.writes()) == ([], [], [])
 
 
-@pytest.mark.parametrize("camera_id, status", [("cam-01", 409), ("cam-09", 404)])
+@pytest.mark.parametrize("camera_id, status", [("cam-09", 404)])   # the USB camera may (test_admin_adapters)
 def test_unregister_refuses(gui, camera_id, status):
     g = _unregister_gui(gui)
     assert g.post(f"/api/cameras/{camera_id}/unregister")[0] == status

@@ -37,7 +37,7 @@ async function mountLive(cameras: Camera[] = four, path = "/live") {
   const store = useCamerasStore();
   store.cameras = cameras;
   store.loaded = true;
-  usePlayersStore().sync(cameras);                    // what the shell does when the list arrives
+  usePlayersStore().sync(store.active);               // what the shell does when the list arrives
   const router = makeRouter(() => true);
   await router.push(path);
   const w = mount(LiveView, { global: { plugins: [router, [OpenVue, { unstyled: true }]] }, attachTo: document.body });
@@ -65,6 +65,12 @@ describe("the Live grid", () => {
     const { w } = await mountLive();
     expect(tileNames(w)).toEqual(["cam-01", "cam-02", "cam-03", "cam-04", "-", "-", "-", "-"]);
     expect(w.findAll(".tile").map(t => t.classes("large"))).toEqual([true, true, false, false, false, false, false, false]);
+  });
+
+  it("leaves an unregistered camera out of the grid -- it stays in the camera list, with Re-register", async () => {
+    const { w } = await mountLive([cam("cam-01"), cam("cam-02", { unregisteredAt: "2026-11-08T10:00:00Z" }), cam("cam-03")]);
+    expect(tileNames(w)).toEqual(["cam-01", "cam-03", "-", "-", "-", "-", "-", "-"]);
+    expect(sent("live").sort()).toEqual(["cam-01", "cam-03"]);                  // nothing plays it
   });
 
   it("plays every camera on the page, and ends each one when the tab is left", async () => {

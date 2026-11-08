@@ -60,5 +60,7 @@ def no_detection(*a, **k):
 
 
 def systemctl_writes(system):
-    """The commands that change something: start/stop/enable/disable, provisioning."""
-    return [c for c in system.calls if c[0] == "sudo"]
+    """The commands that change something: start/stop/enable/disable (system units through sudo, the
+    USB camera's capture as a user unit), provisioning."""
+    return [c for c in system.calls if c[0] == "sudo"
+            or (c[:2] == ["systemctl", "--user"] and c[2] in ("start", "stop", "enable", "disable"))]

@@ -108,6 +108,8 @@ export function makeEndpoints(api: ApiClient) {
       api.request<CameraRequest>("GET", `/adapters/${q(thing)}/cameras/requests/${q(requestId)}`),
     removeCamera: (thing: string, cameraId: string) =>
       api.request<{ cameraId: string }>("POST", `/adapters/${q(thing)}/cameras/${q(cameraId)}/remove`),
+    reregisterCamera: (thing: string, cameraId: string) =>
+      api.request<{ cameraId: string }>("POST", `/adapters/${q(thing)}/cameras/${q(cameraId)}/reregister`),
 
     // Adapters (DEALER-PANEL-PLAN.md Phase 6, D15).
     generateAdapters: (count: number, label?: string, dealerId?: string) =>

@@ -92,7 +92,9 @@ def adopt_unstamped(dry_run=False):
     import mediamtx_api
     from aws_device_creds import get_session
     table = get_session().resource("dynamodb").Table("cameras")
-    rows, kwargs = [], {"ProjectionExpression": "cameraId, adapterId, unregisteredAt, releasedFrom"}
+    # "mode" is a DynamoDB reserved word: named through ExpressionAttributeNames.
+    rows, kwargs = [], {"ProjectionExpression": "cameraId, adapterId, unregisteredAt, releasedFrom, #m",
+                        "ExpressionAttributeNames": {"#m": "mode"}}
     while True:
         page = table.scan(**kwargs)
         rows += page.get("Items", [])
@@ -103,6 +105,8 @@ def adopt_unstamped(dry_run=False):
     for row in sorted(rows, key=lambda r: r["cameraId"]):
         if row.get("adapterId") or row.get("releasedFrom") or camera_control.is_unregistered(row):
             continue
+        if row.get("mode") not in ("transcode", "passthrough"):
+            continue                 # not a camera: a row some write made by mistake (FoundAndFixed.md #93)
         path = camera_control.mediamtx_path_name(row["cameraId"])
         try:
             served = (mediamtx_api.get_path_conf(path) is not None

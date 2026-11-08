@@ -10,6 +10,7 @@ adapter over the Pi's own outbound MQTT session -- the zero-inbound-ports rule h
                                                         -> {requestId}: the agent registers the camera
   GET  /adapters/<thing>/cameras/requests/<requestId>   {status: sent | registering | done | failed, cameraId?, error?}
   POST /adapters/<thing>/cameras/<cameraId>/remove      the agent unregisters it (the soft mark)
+  POST /adapters/<thing>/cameras/<cameraId>/reregister  the agent brings it back from its row (USB too)
 
 Only for an adapter in the caller's vsz_adapters -- the accounts they hold or are Super Admin of,
 or "*" for an administrator (D4, D6); dealers don't add cameras from here (D5). Anyone else gets
@@ -152,12 +153,23 @@ def remove_camera(thing, body, claims, camera_id):
     return 202, {"cameraId": camera_id}
 
 
+def reregister_camera(thing, body, claims, camera_id):
+    row = table(CAMERAS_TABLE).get_item(Key={"cameraId": camera_id}).get("Item")
+    if not row or row.get("adapterId") != thing:
+        raise Refused(404, f"no camera {camera_id} on {thing}")
+    if not row.get("unregisteredAt"):
+        return 200, {"cameraId": camera_id, "registered": True, "already": True}
+    send(thing, {"action": "reregister", "camera": camera_id})
+    return 202, {"cameraId": camera_id}
+
+
 ROUTES = [
     ("POST", rf"(?P<thing>{THING})/discover", discover),
     ("GET", rf"(?P<thing>{THING})/discovery", discovery),
     ("POST", rf"(?P<thing>{THING})/cameras", add_camera),
     ("GET", rf"(?P<thing>{THING})/cameras/requests/(?P<request_id>{UUID})", request_status),
     ("POST", rf"(?P<thing>{THING})/cameras/(?P<camera_id>cam-\d{{2,4}})/remove", remove_camera),
+    ("POST", rf"(?P<thing>{THING})/cameras/(?P<camera_id>cam-\d{{2,4}})/reregister", reregister_camera),
 ]
 
 

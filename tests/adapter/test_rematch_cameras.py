@@ -189,3 +189,12 @@ def test_a_dry_run_and_a_silent_mediamtx_write_nothing(registry, adopting, monke
     monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(down=True))
     assert rc.adopt_unstamped() == [] and table.writes == []
 
+
+
+def test_ff93_a_row_that_isnt_a_camera_is_never_adopted(registry, adopting, monkeypatch):
+    """FoundAndFixed.md #93: a row a mistaken write made -- cam01, codec fields only, no mode --
+    was stamped because MediaMTX has a path cam01, and reached a customer's page as a camera."""
+    table = registry([{"cameraId": "cam01", "videoCodecActive": "h264"}, {"cameraId": "cam-01", "mode": "transcode"}])
+    monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(state={"cam01": {"ready": True}}))
+    assert rc.adopt_unstamped() == ["cam-01"]
+    assert "adapterId" not in table.row("cam01")

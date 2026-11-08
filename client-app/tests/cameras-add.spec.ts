@@ -15,6 +15,7 @@ const fake = vi.hoisted(() => {
                onChange: () => () => {} },
     endpoints: {
       listAdapters: fn(), scanForCameras: fn(), cameraScan: fn(), addCamera: fn(), cameraRequest: fn(), removeCamera: fn(),
+      reregisterCamera: fn(),
       listCameras: fn(), setAudio: fn(), setIrMode: fn(), cmd: fn(), hls: fn(),
     },
   };
@@ -108,7 +109,7 @@ describe("Add cameras", () => {
     expect(e.cameraScan).toHaveBeenCalledTimes(2);                                // the older scan wasn't it
     const actions = (host: string) => w.find(`[data-test="device-${host}"]`).text();
     expect(actions("192.0.2.12")).toContain("Added as Door");
-    expect(actions("192.0.2.15")).toContain("Add it back");
+    expect(actions("192.0.2.15")).toContain("Unregistered: cam-05");             // Re-register, from its row
     expect(actions("192.0.2.19")).toContain("On another adapter");
     expect(actions("192.0.2.20")).toContain("Yard cam");
     expect(w.find(`[data-test="device-192.0.2.20"]`).find("button").text()).toBe("Add");
@@ -195,26 +196,33 @@ function section(camera: Camera, role: Role = "customer") {
   return mount(CameraSection, { props: { camera: store.cameras[0] }, global: { plugins: [[OpenVue, { unstyled: true }]] } });
 }
 
-describe("Remove camera", () => {
-  it("asks the camera's own adapter after asking the person, then reloads the cameras", async () => {
+describe("Unregister camera (Settings)", () => {
+  it("asks the camera's own adapter after asking the person, then waits for the list to show it", async () => {
     vi.useFakeTimers();
     e.removeCamera.mockReturnValue(ok({ cameraId: "cam-03" }));
+    e.listCameras.mockReturnValue(ok({ cameras: [cam({ unregisteredAt: "2026-11-08T10:00:00Z" })] }));
     const w = section(cam());
     await w.find("[data-test=remove-camera]").trigger("click");
     expect(e.removeCamera).not.toHaveBeenCalled();
     await w.find("[data-test=confirm-remove-camera]").trigger("click");
     await flushPromises();
     expect(e.removeCamera).toHaveBeenCalledWith("adapter-01", "cam-03");
-    expect(w.text()).toContain("leaves Live and Settings in a few seconds");
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
     expect(e.listCameras).toHaveBeenCalled();
+    expect(w.text()).toContain("Unregistered.");
+  });
+
+  it.each([
+    ["the USB camera", cam({ mode: "transcode" }), "customer"],
+    ["an administrator", cam(), "system_admin"],
+  ] as const)("is offered for %s", (_, camera, role) => {
+    expect(section(camera, role as Role).find("[data-test=remove-camera]").exists()).toBe(true);
   });
 
   it.each([
     ["a camera shared to watch", cam({ access: "view" }), "customer"],
-    ["an administrator's camera", cam({ adapterId: null }), "customer"],
-    ["the USB camera", cam({ mode: "transcode" }), "customer"],
-    ["an administrator", cam(), "system_admin"],
+    ["an administrator's own camera (no adapter to ask)", cam({ adapterId: null }), "customer"],
   ] as const)("isn't offered for %s", (_, camera, role) => {
     expect(section(camera, role as Role).find("[data-test=remove-camera]").exists()).toBe(false);
   });
@@ -226,5 +234,70 @@ describe("Remove camera", () => {
     await w.find("[data-test=confirm-remove-camera]").trigger("click");
     await flushPromises();
     expect(w.text()).toContain("no camera cam-03 on adapter-01");
+  });
+});
+
+// --- unregistered cameras: listed, out of Live, re-registered (the user, 2026-11-08) ------------------
+
+describe("an unregistered camera", () => {
+  const USB = cam({ id: "cam-01", mode: "transcode", displayName: null as never });
+  const GONE = cam({ id: "cam-05", unregisteredAt: "2026-11-08T10:00:00Z" });
+
+  it("stays in the camera list, marked, and out of Live", async () => {
+    const store = useCamerasStore();
+    store.cameras = [USB, GONE];
+    store.loaded = true;
+    expect(store.active.map(c => c.id)).toEqual(["cam-01"]);
+    const { default: CameraList } = await import("../src/components/CameraList.vue");
+    const w = mount(CameraList, { global: { plugins: [[OpenVue, { unstyled: true }]] } });
+    expect(w.findAll("button.cam").map(b => b.text())).toEqual(["cam-01", "cam-05unregistered"]);
+  });
+
+  it("comes back with Re-register in its Settings", async () => {
+    vi.useFakeTimers();
+    e.reregisterCamera.mockReturnValue(ok({ cameraId: "cam-05" }));
+    e.listCameras.mockReturnValue(ok({ cameras: [cam({ id: "cam-05" })] }));
+    const store = useCamerasStore();
+    store.cameras = [GONE];
+    const { default: UnregisteredCard } = await import("../src/components/settings/UnregisteredCard.vue");
+    const w = mount(UnregisteredCard, { props: { camera: GONE }, global: { plugins: [[OpenVue, { unstyled: true }]] } });
+    expect(w.text()).toContain("isn't in Live and records nothing");
+    await w.find("[data-test=reregister]").trigger("click");
+    await flushPromises();
+    expect(e.reregisterCamera).toHaveBeenCalledWith("adapter-01", "cam-05");
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+    expect(w.text()).toContain("Back. Press Start to record it again.");
+  });
+
+  it("the adapter's Cameras page unregisters any of them, the USB camera too, and re-registers", async () => {
+    vi.useFakeTimers();
+    const store = useCamerasStore();
+    store.cameras = [USB, GONE];
+    store.loaded = true;
+    e.removeCamera.mockReturnValue(ok({ cameraId: "cam-01" }));
+    e.reregisterCamera.mockReturnValue(ok({ cameraId: "cam-05" }));
+    // The list as the adapter leaves it: after the Unregister, then after the Re-register.
+    e.listCameras.mockReturnValueOnce(ok({ cameras: [{ ...USB, unregisteredAt: "2026-11-08T11:00:00Z" }, GONE] }))
+      .mockReturnValue(ok({ cameras: [{ ...USB, unregisteredAt: "2026-11-08T11:00:00Z" }, { ...GONE, unregisteredAt: null }] }));
+    const { w } = await screen();
+    const row = (id: string) => w.find(`[data-test=own-${id}]`);
+    expect(row("cam-01").text()).toContain("USB");
+    expect(row("cam-01").text()).toContain("in Live");
+    expect(row("cam-05").text()).toContain("unregistered");
+    await row("cam-01").findAll("button").find(b => b.text() === "Unregister")!.trigger("click");
+    expect(e.removeCamera).not.toHaveBeenCalled();
+    await w.find("[data-test=confirm-unregister]").trigger("click");
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+    expect(e.removeCamera).toHaveBeenCalledWith("adapter-01", "cam-01");
+    expect(row("cam-01").text()).toContain("Unregistered.");
+    await row("cam-05").findAll("button").find(b => b.text() === "Re-register")!.trigger("click");
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+    expect(e.reregisterCamera).toHaveBeenCalledWith("adapter-01", "cam-05");
+    expect(row("cam-05").text()).toContain("in Live");
   });
 });

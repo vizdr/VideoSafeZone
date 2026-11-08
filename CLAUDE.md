@@ -394,14 +394,20 @@ never returns `rtspUrl` or `liveRtspUrl` (credentials). A camera registered from
 has a row and a MediaMTX path here but no producer until it is re-registered here
 (`camera_control.has_producer`, status "no producer on this Pi").
 
-**Unregister** (admin GUI, ONVIF cameras only) is a soft mark, `unregisteredAt`
-(`camera_control.is_unregistered`): the row, KVS stream, clips and settings stay, so
-Re-register brings it back as it was. Every reader that acts on cameras must skip such a
-row — both GUIs, `list-cameras`, the agent (all but stop/live-stop), the outage supervisor
-(through its registry cache), the event watcher, `sync_mediamtx_paths.py` (no path, not in
-its cache), `rematch_cameras.py`, `codec_caps.py` — and every route or Lambda that changes a
-camera answers 409 for one. Unregister needs `systemctl disable`, which the sudo rule allows
-since #80. A new reader of the table must skip it too. **Each Pi acts only on its own rows**
+**Unregister** (either GUI — the cloud page through the adapter — and any camera, the USB camera
+too) is a soft mark, `unregisteredAt` (`camera_control.is_unregistered`): the row, KVS stream, clips
+and settings stay, and **Re-register** (either GUI) brings it back as it was from what the row
+holds — no discovery, no login typed again (`camera_registration.unregister` / `reregister`, shared
+by the admin GUI and the agent). For the USB camera, Unregister also stops its capture
+(`kvs-camera-publish`) and leaves a mark on the Pi that `publish-cam01.sh` checks at every start:
+it must stay off with AWS unreachable, and `setup-launch.sh` re-enables every user unit. Every
+reader that *acts* on cameras must skip such a row — the admin GUI's controls, the agent (all but
+stop/live-stop/reregister), the outage supervisor (through its registry cache), the event watcher,
+`sync_mediamtx_paths.py` (no path, not in its cache), `rematch_cameras.py`, `codec_caps.py` — and
+every route or Lambda that changes a camera answers 409 for one. `list-cameras` lists it, marked
+(`unregisteredAt`): the page keeps it in the camera list, out of Live, with Re-register. Unregister
+needs `systemctl disable`, which the sudo rule allows since #80. A new reader of the table that
+acts on cameras must skip it too. **Each Pi acts only on its own rows**
 (`DEALER-PANEL-PLAN.md` D12): `camera_control.is_mine(row)` — `adapterId` is this Pi's Thing, or none
 on a Pi with `ADOPT_UNSTAMPED_ROWS=yes`, and never a row with `releasedFrom` — and `acts_on(row)`
 (mine and not unregistered) filter the same readers; another adapter's camera gets 409 from the

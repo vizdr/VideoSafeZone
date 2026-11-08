@@ -154,3 +154,12 @@ def test_no_answer_or_error_carries_the_request(world, monkeypatch):
     monkeypatch.setattr(lam, "add_camera", lambda *a, **k: (_ for _ in ()).throw(RuntimeError(ADD["password"])))
     monkeypatch.setattr(lam, "ROUTES", [(m, p, lam.add_camera if h.__name__ == "add_camera" else h) for m, p, h in lam.ROUTES])
     assert route("POST", "adapter-01/cameras", ADD) == (500, {"error": "RuntimeError"})
+
+
+def test_re_register_asks_the_cameras_own_adapter_for_an_unregistered_camera(world):
+    fake = world(cameras=[{"cameraId": "cam-01", "adapterId": "adapter-01", "unregisteredAt": "x"},
+                          {"cameraId": "cam-03", "adapterId": "adapter-01"}, {"cameraId": "cam-07", "adapterId": "adapter-09"}])
+    expect_command(fake, "adapter-01", {"action": "reregister", "camera": "cam-01"})
+    assert route("POST", "adapter-01/cameras/cam-01/reregister") == (202, {"cameraId": "cam-01"})
+    assert route("POST", "adapter-01/cameras/cam-03/reregister") == (200, {"cameraId": "cam-03", "registered": True, "already": True})
+    assert route("POST", "adapter-01/cameras/cam-07/reregister")[0] == 404

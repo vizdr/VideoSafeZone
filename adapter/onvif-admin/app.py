@@ -218,6 +218,14 @@ def unregister_camera(camera_id):
     return jsonify(payload), status
 
 
+@app.post("/api/cameras/<camera_id>/reregister")
+def reregister_camera(camera_id):
+    """Re-register an unregistered camera from what its row holds -- the USB camera too, which
+    Discover can't find (camera_registration.reregister, shared with the agent's `reregister`)."""
+    payload, status = camera_registration.reregister(_registration_env(), camera_id, run=subprocess.run)
+    return jsonify(payload), status
+
+
 @app.get("/api/cameras/<camera_id>/status")
 def stream_status(camera_id):
     # Polled every few seconds per camera, so the ID is checked against the outage

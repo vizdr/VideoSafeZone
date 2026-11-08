@@ -541,3 +541,18 @@ def test_once_the_adapter_isnt_activated_released_cameras_stop_pushing(world, mo
     assert stops == [["sudo", "systemctl", "stop", "kvs-cam@cam07.service"],
                      ["sudo", "systemctl", "stop", camera_control.live_unit_name("cam-07")]]   # cam-01..03 are this Pi's
     assert "cam-07 isn't this adapter's any more" in capsys.readouterr().out
+
+
+def test_re_register_from_the_page_is_for_this_adapters_unregistered_cameras(web, monkeypatch):
+    """The user, 2026-11-08: an unregistered camera stays listed, and Re-register brings it back --
+    the one command, beside Stop, an unregistered camera takes."""
+    w = web()
+    asked = []
+    monkeypatch.setattr(camera_registration, "reregister",
+                        lambda env, camera, run=None: asked.append((env.table, camera)) or ({"cameraId": camera, "reactivated": True}, 200))
+    agent.on_message(CMD, json.dumps({"action": "reregister", "camera": "cam-05"}).encode())   # unregistered here
+    agent.on_message(CMD, json.dumps({"action": "reregister", "camera": "cam-09"}).encode())   # another adapter's
+    agent.on_message(CMD, json.dumps({"action": "reregister"}).encode())                        # never cam-01 by default
+    agent.on_message(CMD, json.dumps({"action": "start", "camera": "cam-05"}).encode())         # still refused
+    assert asked == [(w.table, "cam-05")]
+    assert w.conn.states() == [{"camera": "cam-05", "reregistered": True}]

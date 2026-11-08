@@ -116,7 +116,7 @@ def on_message(topic, payload, **kwargs):
         # where Start and Stop presses would wait behind it.
         threading.Thread(target=adapter_command, args=(msg,), daemon=True).start()
         return
-    if cmd == "unregister" and not msg.get("camera"):
+    if cmd in ("unregister", "reregister") and not msg.get("camera"):
         return                                 # never the cam-01 default below
     camera = msg.get("camera", "cam-01")   # older clients/messages omit this -- default cam-01
 
@@ -125,7 +125,7 @@ def on_message(topic, payload, **kwargs):
         return
     # An unregistered camera is hidden from both GUIs, but an open page or a direct API call can
     # still name it, and the MQTT session is shared with VMS: refuse everything but Stop.
-    if camera_control.is_unregistered(cam_item) and cmd not in ("stop", "live-stop"):
+    if camera_control.is_unregistered(cam_item) and cmd not in ("stop", "live-stop", "reregister"):
         print(f"agent: ignoring {cmd!r} for unregistered {camera}", flush=True)
         return
     # Another adapter's camera, or one released from this one (D12, D15): not this Pi's to start,
@@ -159,6 +159,8 @@ def on_message(topic, payload, **kwargs):
                      qos=mqtt.QoS.AT_LEAST_ONCE)
     elif cmd == "unregister":
         threading.Thread(target=unregister_camera, args=(camera,), daemon=True).start()
+    elif cmd == "reregister":
+        threading.Thread(target=reregister_camera, args=(camera,), daemon=True).start()
     elif cmd == "ir" and cam_item.get("hasIrControl"):
         mode = msg.get("mode")
         try:
@@ -284,6 +286,16 @@ def adapter_command(msg):
 def unregister_camera(camera):
     payload, status = camera_registration.unregister(get_cameras_table(), camera)
     _publish(STATE_T, {"camera": camera, "unregistered": status == 200,
+                       **({"error": payload["error"]} if "error" in payload else {})})
+
+
+def reregister_camera(camera):
+    """Re-register from the web page: the camera back from what its row holds (the USB camera too)."""
+    try:
+        payload, status = camera_registration.reregister(agent_env(), camera)
+    except Exception as e:  # noqa: BLE001 -- report, don't kill the agent
+        payload, status = {"error": f"{type(e).__name__}: {e}"}, 500
+    _publish(STATE_T, {"camera": camera, "reregistered": status in (200, 201) and "error" not in payload,
                        **({"error": payload["error"]} if "error" in payload else {})})
 
 

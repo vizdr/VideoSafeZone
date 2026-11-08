@@ -1398,6 +1398,35 @@ the first's work before going on.
   form, any scan taken for this one, Remove offered for a shared camera, released cameras never
   stopped.
 
+*Added 2026-11-08, at the user's request* (after trying the first deploy): **unregister any camera,
+the USB one included; an unregistered camera stays in the camera list, out of Live, and comes back
+with Re-register — managed from Cloud adapters → the adapter's Cameras page.** Built: the page
+`#/cameras/add/:thing?` became the adapter's **Cameras**: its cameras (USB or network, in Live or
+unregistered) with Unregister after asking or Re-register, above *Find new cameras*, where a device
+found unregistered offers Re-register too; Settings shows an unregistered camera's Re-register card
+only, and its Unregister card covers the USB camera. Behind it: `camera_registration.unregister`
+takes the USB camera (its capture `kvs-camera-publish` stopped, and a mark on the Pi,
+`$XDG_STATE_HOME/videosafezone/unregistered/cam01`, that `publish-cam01.sh` checks at every start —
+the decision must hold with AWS unreachable, and `setup-launch.sh` re-enables user units);
+`camera_registration.reregister` brings a camera back from its row (the USB camera's capture
+started; a network camera through `register`'s re-registration with its stored login); the agent's
+`reregister`, `adapter-cameras`' `POST <thing>/cameras/<id>/reregister`, the admin GUI's `POST
+/api/cameras/<id>/reregister` and its unregistered rows with Re-register; **`list-cameras` lists
+unregistered cameras, marked** (`unregisteredAt`), and the page keeps them out of Live, out of the
+players and out of the Live-view settings. Tests: `tests/admin/test_admin_adapters.py` (+4),
+`tests/adapter/test_agent.py` (+1), `tests/cloud/test_adapter_cameras.py` (+1),
+`tests/cloud/test_list_cameras.py` (listed, marked), `client-app/tests/cameras-add.spec.ts` (+3) and
+`live.spec.ts` (+1); broken on purpose once each and red: no mark for the USB camera, the list
+hiding them again, the agent refusing Re-register, Live showing them. Again built across two
+sessions after an SSH drop; the second took over at a clean point.
+
+*Deploying, 2026-11-08* (the user): `deploy.sh lambda list-cameras` and `lambda publish-cmd` with
+`--force` — Phase 7 was committed first, so the live code (checked: exactly the Phase 6 commit's)
+matched neither the tree nor HEAD; `provision.sh cameras` made everything, and its self-check failed
+once on a deployment still reaching the edges (FoundAndFixed.md #92, fixed); re-run, verified: the
+demo holder reaches `/adapters/adapter-01/discovery` ("no scan yet"), the demo dealer gets "no such
+adapter". Left: the Pi's agent and admin GUI restarted, `deploy.sh page`, the *Verify*.
+
 ### Phase 8: Billing seam (fakes)
 
 `BillingProvider` and `FakeBillingProvider` (D9); trial length from `price_setting`; the Billing
@@ -1495,6 +1524,7 @@ of its own if the shared instance's availability becomes the limit.
 - [ ] Phase 6: its *Verify* — the activation flow (a Cloud ID used, refused, released)
 - [x] Phase 7: Adding cameras from the web page (allocated IDs, per-Pi filtering) — built and tested (2026-11-07)
 - [ ] Phase 7: deployed (`deploy.sh lambda list-cameras`, `lambda publish-cmd`, `provision.sh cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page`) and its *Verify* recorded
+- [ ] Phase 7 addition (unregister any camera, Re-register): `deploy.sh lambda list-cameras`, `lambda adapter-cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page`
 - [ ] Phase 8: Billing seam with fakes
 - [ ] Phase 9: Account page and additional users
 - [ ] Phase 10: A second adapter at another customer — spike, device isolation

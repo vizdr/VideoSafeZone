@@ -65,7 +65,7 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
       <h3 v-if="g.tag !== null || groups.length > 1" class="group">{{ g.tag ?? "Untagged" }}</h3>
       <ul class="cams">
         <li v-for="c in g.cameras" :key="c.id">
-          <button type="button" class="cam" :class="{ selected: c.id === props.selected }"
+          <button type="button" class="cam" :class="{ selected: c.id === props.selected, unregistered: !!c.unregisteredAt }"
                   :aria-current="c.id === props.selected ? 'true' : undefined"
                   @click="emit('select', c.id)">
             <span class="dot" :class="dot(c.id).cls" role="img" :aria-label="dot(c.id).label"
@@ -75,6 +75,7 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
             </span>
             <span class="name">{{ cameraName(c) }}</span>
             <span v-if="c.displayName" class="id">{{ c.id }}</span>
+            <span v-if="c.unregisteredAt" class="unreg" title="Not in Live and records nothing; Re-register in its Settings">unregistered</span>
           </button>
         </li>
       </ul>
@@ -83,6 +84,8 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
 </template>
 
 <style scoped>
+.cam.unregistered .name { opacity: 0.55; }
+.unreg { margin-left: auto; font-size: 0.72rem; color: var(--p-amber-400); }
 h2 { margin: 0; font-size: 1.05rem; }
 .head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
 .preview { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--p-text-muted-color); }

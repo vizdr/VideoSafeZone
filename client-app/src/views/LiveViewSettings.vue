@@ -23,7 +23,7 @@ const slots = computed(() => largeCount(settings.liveLayout));
 const NEXT = "next";
 const options = computed(() => [
   { value: NEXT, label: "The next camera in the list" },
-  ...cameras.cameras.map(c => ({ value: c.id, label: c.displayName ? `${cameraName(c)} (${c.id})` : c.id })),
+  ...cameras.active.map(c => ({ value: c.id, label: c.displayName ? `${cameraName(c)} (${c.id})` : c.id })),
 ]);
 // A pick for a camera that is gone shows as "next camera": it is dropped when the grid is built.
 const pick = (i: number) => {

@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { endpoints } from "../api";
 import { errorText } from "../api/client";
 import type { Camera } from "../api/types";
@@ -41,5 +41,8 @@ export const useCamerasStore = defineStore("cameras", () => {
     error.value = null;
   }
 
-  return { cameras, loaded, loading, error, load, byId, patch, clear };
+  /** The cameras in Live: an unregistered one stays in the list, marked, with Re-register. */
+  const active = computed(() => cameras.value.filter(c => !c.unregisteredAt));
+
+  return { cameras, active, loaded, loading, error, load, byId, patch, clear };
 });
