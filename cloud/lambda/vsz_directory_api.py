@@ -26,6 +26,14 @@ one of vsz-directory's operations; invitations and account changes also go to Co
   POST  /directory/adapters/activate          {cloudId, accountId? | customerId?, siteId? | newSite?, name?}
   POST  /directory/adapters/<id>/allocate     {dealerId | null}
   POST  /directory/adapters/<id>/new-code | release | remove | revoke | sync
+  Billing (Phase 8, D9 -- data real, money fake):
+  GET   /directory/invoices[?dealerId=&customerId=&period=]   invoices with their lines
+  GET   /directory/customers/<id>/invoices    the customer's invoices, and its next one (an estimate)
+  POST  /directory/billing/run-period         {period: "2026-11"} -- the fake provider's run (owner, admin)
+
+Billing goes through BillingProvider -- here, outside the VPC, because a real provider is an internet
+API that vsz-directory can't reach. Today's is FakeBillingProvider: no payment, no card or bank
+fields anywhere, invoices written by the directory when a billing period is run.
 
 An invitation: vsz-directory adds the person, invited, with their membership; Cognito creates the
 user and emails a temporary password (AdminCreateUser); the new sub goes back to the directory. If
@@ -100,8 +108,12 @@ ROUTES = [
     ("POST", f"users/(?P<userId>{ID})/(?P<action>{'|'.join(ACTIONS)})", "account"),
     ("GET", "pricing", "get_pricing"),
     ("PUT", "pricing", "put_pricing"),
+    ("GET", "invoices", "invoices"),
+    ("GET", f"customers/(?P<id>{ID})/invoices", "customer_invoices"),
+    ("POST", "billing/run-period", "run_period"),
 ]
 CREATED = {"create_dealer", "invite", "create_customer", "generate"}
+QUERY = ("dealerId", "customerId", "period")               # what a GET may narrow by
 
 
 class Refused(Exception):
@@ -357,19 +369,23 @@ def generate(sub, args):
 
 def activate(sub, args):
     """The activation, then (a backstop) any camera rows still under this adapter from before are
-    taken out of view, then the Pi is told -- before that, its admin GUI registers no camera."""
+    taken out of view, then the Pi is told -- before that, its admin GUI registers no camera. Its
+    trial plan has begun: the billing provider is told."""
     done = call_directory("activate_adapter", sub, args)
-    return _follow_up(dict(done), done["thingName"], True, release=True)
+    out = _follow_up(dict(done), done["thingName"], True, release=True)
+    return tell_billing(out, "start", done["adapterId"])
 
 
 def release(sub, args):
     done = call_directory("release_adapter", sub, args)
-    return _follow_up(dict(done), done["thingName"], False, release=True)
+    out = _follow_up(dict(done), done["thingName"], False, release=True)
+    return tell_billing(out, "cancel", done["id"])
 
 
 def remove(sub, args):
     done = call_directory("remove_adapter", sub, args)
-    return _follow_up(dict(done), done["thingName"], False, release=True)
+    out = _follow_up(dict(done), done["thingName"], False, release=True)
+    return tell_billing(out, "cancel", done["id"])
 
 
 def revoke(sub, args):
@@ -377,7 +393,7 @@ def revoke(sub, args):
     out = _follow_up(dict(done), done["thingName"], False, release=done["wasActivated"])
     if done.get("identity"):
         out["identityCommand"] = f"bash cloud/adapter-identity.sh revoke {done['thingName']}"
-    return out
+    return tell_billing(out, "cancel", done["id"]) if done["wasActivated"] else out
 
 
 def sync(sub, args):
@@ -388,9 +404,97 @@ def sync(sub, args):
                       state["thingName"], state["activated"], release=not state["activated"])
 
 
+# --- billing: the provider seam (Phase 8, D9) ---------------------------------------------------------
+
+class BillingProvider:
+    """What a payment provider does for the platform (D9). The directory keeps the prices, the plans and
+    their versions and the invoices whichever provider is behind this -- data real; a provider takes
+    the money. It is here, outside the VPC, because a real one (Stripe Billing, later) is an internet
+    API that vsz-directory -- in the VPC without a NAT -- can't reach.
+
+    start, change and cancel are told after the directory has changed (tell_billing): a provider that
+    fails then is reported in the answer, never undone -- the directory's state is the one that holds."""
+    name = ""
+
+    def quote(self, sub, customer_id):
+        """What the customer's next invoice would be, now."""
+        raise NotImplementedError
+
+    def start(self, adapter_id):
+        """An adapter's plan began: its activation, on a trial (D19)."""
+        raise NotImplementedError
+
+    def change(self, adapter_id, plan):
+        """The adapter's plan has a new version (the directory's, priced by the server)."""
+        raise NotImplementedError
+
+    def cancel(self, adapter_id):
+        """The adapter's plan was cancelled, or ended with its activation (a release)."""
+        raise NotImplementedError
+
+    def list_invoices(self, sub, args):
+        """Invoices in the caller's scope: {"invoices": [...], "truncated": bool}."""
+        raise NotImplementedError
+
+
+class FakeBillingProvider(BillingProvider):
+    """Billing as a demo (D9): no payment is taken, and there are no card or bank fields anywhere. The
+    invoices are the directory's, written when an owner or administrator runs a billing period
+    (run_period -- the fake's own; a real provider runs its own cycles) and marked provider 'fake'.
+    A plan change needs telling no one: the plan's versions in the directory are the whole record."""
+    name = "fake"
+
+    def quote(self, sub, customer_id):
+        return call_directory("billing_preview", sub, {"customerId": customer_id})
+
+    def start(self, adapter_id):
+        return None
+
+    def change(self, adapter_id, plan):
+        return None
+
+    def cancel(self, adapter_id):
+        return None
+
+    def list_invoices(self, sub, args):
+        return call_directory("list_invoices", sub, args)
+
+    def run_period(self, sub, args):
+        return call_directory("run_billing_period", sub, {"period": args.get("period")})
+
+
+BILLING = FakeBillingProvider()
+
+
+def tell_billing(out, hook, *args):
+    """A plan change, told to the billing provider once the directory has made it; a failure is
+    reported (billingUnsent), never undone."""
+    try:
+        getattr(BILLING, hook)(*args)
+    except Exception as exc:  # noqa: BLE001
+        out["billingUnsent"] = f"the billing provider wasn't told ({error_code(exc)})"
+    return out
+
+
+def put_plan(sub, args):
+    done = call_directory("put_plan", sub, args)
+    return tell_billing(done, "change", args["adapterId"], done["plan"]) if done.get("changed") else done
+
+
+def cancel_plan(sub, args):
+    return tell_billing(call_directory("cancel_plan", sub, args), "cancel", args["adapterId"])
+
+
+def customer_invoices(sub, args):
+    """A customer's invoices, and the provider's quote for its next one."""
+    return {**BILLING.list_invoices(sub, {"customerId": args["id"]}), "next": BILLING.quote(sub, args["id"])}
+
+
 SPECIAL = {"customers": customers, "customer_adapters": customer_adapters, "create_customer": create_customer,
            "generate": generate, "activate": activate, "release": release, "remove": remove, "revoke": revoke,
-           "sync": sync}
+           "sync": sync, "put_plan": put_plan, "cancel_plan": cancel_plan,
+           "invoices": lambda sub, args: BILLING.list_invoices(sub, args), "customer_invoices": customer_invoices,
+           "run_period": lambda sub, args: BILLING.run_period(sub, args)}
 
 
 def lambda_handler(event, context):
@@ -418,7 +522,7 @@ def lambda_handler(event, context):
                 allowed.append(route_method)
                 continue
             params = m.groupdict()
-            args = {**{k: v for k, v in query.items() if k == "dealerId"}, **params} if method == "GET" \
+            args = {**{k: v for k, v in query.items() if k in QUERY}, **params} if method == "GET" \
                 else {**body, **params}
             if what == "activate":            # the rate limit's address is API Gateway's, never the body's
                 args["sourceIp"] = ((event.get("requestContext") or {}).get("identity") or {}).get("sourceIp")

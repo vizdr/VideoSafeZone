@@ -8,7 +8,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref, type Component } from "vue";
 import { viewDepthKey } from "vue-router";
-import type { CustomerAdapters, CustomerDetail, CustomerSummary, Plan, Price, Pricing, Role } from "../src/api/types";
+import type { CustomerAdapters, CustomerDetail, CustomerSummary, Invoice, InvoiceLine, Plan, Price, Pricing, Role } from "../src/api/types";
 
 const fake = vi.hoisted(() => {
   const fn = () => vi.fn();
@@ -19,12 +19,14 @@ const fake = vi.hoisted(() => {
       me: fn(), listDealers: fn(), listCustomers: fn(), createCustomer: fn(), getCustomer: fn(), updateCustomer: fn(),
       customerAdapters: fn(), customerUsers: fn(), putPlan: fn(), cancelPlan: fn(), planHistory: fn(), getPricing: fn(),
       inviteUser: fn(), userAction: fn(), getDealer: fn(), updateOwnDealer: fn(), listAdapters: fn(),
+      listInvoices: fn(), customerInvoices: fn(),
     },
   };
 });
 vi.mock("../src/api", () => ({ session: fake.session, endpoints: fake.endpoints }));
 
 import { CUSTOMER, type CustomerContext } from "../src/dealer/customer";
+import { monthLabel } from "../src/dealer/billing";
 import { camerasText, linesOf, planChanges } from "../src/dealer/plans";
 import { money } from "../src/pricing";
 import { makeRouter } from "../src/router";
@@ -32,6 +34,7 @@ import CustomerList from "../src/components/dealer/CustomerList.vue";
 import CustomerCameras from "../src/views/dealer/CustomerCameras.vue";
 import CustomerDetails from "../src/views/dealer/CustomerDetails.vue";
 import CustomerHistory from "../src/views/dealer/CustomerHistory.vue";
+import CustomerInvoices from "../src/views/dealer/CustomerInvoices.vue";
 import CustomerPlan from "../src/views/dealer/CustomerPlan.vue";
 import CustomerUsers from "../src/views/dealer/CustomerUsers.vue";
 import CustomerView from "../src/views/dealer/CustomerView.vue";
@@ -446,9 +449,21 @@ describe("the customer's details", () => {
 
 // --- billing, the dealer's details -----------------------------------------------------------------
 
+// An invoice of October: adapter-01's monthly plan and adapter-0302's annual one, a twelfth of its year.
+const LINE: InvoiceLine = { planId: "p-2", activationId: "act-1", cents: 2240, currency: "EUR", version: 2, interval: "monthly",
+  centsPeriod: 2240, retentionDays: 30, thingName: "adapter-01", name: "Hall", site: "Home", cameras: 4 };
+const ANNUAL: InvoiceLine = { ...LINE, planId: "p-9", activationId: "act-2", cents: 2016, version: 1, interval: "annual",
+  centsPeriod: 24192, thingName: "adapter-0302", name: null, site: "Garage" };
+const INVOICE: Invoice = { id: "i-1", periodStart: "2026-10-01", periodEnd: "2026-11-01", cents: 4256, currency: "EUR",
+  status: "issued", provider: "fake", createdAt: "2026-11-01T10:00:00Z", customer: { id: "c-1", name: "Acme" },
+  dealer: { id: "d-1", name: "North" }, lines: [LINE, ANNUAL] };
+const NEXT = { period: "2026-11", periodStart: "2026-11-01", periodEnd: "2026-12-01", billedAt: "2026-11-14T10:00:00Z",
+  lines: [LINE], cents: 2240, currency: "EUR", invoiceId: null };
+
 describe("billing", () => {
   it("is a demo: each customer's total and the sum, no payment", async () => {
     e.listCustomers.mockReturnValue(ok([ACME, BETA, { ...ACME, id: "c-5", name: "No adapter", adapters: 0, centsMonth: 0 }]));
+    e.listInvoices.mockReturnValue(ok({ invoices: [], truncated: false }));
     const router = await routed("/dealer/billing");
     const w = mount(DealerBilling, { global: { plugins: plugins(router) } });
     await flushPromises();
@@ -457,6 +472,80 @@ describe("billing", () => {
     expect(w.find("[data-test=sum]").text()).toBe(EUR(3240));
     expect(w.findAll("input")).toHaveLength(0);                                      // no card or bank fields, not even fake (D9)
     expect(w.text()).not.toMatch(/card number|iban/i);
+    expect(w.find("[data-test=no-invoices]").exists()).toBe(true);
+  });
+
+  it("lists the invoices, each opening to its lines: an annual plan's a twelfth of its year", async () => {
+    e.listCustomers.mockReturnValue(ok([ACME]));
+    e.listInvoices.mockReturnValue(ok({ invoices: [INVOICE], truncated: true }));
+    const router = await routed("/dealer/billing");
+    const w = mount(DealerBilling, { global: { plugins: plugins(router) } });
+    await flushPromises();
+    expect(e.listInvoices).toHaveBeenCalledWith();                                    // a dealer's own: the API scopes it
+    const row = w.find("[data-test=invoice]");
+    expect(row.text()).toContain(monthLabel("2026-10"));
+    expect(row.text()).toContain(EUR(4256));
+    expect(row.find("a").attributes("href")).toBe("#/dealer/customers/c-1/invoices");
+    expect(row.text()).not.toContain("North");                                       // a dealer isn't shown its own name
+    expect(w.find("[data-test=invoice-lines]").exists()).toBe(false);
+    await byText(row, "Lines").trigger("click");
+    const lines = w.findAll("[data-test=invoice-lines] li").map(li => li.text());
+    expect(lines[0]).toContain("Home · Hall — adapter-01");
+    expect(lines[0]).toContain(EUR(2240));
+    expect(lines[1]).toContain(`a twelfth of ${EUR(24192)} a year`);
+    expect(lines[1]).toContain(EUR(2016));
+    expect(w.find("[data-test=truncated]").exists()).toBe(true);
+  });
+
+  it("owners see whose customer each invoice is", async () => {
+    e.listCustomers.mockReturnValue(ok([ACME]));
+    e.listInvoices.mockReturnValue(ok({ invoices: [INVOICE], truncated: false }));
+    const router = await routed("/dealer/billing", "system_owner");
+    const w = mount(DealerBilling, { global: { plugins: plugins(router) } });
+    await flushPromises();
+    expect(w.find("[data-test=invoice]").text()).toContain("North");
+  });
+});
+
+describe("a customer's invoices", () => {
+  it("show this month so far, the provider's estimate, and the months billed", async () => {
+    e.customerInvoices.mockReturnValue(ok({ invoices: [INVOICE], truncated: false, next: NEXT }));
+    const { w } = await page(CustomerInvoices, "/dealer/customers/c-1/invoices");
+    expect(e.customerInvoices).toHaveBeenCalledWith("c-1");
+    expect(w.find("[data-test=demo-banner]").exists()).toBe(true);
+    expect(w.text()).toContain(`${monthLabel("2026-11")} so far`);
+    expect(w.find("[data-test=estimate]").text()).toContain("Home · Hall — adapter-01");
+    expect(w.find("[data-test=estimate-total]").text()).toBe(EUR(2240));
+    expect(w.findAll("[data-test=invoice]")).toHaveLength(1);
+    expect(w.find("[data-test=invoice] a").exists()).toBe(false);                    // no customer column on its own page
+    expect(w.findAll("input")).toHaveLength(0);
+  });
+
+  it.each([
+    [{ ...NEXT, lines: [], cents: 0 }, "nothing-to-pay"],
+    [{ ...NEXT, invoiceId: "i-2" }, "invoiced"],
+  ])("say when there is nothing to pay, or the month is billed already", async (next, shown) => {
+    e.customerInvoices.mockReturnValue(ok({ invoices: [], truncated: false, next }));
+    const { w } = await page(CustomerInvoices, "/dealer/customers/c-1/invoices");
+    expect(w.find(`[data-test=${shown}]`).exists()).toBe(true);
+    expect(w.find("[data-test=estimate]").exists()).toBe(false);
+  });
+
+  it("show the API's refusal", async () => {
+    e.customerInvoices.mockReturnValue(refused(404, "no such customer"));
+    const { w } = await page(CustomerInvoices, "/dealer/customers/c-1/invoices");
+    expect(w.find("[data-test=invoices-error]").text()).toBe("no such customer");
+  });
+
+  it("are a page of the customer's, beside its plan history", async () => {
+    e.getCustomer.mockReturnValue(ok(DETAIL));
+    e.customerAdapters.mockReturnValue(ok(ADAPTERS));
+    e.customerInvoices.mockReturnValue(ok({ invoices: [], truncated: false, next: NEXT }));
+    const router = await routed("/dealer/customers/c-1/invoices");
+    const w = mount(CustomerView, { global: { plugins: plugins(router), provide: { [viewDepthKey as symbol]: 3 } } });
+    await flushPromises();
+    expect(w.findAll(".side-menu a").map(a => a.text()).slice(1, 4)).toEqual(["Plan", "Plan history", "Invoices"]);
+    expect(w.find(".side-menu a.active").text()).toBe("Invoices");
   });
 });
 

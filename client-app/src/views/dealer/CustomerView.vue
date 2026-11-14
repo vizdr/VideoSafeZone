@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// One customer's pages (DEALER-PANEL-PLAN.md §7.1): Plan, Plan history, Cameras, Users, Details.
+// One customer's pages (DEALER-PANEL-PLAN.md §7.1): Plan, Plan history, Invoices, Cameras, Users, Details.
 // The customer and its adapters are loaded here once and shared (dealer/customer.ts).
 import { computed, provide, ref, watch } from "vue";
 import { useRoute } from "vue-router";
@@ -34,7 +34,7 @@ provide(CUSTOMER, { customerId, detail, adapters, error, reload });
 
 const menu = [
   { name: "dealer-plan", label: "Plan" }, { name: "dealer-history", label: "Plan history" },
-  { name: "dealer-cameras", label: "Cameras" }, { name: "dealer-users", label: "Users" },
+  { name: "dealer-invoices", label: "Invoices" }, { name: "dealer-cameras", label: "Cameras" }, { name: "dealer-users", label: "Users" },
   { name: "dealer-customer-details", label: "Details" },
 ];
 </script>

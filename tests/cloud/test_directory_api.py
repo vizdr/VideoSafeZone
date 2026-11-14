@@ -489,3 +489,115 @@ def test_sync_says_again_what_the_directory_says(monkeypatch, route, directory, 
     status, out = route("POST", f"adapters/{ADAPTER}/sync")
     assert status == 200 and told == [("adapter-02", activated)]
     assert released == ([] if activated else ["adapter-02"])
+
+
+# --- billing (Phase 8, D9) --------------------------------------------------------------------------
+
+@pytest.fixture
+def billing(monkeypatch):
+    """A provider recording what it is told -- start, change, cancel -- the rest as the fake does it."""
+    told = []
+
+    class Recording(api.FakeBillingProvider):
+        def start(self, adapter_id):
+            told.append(("start", adapter_id))
+
+        def change(self, adapter_id, plan):
+            told.append(("change", adapter_id, plan["version"]))
+
+        def cancel(self, adapter_id):
+            told.append(("cancel", adapter_id))
+    monkeypatch.setattr(api, "BILLING", Recording())
+    return told
+
+
+def test_invoices_are_asked_with_the_filters_a_page_may_give(route, directory):
+    calls, results = directory
+    results["list_invoices"] = {"invoices": [], "truncated": False}
+    status, out = route("GET", "invoices", query={"dealerId": DEALER, "customerId": CUSTOMER, "period": "2026-11", "x": "y"})
+    assert (status, out) == (200, {"invoices": [], "truncated": False})
+    assert calls == [("list_invoices", ME["sub"], {"dealerId": DEALER, "customerId": CUSTOMER, "period": "2026-11"})]
+
+
+def test_a_customers_invoices_come_with_the_estimate_of_its_next_one(route, directory):
+    calls, results = directory
+    results["list_invoices"] = {"invoices": [{"id": "i-1"}], "truncated": False}
+    results["billing_preview"] = {"period": "2026-11", "cents": 2240, "lines": []}
+    status, out = route("GET", f"customers/{CUSTOMER}/invoices", query={"customerId": "someone-elses"})
+    assert status == 200 and out == {"invoices": [{"id": "i-1"}], "truncated": False, "next": results["billing_preview"]}
+    assert calls == [("list_invoices", ME["sub"], {"customerId": CUSTOMER}),
+                     ("billing_preview", ME["sub"], {"customerId": CUSTOMER})]
+
+
+def test_a_billing_run_sends_the_period_only(route, directory):
+    calls, _ = directory
+    assert route("POST", "billing/run-period", {"period": "2026-11", "cents": 1}) == (200, {"done": "run_billing_period"})
+    assert calls == [("run_billing_period", ME["sub"], {"period": "2026-11"})]
+    assert route("GET", "billing/run-period")[0] == 405
+
+
+def test_the_directorys_refusal_of_a_run_is_passed_on(route, directory):
+    _, results = directory
+    results["run_billing_period"] = api.Refused(403, "not allowed for your role")
+    assert route("POST", "billing/run-period", {"period": "2026-11"}) == (403, {"error": "not allowed for your role"})
+
+
+def test_plan_changes_are_told_to_the_provider_after_the_directory(route, directory, billing):
+    _, results = directory
+    results["put_plan"] = {"changed": True, "plan": {"version": 3}}
+    assert route("PUT", f"adapters/{ADAPTER}/plan", {"lines": []})[0] == 200
+    results["put_plan"] = {"changed": False, "plan": {"version": 3}}        # the same plan again: nothing to tell
+    route("PUT", f"adapters/{ADAPTER}/plan", {"lines": []})
+    route("POST", f"adapters/{ADAPTER}/plan/cancel", {"basedOn": 3})
+    assert billing == [("change", ADAPTER, 3), ("cancel", ADAPTER)]
+
+
+def test_an_activation_starts_a_plan_and_leaving_the_customer_ends_it(monkeypatch, route, directory, told, billing):
+    _, results = directory
+    monkeypatch.setattr(api, "release_cameras", lambda thing: 0)
+    results["activate_adapter"] = {"adapterId": ADAPTER, "thingName": "adapter-02", "customerId": CUSTOMER,
+                                   "siteId": "s-1", "activationId": "act-9"}
+    results["release_adapter"] = {"id": ADAPTER, "thingName": "adapter-02", "cloudId": "X"}
+    results["remove_adapter"] = {"id": ADAPTER, "thingName": "adapter-02"}
+    results["revoke_adapter"] = {"id": ADAPTER, "thingName": "adapter-02", "wasActivated": True, "identity": False}
+    assert route("POST", "adapters/activate", {"cloudId": "x"})[0] == 200
+    for action in ("release", "remove", "revoke"):
+        assert route("POST", f"adapters/{ADAPTER}/{action}")[0] == 200
+    results["revoke_adapter"] = {**results["revoke_adapter"], "wasActivated": False}       # never activated: no plan
+    route("POST", f"adapters/{ADAPTER}/revoke")
+    assert billing == [("start", ADAPTER), ("cancel", ADAPTER), ("cancel", ADAPTER), ("cancel", ADAPTER)]
+
+
+def test_a_refused_change_tells_the_provider_nothing(route, directory, told, billing):
+    _, results = directory
+    results["put_plan"] = api.Refused(409, "the plan was changed meanwhile")
+    results["cancel_plan"] = api.Refused(409, "this adapter has no plan to cancel")
+    results["activate_adapter"] = api.Refused(400, "this Cloud ID can't be activated")
+    assert route("PUT", f"adapters/{ADAPTER}/plan", {"lines": []})[0] == 409
+    assert route("POST", f"adapters/{ADAPTER}/plan/cancel", {})[0] == 409
+    assert route("POST", "adapters/activate", {"cloudId": "x"})[0] == 400
+    assert billing == []
+
+
+def test_a_provider_that_fails_is_reported_and_the_directory_stands(monkeypatch, route, directory):
+    _, results = directory
+    results["put_plan"] = {"changed": True, "plan": {"version": 2}}
+
+    class Down(api.FakeBillingProvider):
+        def change(self, adapter_id, plan):
+            raise api.ClientError({"Error": {"Code": "ServiceUnavailable"}}, "x")
+    monkeypatch.setattr(api, "BILLING", Down())
+    status, out = route("PUT", f"adapters/{ADAPTER}/plan", {"lines": []})
+    assert status == 200 and out["plan"] == {"version": 2}
+    assert out["billingUnsent"] == "the billing provider wasn't told (ServiceUnavailable)"
+
+
+def test_the_fake_provider_tells_nobody_and_the_seam_has_d9s_five(monkeypatch):
+    monkeypatch.setattr(api, "call_directory", lambda *a: pytest.fail("a plan change needs telling no one"))
+    fake = api.FakeBillingProvider()
+    assert (fake.name, fake.start(ADAPTER), fake.change(ADAPTER, {"version": 2}), fake.cancel(ADAPTER)) == \
+        ("fake", None, None, None)
+    for method in ("quote", "start", "change", "cancel", "list_invoices"):
+        assert callable(getattr(api.BillingProvider, method))
+    with pytest.raises(NotImplementedError):
+        api.BillingProvider().change(ADAPTER, {"version": 2})

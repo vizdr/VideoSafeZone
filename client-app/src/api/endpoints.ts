@@ -1,8 +1,8 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  ActivationRequest, Activation, CameraRequest, CameraScan, AdapterChange, AdapterSummary, Address, NewAdapters, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
-  CustomerDetail, CustomerPerson, CustomerSummary, Dealer, DealerDetails, DirectoryUser, HlsSession, IrMode, Me,
+  ActivationRequest, Activation, BillingRun, CameraRequest, CameraScan, AdapterChange, AdapterSummary, Address, NewAdapters, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
+  CustomerDetail, CustomerInvoices, CustomerPerson, CustomerSummary, Dealer, DealerDetails, DirectoryUser, HlsSession, InvoiceList, IrMode, Me,
   MemberRole, NewCustomer, Overview, Plan, PlanLine, Price, Pricing, RecordingMode, StorageTier, UserAction,
   UserSettings,
 } from "./types";
@@ -98,6 +98,14 @@ export function makeEndpoints(api: ApiClient) {
     getDealer: () => api.request<DealerDetails>("GET", "/directory/dealer"),
     updateOwnDealer: (change: Partial<Pick<DealerDetails, "name" | "email" | "phone">> & { address?: Address | null }) =>
       api.request<{ id: string; changed: string[] }>("PATCH", "/directory/dealer", change),
+
+    // Billing (DEALER-PANEL-PLAN.md Phase 8, D9): fake invoices, no payment.
+    listInvoices: (filter: { dealerId?: string; customerId?: string; period?: string } = {}) => {
+      const query = Object.entries(filter).filter(([, v]) => v).map(([k, v]) => `${k}=${q(v as string)}`).join("&");
+      return api.request<InvoiceList>("GET", `/directory/invoices${query ? `?${query}` : ""}`);
+    },
+    customerInvoices: (id: string) => api.request<CustomerInvoices>("GET", `/directory/customers/${q(id)}/invoices`),
+    runBillingPeriod: (period: string) => api.request<BillingRun>("POST", "/directory/billing/run-period", { period }),
 
     // Adding and removing cameras through the adapter (DEALER-PANEL-PLAN.md Phase 7, D16).
     scanForCameras: (thing: string) => api.request<{ requestId: string }>("POST", `/adapters/${q(thing)}/discover`),

@@ -775,9 +775,17 @@ def price_plan(prices, discount_percent, lines, retention_days, interval):
     return (monthly * 12 * (100 - discount_percent) + 50) // 100
 
 
-def _effective_status(status, trial_ends_at):
-    """A trial whose end has passed is an active plan: the stored version doesn't change with time."""
-    if status == "trial" and trial_ends_at is not None and trial_ends_at <= datetime.datetime.now(datetime.timezone.utc):
+def _cents_month(cents_period, interval):
+    """What a plan costs a month: an annual one is a twelfth of its year, to the nearest cent. The
+    customer totals and the fake invoices both count this way."""
+    return cents_period if interval == "monthly" else (cents_period + 6) // 12
+
+
+def _effective_status(status, trial_ends_at, at=None):
+    """A trial whose end has passed (by `at`, else now) is an active plan: the stored version doesn't
+    change with time."""
+    at = at or datetime.datetime.now(datetime.timezone.utc)
+    if status == "trial" and trial_ends_at is not None and trial_ends_at <= at:
         return "active"
     return status
 
@@ -800,7 +808,7 @@ def _plan_rows(con, where, **params):
         out.append({
             "id": pid, "activationId": act, "version": version, "status": status, "effectiveStatus": effective,
             "retentionDays": days, "interval": interval, "centsPeriod": cents, "currency": cur,
-            "centsMonth": 0 if effective not in BILLED else cents if interval == "monthly" else (cents + 6) // 12,
+            "centsMonth": 0 if effective not in BILLED else _cents_month(cents, interval),
             "trialEndsAt": trial_ends, "createdAt": created, "createdBy": by,
             "lines": [{"resolution": r, "recording": c, "quantity": mine.get((r, c), 0)} for r, c in CLASSES],
             "cameras": sum(mine.values())})
@@ -1080,6 +1088,161 @@ def op_update_own_dealer(con, actor, args):
     con.run(f"UPDATE vsz.org SET {sets}, updated_at = now() WHERE id = :d", d=actor["org"], **params)
     audit(con, actor, "update_own_dealer", "org", actor["org"], {k: v for k, v in f.items() if k != "address"})
     return {"id": actor["org"], "changed": sorted(f)}
+
+
+# --- billing (Phase 8, D9, D19): invoices, and the fake provider's period run -----------------------
+#
+# Data real, money fake: an invoice is one per customer per calendar month, with a line per adapter
+# plan it pays for, at the price stored with that plan version -- never the price list's price of the
+# day. The rules an invoice keeps are the database's (003_invoice_rules.sql). The provider seam itself
+# is vsz-directory-api's (BillingProvider), outside the VPC, where a real provider can be reached.
+
+PERIOD = re.compile(r"^([0-9]{4})-(0[1-9]|1[0-2])$")
+INVOICE_LIMIT = 500                                   # the newest; the answer says when there are more
+LINE_COLUMNS = ("p.version, p.billing_interval, p.cents_period, p.retention_days, a.thing_name, act.name, s.name, "
+                "(SELECT coalesce(sum(pl.quantity), 0) FROM vsz.plan_line pl WHERE pl.plan_id = p.id)")
+LINE_JOINS = ("JOIN vsz.adapter_activation act ON act.id = p.activation_id JOIN vsz.adapter a ON a.id = act.adapter_id "
+              "JOIN vsz.site s ON s.id = act.site_id")
+
+
+def _period(value):
+    """'2026-11' -> (its first day, the next month's first day): a billing period is a calendar month."""
+    m = PERIOD.match(value) if isinstance(value, str) else None
+    if not m:
+        raise DirectoryError("period: a month, such as 2026-11")
+    year, month = int(m.group(1)), int(m.group(2))
+    return datetime.date(year, month, 1), datetime.date(year + month // 12, month % 12 + 1, 1)
+
+
+def _this_month():
+    return _period(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m"))
+
+
+def _line(row):
+    """An invoice line -- a stored one, or one the run would write -- with what the page shows of its plan:
+    (plan id, activation id, cents, currency, then LINE_COLUMNS)."""
+    plan_id, act, cents, currency, version, interval, cents_period, days, thing, name, site, cameras = row
+    return {"planId": plan_id, "activationId": act, "cents": cents, "currency": currency, "version": version,
+            "interval": interval, "centsPeriod": cents_period, "retentionDays": days, "thingName": thing,
+            "name": name, "site": site, "cameras": int(cameras)}
+
+
+def _billable(con, start, end, customers=None):
+    """What the fake run bills for the month [start, end): for each customer, each of its adapters' plans
+    as the plan stood at the month's end -- or now, for the month under way -- when that plan was paid
+    for then: active, or a trial whose end had passed (D19). An annual plan is billed a twelfth of its
+    year each month. Returns (the moment billed, {customer id: [line]})."""
+    cutoff = con.run("SELECT least(now(), CAST(:e AS date)::timestamp AT TIME ZONE 'UTC')", e=end)[0][0]
+    rows = con.run(
+        "SELECT DISTINCT ON (p.activation_id) act.customer_id, p.status, p.trial_ends_at, p.id, p.activation_id, "
+        f"p.currency, {LINE_COLUMNS} FROM vsz.plan p {LINE_JOINS} "
+        "WHERE p.created_at <= :t AND (act.released_at IS NULL OR act.released_at > :t) "
+        "AND (CAST(:c AS uuid[]) IS NULL OR act.customer_id = ANY(CAST(:c AS uuid[]))) "
+        "ORDER BY p.activation_id, p.version DESC",
+        t=cutoff, c=None if customers is None else [str(c) for c in customers])
+    out = {}
+    for customer, status, trial_ends, plan_id, act, currency, version, interval, cents, days, thing, name, site, cameras in rows:
+        if _effective_status(status, trial_ends, at=cutoff) != "active":
+            continue                                  # a trial, cancelled or ended: nothing to bill
+        out.setdefault(customer, []).append(_line((plan_id, act, _cents_month(cents, interval), currency, version,
+                                                   interval, cents, days, thing, name, site, cameras)))
+    for lines in out.values():
+        lines.sort(key=lambda line: (line["site"].lower(), (line["name"] or "").lower(), line["thingName"]))
+    return cutoff, out
+
+
+def op_run_billing_period(con, actor, args):
+    """The fake provider's billing run (D9), for owners and administrators: for the month given, an
+    invoice for each customer with something to pay -- a line per adapter plan (_billable) -- issued and
+    marked provider 'fake'. No money moves. A customer invoiced for that month already keeps its invoice,
+    so running a month again bills only those not billed yet; a month that hasn't begun is refused."""
+    require(actor, *SYSTEM)
+    start, end = _period(args.get("period"))
+    if start > _this_month()[0]:
+        raise DirectoryError("that month hasn't begun: there is nothing to bill yet")
+    cutoff, billable = _billable(con, start, end)
+    billed = {r[0] for r in con.run("SELECT customer_id FROM vsz.invoice WHERE period_start = :s AND provider = 'fake'",
+                                    s=start)}
+    out = {"period": start.strftime("%Y-%m"), "periodStart": start, "periodEnd": end, "billedAt": cutoff,
+           "invoices": [], "alreadyInvoiced": 0, "nothingToBill": 0, "skipped": []}
+    for customer, name in con.run("SELECT id, name FROM vsz.org WHERE kind = 'customer' ORDER BY lower(name), id"):
+        lines = billable.get(customer, [])
+        if customer in billed:
+            out["alreadyInvoiced"] += 1
+            continue
+        if not lines:
+            out["nothingToBill"] += 1                 # on trial, cancelled, no plan, or no adapter
+            continue
+        currencies = {line["currency"] for line in lines}
+        if len(currencies) > 1:
+            out["skipped"].append({"customer": {"id": customer, "name": name},
+                                   "reason": "its plans are in different currencies"})
+            continue
+        currency, total = currencies.pop(), sum(line["cents"] for line in lines)
+        made = con.run("INSERT INTO vsz.invoice (customer_id, period_start, period_end, cents, currency, status, provider) "
+                       "VALUES (:c, :s, :e, :t, :cur, 'issued', 'fake') "
+                       "ON CONFLICT (customer_id, period_start, provider) DO NOTHING RETURNING id",
+                       c=customer, s=start, e=end, t=total, cur=currency)
+        if not made:                                  # another run billed it meanwhile
+            out["alreadyInvoiced"] += 1
+            continue
+        for line in lines:
+            con.run("INSERT INTO vsz.invoice_line (invoice_id, plan_id, cents) VALUES (:i, :p, :c)",
+                    i=made[0][0], p=line["planId"], c=line["cents"])
+        out["invoices"].append({"id": made[0][0], "customer": {"id": customer, "name": name},
+                                "cents": total, "currency": currency, "lines": len(lines)})
+    audit(con, actor, "run_billing_period", detail={"period": out["period"], "invoices": len(out["invoices"]),
+                                                    "cents": sum(i["cents"] for i in out["invoices"])})
+    return out
+
+
+def op_list_invoices(con, actor, args):
+    """Invoices in the actor's scope, the newest month first, each with its lines (D9, D19): a dealer its
+    customers'; owners and administrators every one, or one dealer's (dealerId). customerId narrows to
+    one customer the actor may manage, period to one month."""
+    require(actor, "dealer", *SYSTEM)
+    dealer = actor["org"] if actor["role"] == "dealer" else args.get("dealerId")
+    if dealer is not None and actor["role"] != "dealer":
+        an_id(dealer, "dealer id")
+    customer = _customer(con, actor, args["customerId"])[0] if args.get("customerId") is not None else None
+    start = _period(args["period"])[0] if args.get("period") is not None else None
+    rows = con.run(
+        "SELECT i.id, i.period_start, i.period_end, i.cents, i.currency, i.status, i.provider, i.created_at, "
+        "c.id, c.name, d.id, d.name FROM vsz.invoice i JOIN vsz.org c ON c.id = i.customer_id "
+        "JOIN vsz.org d ON d.id = c.parent_id "
+        "WHERE (CAST(:d AS uuid) IS NULL OR d.id = CAST(:d AS uuid)) "
+        "AND (CAST(:c AS uuid) IS NULL OR c.id = CAST(:c AS uuid)) "
+        "AND (CAST(:s AS date) IS NULL OR i.period_start = CAST(:s AS date)) "
+        "ORDER BY i.period_start DESC, lower(c.name), i.id LIMIT :n",
+        d=None if dealer is None else str(dealer), c=None if customer is None else str(customer), s=start,
+        n=INVOICE_LIMIT + 1)
+    shown = rows[:INVOICE_LIMIT]
+    lines = {}
+    for row in [] if not shown else con.run(
+            f"SELECT l.invoice_id, p.id, p.activation_id, l.cents, p.currency, {LINE_COLUMNS} "
+            f"FROM vsz.invoice_line l JOIN vsz.plan p ON p.id = l.plan_id {LINE_JOINS} "
+            "WHERE l.invoice_id = ANY(CAST(:ids AS uuid[])) "
+            "ORDER BY lower(s.name), lower(coalesce(act.name, '')), a.thing_name", ids=[str(r[0]) for r in shown]):
+        lines.setdefault(row[0], []).append(_line(row[1:]))
+    return {"invoices": [{"id": r[0], "periodStart": r[1], "periodEnd": r[2], "cents": r[3], "currency": r[4],
+                          "status": r[5], "provider": r[6], "createdAt": r[7], "customer": {"id": r[8], "name": r[9]},
+                          "dealer": {"id": r[10], "name": r[11]}, "lines": lines.get(r[0], [])} for r in shown],
+            "truncated": len(rows) > INVOICE_LIMIT}
+
+
+def op_billing_preview(con, actor, args):
+    """The provider's quote for a customer: what the fake run would bill it for the month under way if it
+    ran now, and whether that month is invoiced already. Nothing is written."""
+    cid = _customer(con, actor, args.get("customerId"))[0]
+    start, end = _this_month()
+    cutoff, billable = _billable(con, start, end, [cid])
+    lines = billable.get(cid, [])
+    invoiced = con.run("SELECT id FROM vsz.invoice WHERE customer_id = :c AND period_start = :s AND provider = 'fake'",
+                       c=cid, s=start)
+    return {"period": start.strftime("%Y-%m"), "periodStart": start, "periodEnd": end, "billedAt": cutoff,
+            "lines": lines, "cents": sum(line["cents"] for line in lines),
+            "currency": lines[0]["currency"] if lines else _setting(con, "currency"),
+            "invoiceId": invoiced[0][0] if invoiced else None}
 
 
 # --- adapters: Cloud IDs, activation, release, revoke (Phase 6, D15) --------------------------------
@@ -1394,6 +1557,9 @@ USER_OPS = {
     "customer_users": (op_customer_users, False), "put_plan": (op_put_plan, True),
     "cancel_plan": (op_cancel_plan, True), "plan_history": (op_plan_history, False),
     "get_dealer": (op_get_dealer, False), "update_own_dealer": (op_update_own_dealer, True),
+    # billing (Phase 8)
+    "run_billing_period": (op_run_billing_period, True), "list_invoices": (op_list_invoices, False),
+    "billing_preview": (op_billing_preview, False),
     # adapters (Phase 6)
     "generate_adapters": (op_generate_adapters, True), "allocate_adapter": (op_allocate_adapter, True),
     "new_code": (op_new_code, True), "activate_adapter": (op_activate_adapter, True),

@@ -274,3 +274,34 @@ export interface CameraRequest {
   requestId: string; status: "sent" | "registering" | "done" | "failed";
   cameraId?: string; error?: string; reactivated?: boolean;
 }
+
+// --- billing (DEALER-PANEL-PLAN.md Phase 8, D9): data real, money fake -------------------------------
+
+/** A line of an invoice -- or of the estimate of the next one: an adapter's plan, billed for a month. */
+export interface InvoiceLine {
+  planId: string; activationId: string;
+  /** What this month costs: an annual plan's line is a twelfth of its year (centsPeriod). */
+  cents: number; currency: string;
+  version: number; interval: BillingInterval; centsPeriod: number; retentionDays: number;
+  thingName: string; name: string | null; site: string; cameras: number;
+}
+export interface Invoice {
+  id: string; periodStart: string; periodEnd: string; cents: number; currency: string;
+  status: "draft" | "issued" | "paid" | "void"; provider: string; createdAt: string;
+  customer: { id: string; name: string }; dealer: { id: string; name: string }; lines: InvoiceLine[];
+}
+export interface InvoiceList { invoices: Invoice[]; truncated: boolean }
+/** The provider's quote: what a run would bill for the month under way, now. */
+export interface NextInvoice {
+  period: string; periodStart: string; periodEnd: string; billedAt: string;
+  lines: InvoiceLine[]; cents: number; currency: string;
+  /** The month's invoice, when it has been billed already. */
+  invoiceId: string | null;
+}
+export interface CustomerInvoices extends InvoiceList { next: NextInvoice }
+export interface BillingRun {
+  period: string; periodStart: string; periodEnd: string; billedAt: string;
+  invoices: Array<{ id: string; customer: { id: string; name: string }; cents: number; currency: string; lines: number }>;
+  alreadyInvoiced: number; nothingToBill: number;
+  skipped: Array<{ customer: { id: string; name: string }; reason: string }>;
+}

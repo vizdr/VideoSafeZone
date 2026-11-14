@@ -17,6 +17,7 @@ const fake = vi.hoisted(() => {
     endpoints: {
       me: fn(), overview: fn(), listDealers: fn(), createDealer: fn(), updateDealer: fn(), listCustomers: fn(),
       listAdapters: fn(), listUsers: fn(), inviteUser: fn(), userAction: fn(), getPricing: fn(), putPricing: fn(),
+      listInvoices: fn(), runBillingPeriod: fn(),
     },
   };
 });
@@ -24,6 +25,8 @@ vi.mock("../src/api", () => ({ session: fake.session, endpoints: fake.endpoints 
 
 import AppRail from "../src/components/AppRail.vue";
 import { makeRouter } from "../src/router";
+import { currentPeriod, monthLabel } from "../src/dealer/billing";
+import SystemBilling from "../src/views/system/SystemBilling.vue";
 import SystemCustomers from "../src/views/system/SystemCustomers.vue";
 import SystemDealers from "../src/views/system/SystemDealers.vue";
 import SystemOverview from "../src/views/system/SystemOverview.vue";
@@ -379,5 +382,72 @@ describe("Pricing", () => {
     await button(w, "Save the price list").trigger("click");
     expect(alerts(w)).toContain("Give a price for 2MP motion, 7 days.");
     expect(e.putPricing).not.toHaveBeenCalled();
+  });
+});
+
+describe("Billing", () => {
+  const INVOICE = { id: "i-1", periodStart: "2026-10-01", periodEnd: "2026-11-01", cents: 2240, currency: "EUR", status: "issued",
+    provider: "fake", createdAt: "2026-11-01T10:00:00Z", customer: { id: "c-1", name: "Acme" }, dealer: { id: "d-1", name: "North" },
+    lines: [{ planId: "p-2", activationId: "act-1", cents: 2240, currency: "EUR", version: 2, interval: "monthly", centsPeriod: 2240,
+              retentionDays: 30, thingName: "adapter-01", name: "Hall", site: "Home", cameras: 4 }] };
+  const RUN = { period: currentPeriod(), periodStart: "", periodEnd: "", billedAt: "",
+    invoices: [{ id: "i-1", customer: { id: "c-1", name: "Acme" }, cents: 2240, currency: "EUR", lines: 1 }],
+    alreadyInvoiced: 1, nothingToBill: 2, skipped: [{ customer: { id: "c-7", name: "Mixed" }, reason: "its plans are in different currencies" }] };
+
+  beforeEach(() => {
+    e.listDealers.mockReturnValue(ok([NORTH, SOUTH]));
+    e.listInvoices.mockReturnValue(ok({ invoices: [], truncated: false }));
+  });
+
+  it("runs the month under way by default, says what it made, and lists the invoices again", async () => {
+    e.runBillingPeriod.mockReturnValue(ok(RUN));
+    const w = await mountTab(SystemBilling, "/system/billing");
+    expect(w.find("[data-test=demo-banner]").text()).toBe("Demo billing: no payment is taken.");
+    expect((w.find("[data-test=period]").element as HTMLInputElement).value).toBe(currentPeriod());
+    e.listInvoices.mockReturnValue(ok({ invoices: [INVOICE], truncated: false }));
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(e.runBillingPeriod).toHaveBeenCalledWith(currentPeriod());
+    const said = w.find("[data-test=run-result]").text();
+    expect(said).toContain(monthLabel(currentPeriod()));
+    expect(said).toContain("1 invoice,");
+    expect(said).toContain("1 invoiced already, 2 with nothing to pay");
+    expect(w.text()).toContain("Mixed wasn't billed: its plans are in different currencies.");
+    expect(e.listInvoices).toHaveBeenCalledTimes(2);
+    expect(w.find("[data-test=invoice]").text()).toContain("North");                  // whose customer it is
+  });
+
+  it("won't run a month that hasn't begun", async () => {
+    const w = await mountTab(SystemBilling, "/system/billing");
+    const [y, m] = currentPeriod().split("-").map(Number);
+    await w.find("[data-test=period]").setValue(m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`);
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(e.runBillingPeriod).not.toHaveBeenCalled();
+    expect(w.find("[data-test=run-error]").text()).toContain(monthLabel(currentPeriod()));
+  });
+
+  it("shows the API's refusal", async () => {
+    e.runBillingPeriod.mockReturnValue(refused(403, "not allowed for your role"));
+    const w = await mountTab(SystemBilling, "/system/billing", "system_owner");
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(w.find("[data-test=run-error]").text()).toBe("not allowed for your role");
+    expect(w.find("[data-test=run-result]").exists()).toBe(false);
+  });
+
+  it("lists one dealer's invoices when asked, and has no field but the month", async () => {
+    const w = await mountTab(SystemBilling, "/system/billing");
+    expect(e.listInvoices).toHaveBeenLastCalledWith({ dealerId: undefined });
+    await w.find("[data-test=dealer-filter]").setValue("d-1");
+    await flushPromises();
+    expect(e.listInvoices).toHaveBeenLastCalledWith({ dealerId: "d-1" });
+    expect(w.findAll("input").map(i => i.attributes("type"))).toEqual(["month"]);    // no card or bank fields (D9)
+  });
+
+  it("is a tab of the System console", async () => {
+    const router = makeRouter(() => true, () => "system_owner");
+    await router.push("/system/billing");
+    expect(router.currentRoute.value.name).toBe("system-billing");
   });
 });

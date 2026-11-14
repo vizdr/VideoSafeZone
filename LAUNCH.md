@@ -908,6 +908,23 @@ camera left the camera list too, and a camera whose identity changed stopped bei
 from `cam-100` on, the sudo rule must allow the longer names — `bash setup/setup-system.sh` once
 installs it.
 
+### Billing (fake)
+
+Billing is a demo (`DEALER-PANEL-PLAN.md` Phase 8, D9): plans and invoices are real data, no money
+moves. Nothing new in AWS beyond a migration; in this order, once:
+
+```bash
+bash cloud/deploy.sh lambda vsz-db-admin          # ships migration 003 (what an invoice may hold) ...
+bash cloud/deploy.sh db-migrate --dry-run         # ... lists it ...
+bash cloud/deploy.sh db-migrate                   # ... and applies it
+bash cloud/deploy.sh lambda vsz-directory         # the billing run, invoices, the estimate
+bash cloud/deploy.sh lambda vsz-directory-api     # their routes, and the billing provider seam (the fake)
+bash cloud/deploy.sh page                         # System → Billing, invoices in the portal
+```
+
+Invoices are made by hand: System → Billing → *Run billing period (fake)* for a month (owners and
+administrators). Running a month again bills only the customers not billed for it yet.
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

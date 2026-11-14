@@ -503,7 +503,14 @@ and grants in `cloud/db/migrations/`. A fake can't check those, so they run agai
   operation is called directly, since `refused_op`'s savepoint would roll the attempt back.
   (Phase 7 changed no SQL; its tests are in the main suite: `tests/admin/test_admin_adapters.py`,
   `tests/adapter/test_foreign_rows.py`, `tests/cloud/test_adapter_cameras.py` and the agent's.
-  `tests/fixtures/adapter.env` says `ADOPT_UNSTAMPED_ROWS=yes`, as `adapter-01`'s.)
+  `tests/fixtures/adapter.env` says `ADOPT_UNSTAMPED_ROWS=yes`, as `adapter-01`'s.) Since Phase 8
+  (137 tests), billing (`tests_db/test_billing.py`): the fake period run — one invoice per customer
+  with something to pay, a line per adapter plan at its stored price, an annual plan a twelfth of
+  its year, a trial adding nothing until it has ended, a month billed as its plans stood at its end,
+  a second run billing only the customers not billed yet — the invoices in each role's scope, the
+  estimate, and migration 003's rules. An invoice's total is checked at COMMIT, which a test's
+  rolled-back transaction never reaches; `committed()` makes those checks with `SET CONSTRAINTS ALL
+  IMMEDIATE`.
 - **Proved to catch regressions:** granting `vsz_app` UPDATE on plans turns two tests red;
   dropping the bootstrap's `REVOKE SET OPTION` turns one red here and two in
   `tests/cloud/test_db_admin.py`. They found one bug before anything was deployed: a trigger

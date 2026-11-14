@@ -468,10 +468,12 @@ read-only) and per account (Live view). The old page's player logic lives on, be
 unchanged, in `src/player/camera-controller.ts`, with its FoundAndFixed fixes under test. What a
 signed-in person sees follows their role (`DEALER-PANEL-PLAN.md` D6, D7): owners and administrators
 also get the **System console** (`src/views/system/`: dealers, customers, users, adapters, the
-price list, over `/directory/*`), and dealers, owners and administrators the **Dealer portal**
-(`src/views/dealer/`: customers, a plan per adapter priced as it is edited, plan history, cameras,
-people) — dealers instead of the camera pages. The page only hides; `vsz-directory` decides every
-call again from the database. A plan's price is computed twice, by the page for the preview
+price list, the fake billing run, over `/directory/*`), and dealers, owners and administrators the
+**Dealer portal** (`src/views/dealer/`: customers, a plan per adapter priced as it is edited, plan
+history, invoices, cameras, people) — dealers instead of the camera pages. The page only hides;
+`vsz-directory` decides every call again from the database. Billing is data real, money fake (D9):
+invoices are the directory's, a provider sits behind `BillingProvider` in `vsz-directory-api`
+(today `FakeBillingProvider`), and no page has a card or bank field. A plan's price is computed twice, by the page for the preview
 (`src/pricing.ts`) and by the server when saved (`price_plan`, the stored figure), and both are
 tested against `tests/fixtures/pricing-cases.json`: change one, change both.
 

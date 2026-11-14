@@ -444,8 +444,8 @@ and the folder for that adapter's Pi (`create`), and deactivates the certificate
 and the registry write of a release.
 
 **D16. Cameras are added from the web page, through the adapter.** The browser can't reach the
-customer's LAN and WS-Discovery works only on it, so the page asks the adapter, over the Pi's own
-outbound MQTT session — the zero-inbound-ports rule holds:
+customer's LAN and WS-Discovery works only on it (*why*: the end of D16), so the page asks the
+adapter, over the Pi's own outbound MQTT session — the zero-inbound-ports rule holds:
 1. `POST /adapters/<thing>/discover` — Lambda `adapter-cameras` on `kvs-demo-api`, outside the VPC,
    refusing unless `<thing>` is in the caller's `vsz_adapters` — sends `discover` to
    `adapter/<thing>/cmd`.
@@ -470,6 +470,36 @@ The agent runs as the admin GUI's user, so the sudo rule for `provision-camera.s
 registers a camera only once the adapter is activated (it reads the retained config). So every
 camera, whichever GUI adds it, belongs to an activated adapter and through it to a customer.
 Dealers don't add cameras from the web page (D5); on site, a technician uses the admin GUI.
+
+*Why the browser can't reach the customer's LAN* (analysed 2026-11-14, at the user's request; the
+cameras' answers measured from the Pi that day). Five barriers:
+- **The browser isn't on the LAN.** The page is used from anywhere — a phone on mobile data, an
+  office — and adding cameras without being on site is what D16 is for. The cameras have private
+  addresses (`192.168.178.x`) behind the customer's router: nothing on the internet routes to them,
+  and making a route (a port forward, a VPN into the LAN) is the inbound path the project rules out
+  (`OUTBOUND-CLOUD.md` §4); behind CGNAT, as on mobile networks, it isn't even possible. Lambda is
+  one more outside client (guide §16.2.1).
+- **WS-Discovery stays on the segment.** A probe is UDP multicast to `239.255.255.250:3702`, and
+  multicast doesn't cross a router: a VPN that carried the browser's traffic into the LAN still
+  wouldn't carry the probe (`NETWORK.md` §2).
+- **A web page can't send a probe, even on the LAN.** A page has HTTP(S), WebSocket, WebRTC and
+  WebTransport — no UDP of its own. Chrome's Direct Sockets API, multicast included, is offered only
+  to Isolated Web Apps (installed, signed apps, today on ChromeOS), never to a page loaded from a URL
+  such as CloudFront's.
+- **Nor rely on talking to a camera whose address it knows.** ONVIF is SOAP over plain HTTP — none
+  of the three cameras answers HTTPS — and the page is HTTPS. Browsers block that as mixed content;
+  Chromium-based ones, since Local Network Access (2025), let it through once the person allows the
+  site to connect to devices on the local network. Even then the camera has to answer CORS, a SOAP
+  POST's preflight included, and that is down to its firmware: cam-02 allows any origin
+  (`Access-Control-Allow-Origin: *`), cam-03 refuses the preflight (501), cam-04 closes the
+  connection. And no browser speaks RTSP.
+- **Registering is the Pi's work, wherever the browser is.** It adds the MediaMTX path through the
+  API on `127.0.0.1:9997`, provisions the `kvs-cam@` unit through sudo, and creates the KVS stream
+  and the registry row with the Pi's certificate (`camera_registration._create`).
+The admin GUI never crossed these lines either: its page talks only to the Pi (plain HTTP, same
+origin), and its Flask process does the discovery and the ONVIF calls. So the one party on the
+cameras' segment that can probe, talk to any camera and register it is the Pi, and the one channel
+to it that needs no inbound port is its own MQTT session — D16's route.
 
 **D17. One sign-in page for everyone**, laid out like Videoloft's but **VideoSafeZone**'s: the
 name VideoSafeZone (today's sign-in page already shows it) and its logo, *Email address*, *Password* with show/hide, *Forgotten password?* (a code by email, then a new password),
@@ -711,8 +741,9 @@ admin (with `?dealerId=` to narrow).
 | `GET /directory/dealer` · `PATCH` | dealer, admin | own company details |
 | `GET /directory/dealers` · `POST` · `PATCH /directory/dealers/{id}` | owner, admin | dealers |
 | `GET /directory/users` · `POST` | owner (a dealer's staff, a customer's holder), admin (any role) | users across the system |
-| `GET /directory/invoices` | dealer (scope), owner, admin | fake invoices (D9) |
-| `POST /directory/billing/run-period` | admin | fake billing run (D9) |
+| `GET /directory/invoices` | dealer (scope), owner, admin | fake invoices (D9), with their lines; `?dealerId=`, `?customerId=`, `?period=` |
+| `GET /directory/customers/{id}/invoices` | dealer (scope), owner, admin | one customer's invoices, and the estimate of its next one (Phase 8) |
+| `POST /directory/billing/run-period` | owner, admin | fake billing run for a month (D9; D6's table — first written here as admin only) |
 | `GET /directory/overview` | owner, admin | counts per dealer, plan totals, cameras registered vs. in plans |
 
 Email and password changes go from the page straight to Cognito, with the user's access token
@@ -764,6 +795,8 @@ has an account, as on Videoloft — accepted; the staff case stays hidden.
   vectors (`tests/fixtures/pricing-cases.json`, read by pytest and Vitest) so they can't drift.
   The server's figure is the one stored. *Cancel subscription* ends that adapter's plan.
 - **Plan history:** per adapter: versions with who, when, what changed, price.
+- **Invoices** (Phase 8): the month so far, as an estimate, then the months billed, each with a line
+  per adapter.
 - **Cameras:** the customer's inventory (D5), grouped by adapter, with each adapter's plan vs. actual, each camera's resolution mapped
   to a class (≤ 2.1 Mpx → 2 MP, ≤ 4.2 → 4 MP, else 8 MP) and its recording mode mapped to motion /
   continuous — a hint, not a rule.
@@ -1444,6 +1477,62 @@ tab; the admin's "run billing period (fake)"; invoices listed per dealer and cus
 
 *Verify:* a fake period run produces one invoice per customer, with a line per adapter's active plan
 at its stored price; a trial plan adds no line until its trial ends; the banner is on every billing screen.
+In detail, after Phase 8's build: as the demo owner, System → Billing → *Run billing period (fake)*
+for the month under way: the demo customer gets no invoice while `adapter-01` is on its trial (the
+result says so: "nothing to pay"); after the demo dealer sets a plan and the trial has ended (or on a
+customer whose trial has), a run of a later month — or of this one, for a customer not billed yet —
+makes its invoice, a line per adapter at the price shown on its Plan page (an annual plan a twelfth
+of it); running the same month again makes nothing new. The dealer sees the invoice on its Billing
+tab and on the customer's Invoices page, another dealer doesn't; the banner is on all three screens.
+
+*Built 2026-11-14* (1441 offline pytest, 137 tests_db, 267 Vitest; again across two sessions of the
+same conversation after an SSH drop — the second took over at a clean point, with the first's account
+of every file):
+- **Trial length from `price_setting`** was already done: activation (Phase 6) starts the trial
+  with `trial_days`, and System → Pricing edits it (Phase 4).
+- **The fake run** (`vsz-directory` `run_billing_period`; `POST /directory/billing/run-period
+  {period: "2026-11"}`): a billing period is a calendar month in UTC; each customer with something
+  to pay gets one invoice, `issued`, `provider = 'fake'`, with a line per adapter plan **as it
+  stood at the month's end** — or now, for the month under way: the newest version saved by then,
+  billed when it was paid for then (active, or a trial whose end had passed), at the price stored
+  with it, never the price list's of the day. An annual plan is billed a twelfth of its year each
+  month, as the customer totals count it — a real provider would bill the year at once, behind the
+  same seam. An adapter released by then adds nothing. A customer invoiced for the month already
+  keeps its invoice (a second run bills only the rest; `ON CONFLICT` covers two runs at once); a
+  month that hasn't begun is refused. **Owners and administrators** run it, as D6's table says —
+  §6 had said administrators only, and was corrected. The answer counts what was invoiced, what was
+  invoiced already, what had nothing to pay, and what was skipped (plans in two currencies).
+- **Invoices** (`list_invoices`; `GET /directory/invoices`): a dealer its customers', owners and
+  administrators every one or a dealer's; `?customerId=` (another dealer's customer: "no such
+  customer"), `?period=`; the newest 500, then `truncated`. **The estimate** (`billing_preview`,
+  the provider's quote): what a run would bill a customer for this month now, nothing written;
+  `GET /directory/customers/<id>/invoices` gives both.
+- **The seam** (`vsz-directory-api`): `BillingProvider` with D9's five — `quote`, `start`, `change`,
+  `cancel`, `list_invoices` — and `FakeBillingProvider`, whose `run_period` is the fake's own (a real
+  provider runs its own cycles). It sits outside the VPC on purpose: a real provider is an internet
+  API, which `vsz-directory`, in the VPC without a NAT, can't reach. The provider is told after the
+  directory has changed — activation starts a plan; a saved change changes it; cancel, release,
+  removal and a revoke of an activated adapter cancel it — and one that fails is reported
+  (`billingUnsent`), never undone. The fake tells no one: the plan's versions are the record.
+- **What an invoice may hold, kept by the database** (`003_invoice_rules.sql`): a line bills a plan
+  of the invoice's own customer, in the invoice's currency; each adapter activation once per
+  invoice; the total is the sum of the lines, checked at commit (deferred constraint triggers).
+- **Screens:** System → **Billing** (the banner, *Run billing period (fake)* for a month up to this
+  one, what the run made, every invoice with a dealer filter); the portal's Billing tab gains the
+  invoices; a customer's pages gain **Invoices** (the month so far, then the months billed). An
+  invoice opens to its lines: the adapter, its plan version, cameras, storage, and an annual plan's
+  year. The banner ("Demo billing: no payment is taken.") is one component on all three; no card or
+  bank field anywhere.
+- **Tests:** `tests_db/test_billing.py` (20), `tests/cloud/test_directory_api.py` (+9: the routes and
+  their filters, the run's body, the hooks after each change and none after a refusal, a failing
+  provider reported, the fake telling no one), `client-app/tests/console.spec.ts` (+5) and
+  `portal.spec.ts` (+7). Broken on purpose once each, turning red: the annual line billed whole, the
+  trial ignored, the month's end ignored, a released adapter billed, the "invoiced already" check
+  dropped (first green: `ON CONFLICT` still stopped the second invoice, so the test now pins the
+  count too), a dealer seeing every dealer's invoices, a dealer running billing, each of 003's four
+  rules, the hook after a release, a change told when nothing changed, the run passing the whole
+  body, the filters dropped, a month to come accepted by the page, the annual line's text, the
+  customer column on the customer's own page.
 
 ### Phase 9: Account page and additional users (D18)
 
@@ -1533,9 +1622,10 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 6: deployed (db-migrate 002, both directory functions, `provision.sh adapters`, the Pi's agent and admin GUI restarted, `deploy.sh page`), checked read-only (2026-11-07)
 - [ ] Phase 6: its *Verify* — the activation flow (a Cloud ID used, refused, released)
 - [x] Phase 7: Adding cameras from the web page (allocated IDs, per-Pi filtering) — built and tested (2026-11-07)
-- [ ] Phase 7: deployed (`deploy.sh lambda list-cameras`, `lambda publish-cmd`, `provision.sh cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page`) and its *Verify* recorded
-- [ ] Phase 7 addition (unregister any camera, Re-register): `deploy.sh lambda list-cameras`, `lambda adapter-cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page`
-- [ ] Phase 8: Billing seam with fakes
+- [x] Phase 7: deployed (`deploy.sh lambda list-cameras`, `lambda publish-cmd`, `provision.sh cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page`, 2026-11-08); the user reports Phase 7 complete (2026-11-14)
+- [x] Phase 7 addition (unregister any camera, Re-register): `deploy.sh lambda list-cameras`, `lambda adapter-cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page` (2026-11-08)
+- [x] Phase 8: Billing seam with fakes — built and tested (2026-11-14)
+- [ ] Phase 8: deployed (`deploy.sh lambda vsz-db-admin`, `db-migrate` (003), `lambda vsz-directory`, `lambda vsz-directory-api`, `deploy.sh page`) and its *Verify* recorded
 - [ ] Phase 9: Account page and additional users
 - [ ] Phase 10: A second adapter at another customer — spike, device isolation
 - [ ] §9 measurements recorded here

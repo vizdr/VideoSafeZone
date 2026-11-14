@@ -1,6 +1,5 @@
 <script setup lang="ts">
-// The System console for owners and administrators (DEALER-PANEL-PLAN.md §7.2). Billing joins in
-// Phase 8; generating adapters with their Cloud IDs in Phase 6.
+// The System console for owners and administrators (DEALER-PANEL-PLAN.md §7.2).
 const tabs = [
   { name: "system-overview", label: "Overview" },
   { name: "system-dealers", label: "Dealers" },
@@ -8,6 +7,7 @@ const tabs = [
   { name: "system-users", label: "Users" },
   { name: "system-adapters", label: "Adapters" },
   { name: "system-pricing", label: "Pricing" },
+  { name: "system-billing", label: "Billing" },
 ];
 </script>
 
