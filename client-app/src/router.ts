@@ -38,7 +38,7 @@ export function makeRoutes(role: () => Role | null): RouteRecordRaw[] {
         { path: "cameras/add/:thing?", name: "add-cameras", component: () => import("./views/AddCamerasView.vue"),
           meta: { roles: CUSTOMER_ROLES } },
         { path: "settings/:cameraId?/:section?", name: "settings", component: SettingsView, meta: cameras },
-        { path: "account", name: "account", component: AccountView },   // DEALER-PANEL-PLAN.md D18
+        { path: "account/:tab?", name: "account", component: AccountView },   // DEALER-PANEL-PLAN.md D18: details, plans, users
         {
           // The dealer portal (DEALER-PANEL-PLAN.md §7.1, D7): dealers, and owners and administrators
           // across every dealer. A dealer's own details are the dealer's.

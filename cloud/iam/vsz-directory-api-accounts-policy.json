@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DeleteTheSignInOfAnInvitationCancelledBeforeItWasUsed",
+      "Effect": "Allow",
+      "Action": "cognito-idp:AdminDeleteUser",
+      "Resource": "arn:aws:cognito-idp:eu-central-1:596633517506:userpool/eu-central-1_5QDHHWlPI"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import CameraList from "../components/CameraList.vue";
 import HevcNote from "../components/HevcNote.vue";
 import { useAuthStore } from "../stores/auth";
 import { useCamerasStore } from "../stores/cameras";
+import { useDirectoryStore } from "../stores/directory";
 import { usePlayersStore } from "../stores/players";
 import { useUserSettingsStore } from "../stores/userSettings";
 
@@ -15,6 +16,7 @@ const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 const cameras = useCamerasStore();
+const directory = useDirectoryStore();
 const players = usePlayersStore();
 const userSettings = useUserSettingsStore();
 
@@ -44,6 +46,7 @@ watch(() => auth.signedIn, signedIn => {
   if (signedIn) return;
   players.clear();
   cameras.clear();
+  directory.clear();
   userSettings.clear();
   void router.replace({ name: "login" });
 });

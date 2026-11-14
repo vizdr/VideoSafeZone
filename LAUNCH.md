@@ -925,6 +925,25 @@ bash cloud/deploy.sh page                         # System → Billing, invoices
 Invoices are made by hand: System → Billing → *Run billing period (fake)* for a month (owners and
 administrators). Running a month again bills only the customers not billed for it yet.
 
+### An account's own pages: Plan & Billing, Additional users
+
+The Account page gains Plan & Billing (the holder's) and Additional users (the holder's and Super
+Admins'), and the camera list groups by place (`DEALER-PANEL-PLAN.md` Phase 9, D18). No migration. In
+this order, once:
+
+```bash
+bash cloud/deploy.sh lambda vsz-directory         # the account's people, Plan & Billing, adapters in /me
+bash cloud/deploy.sh lambda vsz-directory-api     # their routes; the registry check; Cognito invite, resend, delete
+bash cloud/provision.sh accounts --dry-run        # what it would add, changing nothing
+bash cloud/provision.sh accounts                  # the API may delete the sign-in of an invitation cancelled
+                                                  # before it was used; checked as the demo holder
+bash cloud/deploy.sh page                         # the Account page's tabs, the camera list by place
+```
+
+Without `provision.sh accounts`, cancelling a pending invite still takes the person out of the
+directory, but their Cognito sign-in stays (the page says so), and inviting that address again is
+refused until it is deleted by hand (`aws cognito-idp admin-delete-user`).
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

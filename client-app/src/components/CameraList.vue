@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import Button from "openvue/button";
 import IconField from "openvue/iconfield";
 import InputIcon from "openvue/inputicon";
 import InputText from "openvue/inputtext";
 import Message from "openvue/message";
 import ToggleSwitch from "openvue/toggleswitch";
-import { cameraName, groupCameras, matchesQuery } from "../cameras/list";
+import { cameraName, groupByPlace, matchesQuery } from "../cameras/list";
+import { useAuthStore } from "../stores/auth";
 import { useCamerasStore } from "../stores/cameras";
+import { useDirectoryStore } from "../stores/directory";
 import { usePlayersStore } from "../stores/players";
 
 const props = defineProps<{ selected?: string }>();
@@ -15,6 +17,11 @@ const emit = defineEmits<{ select: [id: string] }>();
 
 const store = useCamerasStore();
 const players = usePlayersStore();
+const directory = useDirectoryStore();
+const auth = useAuthStore();
+// Where a customer's cameras are -- their accounts' sites and adapters -- for the groups below. Asked
+// once per sign-in (the store keeps it); staff have no accounts, so their list is grouped by tag only.
+onMounted(() => { if (auth.role === "customer") void directory.load(); });
 
 // The dot is the archive check's answer (FoundAndFixed.md #83): footage reaching the cloud or not.
 function dot(id: string): { cls: string; label: string } {
@@ -35,9 +42,11 @@ function setPreview(on: boolean): void {
 }
 const failed = ref(new Set<string>());
 // Cameras in use only: an unregistered one is listed under Cloud adapters → Cameras alone (the user,
-// 2026-11-08), with Re-register.
-const groups = computed(() => groupCameras(store.active.filter(c => matchesQuery(c, query.value))));
-const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length, 0));
+// 2026-11-08), with Re-register. Grouped by place -- account, site, adapter -- when there is more than
+// one (DEALER-PANEL-PLAN.md D18, D19), then by tag.
+const places = computed(() => groupByPlace(store.active.filter(c => matchesQuery(c, query.value)),
+                                           directory.me?.accounts ?? []));
+const shown = computed(() => places.value.reduce((n, p) => n + p.groups.reduce((m, g) => m + g.cameras.length, 0), 0));
 </script>
 
 <template>
@@ -63,8 +72,11 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
     </p>
     <p v-else-if="store.loaded && !shown" class="muted">No camera matches “{{ query }}”.</p>
 
-    <template v-for="g in groups" :key="g.tag ?? ''">
-      <h3 v-if="g.tag !== null || groups.length > 1" class="group">{{ g.tag ?? "Untagged" }}</h3>
+    <template v-for="place in places" :key="place.key">
+      <h3 v-if="place.label" class="place" data-test="place">{{ place.label }}</h3>
+      <template v-for="g in place.groups" :key="g.tag ?? ''">
+      <component :is="place.label ? 'h4' : 'h3'" v-if="g.tag !== null || place.groups.length > 1" class="group">
+        {{ g.tag ?? "Untagged" }}</component>
       <ul class="cams">
         <li v-for="c in g.cameras" :key="c.id">
           <button type="button" class="cam" :class="{ selected: c.id === props.selected }"
@@ -80,6 +92,7 @@ const shown = computed(() => groups.value.reduce((n, g) => n + g.cameras.length,
           </button>
         </li>
       </ul>
+      </template>
     </template>
   </section>
 </template>
@@ -92,6 +105,7 @@ h2 { margin: 0; font-size: 1.05rem; }
         background: var(--p-surface-950); align-self: center; }
 .mini img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .count { color: var(--p-text-muted-color); font-weight: normal; }
+.place { margin: 1.1rem 0 0.2rem; font-size: 0.9rem; font-weight: 600; }
 .group {
   margin: 1rem 0 0.25rem;
   font-size: 0.8rem;

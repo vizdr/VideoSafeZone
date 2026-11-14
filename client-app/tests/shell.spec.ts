@@ -3,11 +3,12 @@ import OpenVue from "openvue/config";
 import ToggleSwitch from "openvue/toggleswitch";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Camera } from "../src/api/types";
-import { codecLabel, groupCameras, matchesQuery } from "../src/cameras/list";
+import type { Camera, Me } from "../src/api/types";
+import { codecLabel, groupByPlace, groupCameras, matchesQuery } from "../src/cameras/list";
 import CameraList from "../src/components/CameraList.vue";
 import { makeRouter } from "../src/router";
 import { useCamerasStore } from "../src/stores/cameras";
+import { useDirectoryStore } from "../src/stores/directory";
 
 const cam = (id: string, over: Partial<Camera> = {}): Camera => ({
   id, mode: "passthrough", hasIrControl: false, recordingMode: "manual", supportsDetection: true,
@@ -42,6 +43,38 @@ describe("camera list helpers", () => {
   });
 });
 
+// Where each camera is (DEALER-PANEL-PLAN.md D18, D19): a person's accounts, their sites and adapters.
+const ACCOUNTS: Me["accounts"] = [
+  { id: "a-1", name: "Acme", role: "customer", dealer: "North",
+    sites: [{ id: "s-1", name: "Home", timezone: "Europe/Berlin" }, { id: "s-2", name: "Shop", timezone: "Europe/Berlin" }],
+    adapters: [{ thingName: "adapter-01", name: "Hall", siteId: "s-1" }, { thingName: "adapter-02", name: null, siteId: "s-2" }] },
+  { id: "a-2", name: "Beta", role: "customer_user", dealer: "North",
+    sites: [{ id: "s-9", name: "Office", timezone: "Europe/Berlin" }],
+    adapters: [{ thingName: "adapter-09", name: "Desk", siteId: "s-9" }] },
+];
+
+describe("the camera list by place", () => {
+  const cams = [cam("cam-01", { adapterId: "adapter-02" }), cam("cam-03", { adapterId: "adapter-01", tags: ["indoor"] }),
+                cam("cam-09", { adapterId: "adapter-09" }), cam("cam-30", { adapterId: null })];
+
+  it("groups by account, site and adapter, in the accounts' order; a camera elsewhere goes last", () => {
+    expect(groupByPlace(cams, ACCOUNTS).map(p => [p.label, p.groups.flatMap(g => g.cameras.map(c => c.id))])).toEqual([
+      ["Acme · Home · Hall", ["cam-03"]], ["Acme · Shop", ["cam-01"]], ["Beta · Office · Desk", ["cam-09"]],
+      ["Other cameras", ["cam-30"]]]);
+  });
+
+  it("names the account only when there are several, and gives one place no heading at all", () => {
+    expect(groupByPlace(cams.slice(0, 2), ACCOUNTS.slice(0, 1)).map(p => p.label)).toEqual(["Home · Hall", "Shop"]);
+    expect(groupByPlace(cams.slice(1, 2), ACCOUNTS).map(p => p.label)).toEqual([null]);
+    expect(groupByPlace(cams, []).map(p => p.label)).toEqual([null]);                // an administrator: as before
+  });
+
+  it("keeps the tag groups within a place", () => {
+    const tagged = [cam("cam-03", { adapterId: "adapter-01", tags: ["indoor"] }), cam("cam-04", { adapterId: "adapter-01" })];
+    expect(groupByPlace(tagged, ACCOUNTS)[0].groups.map(g => g.tag)).toEqual(["indoor", null]);
+  });
+});
+
 describe("CameraList", () => {
   beforeEach(() => setActivePinia(createPinia()));
 
@@ -60,6 +93,13 @@ describe("CameraList", () => {
     expect(w.find("h3").exists()).toBe(false);          // no tags: one group, no heading
     await buttons[0].trigger("click");
     expect(w.emitted("select")).toEqual([["cam-01"]]);
+  });
+
+  it("heads each place when the directory says where the cameras are", () => {
+    useDirectoryStore().me = { email: "x@example.test", role: "customer", org: null, accounts: ACCOUNTS };
+    const w = mountList([cam("cam-03", { adapterId: "adapter-01" }), cam("cam-09", { adapterId: "adapter-09" })]);
+    expect(w.findAll("[data-test=place]").map(h => h.text())).toEqual(["Acme · Home · Hall", "Beta · Office · Desk"]);
+    expect(w.findAll("button.cam").map(b => b.text())).toEqual(["cam-03", "cam-09"]);
   });
 
   it("filters as the viewer types and says when nothing matches", async () => {

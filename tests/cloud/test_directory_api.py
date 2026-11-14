@@ -601,3 +601,156 @@ def test_the_fake_provider_tells_nobody_and_the_seam_has_d9s_five(monkeypatch):
         assert callable(getattr(api.BillingProvider, method))
     with pytest.raises(NotImplementedError):
         api.BillingProvider().change(ADAPTER, {"version": 2})
+
+
+# --- an account's own pages (Phase 9, D18) -----------------------------------------------------------
+
+ACCOUNT = "77777777-7777-4777-8777-777777777777"
+ACCOUNT_CAMERAS = [
+    {"cameraId": "cam-03", "adapterId": "adapter-01", "displayName": "Hall", "onvifPassword": "secret",
+     "rtspUrl": "rtsp://u:secret@x/1"},
+    {"cameraId": "cam-04", "adapterId": "adapter-01"},
+    {"cameraId": "cam-05", "adapterId": "adapter-01", "unregisteredAt": "2026-11-08T00:00:00Z"},
+    {"cameraId": "cam-20", "adapterId": "adapter-02"},
+    {"cameraId": "cam-30"},                                             # no adapter: an administrator's
+]
+PEOPLE = {"account": {"id": ACCOUNT, "name": "Acme"}, "role": "customer", "things": ["adapter-01"], "people": []}
+
+
+@pytest.mark.parametrize("method, path, body, op, args", [
+    ("GET", f"accounts/{ACCOUNT}/plans", None, "account_plans", {"id": ACCOUNT}),
+    ("POST", f"accounts/{ACCOUNT}/holder", {"userId": USER}, "hand_over_holder", {"userId": USER, "id": ACCOUNT}),
+])
+def test_plan_and_billing_and_the_hand_over_are_directory_operations(route, directory, method, path, body, op, args):
+    calls, _ = directory
+    assert route(method, path, body)[0] == 200
+    assert calls == [(op, ME["sub"], args)]
+
+
+def test_the_accounts_people_come_with_its_cameras_and_never_a_credential(aws, route, directory):
+    calls, results = directory
+    results["account_users"] = dict(PEOPLE)
+    aws(api, cameras=ACCOUNT_CAMERAS)
+    status, out = route("GET", f"accounts/{ACCOUNT}/users")
+    assert status == 200 and calls == [("account_users", ME["sub"], {"id": ACCOUNT})]
+    assert out["cameras"] == [{"id": "cam-03", "name": "Hall", "thing": "adapter-01"},
+                              {"id": "cam-04", "name": None, "thing": "adapter-01"}]   # unregistered and others' left out
+    assert "secret" not in json.dumps(out)
+
+
+def test_without_the_registry_the_people_stand_and_it_says_why(monkeypatch, route, directory):
+    _, results = directory
+    results["account_users"] = dict(PEOPLE)
+
+    def broken():
+        raise api.ClientError({"Error": {"Code": "ProvisionedThroughputExceededException"}}, "Scan")
+    monkeypatch.setattr(api, "registry_cameras", broken)
+    status, out = route("GET", f"accounts/{ACCOUNT}/users")
+    assert status == 200 and out["cameras"] is None and "can't be shared just now" in out["registryError"]
+
+
+def test_someone_with_an_account_is_added_with_each_cameras_adapter_and_no_cognito_call(aws, route, directory):
+    calls, results = directory
+    results["add_account_user"] = {"userId": USER, "email": "ann@example.test", "status": "active", "new": False}
+    aws(api, cameras=ACCOUNT_CAMERAS)                     # no Cognito answer queued: a call would fail
+    body = {"email": "ann@example.test", "superAdmin": False, "cameras": ["cam-04", "cam-03"]}
+    assert route("POST", f"accounts/{ACCOUNT}/users", body) == \
+        (201, {"userId": USER, "email": "ann@example.test", "status": "active", "new": False})
+    assert calls == [("add_account_user", ME["sub"], {"email": "ann@example.test", "superAdmin": False, "id": ACCOUNT,
+                      "cameras": [{"cameraId": "cam-04", "thing": "adapter-01"}, {"cameraId": "cam-03", "thing": "adapter-01"}]})]
+
+
+def test_a_new_address_gets_its_sign_in_by_email_and_its_sub_is_stored(aws, route, directory):
+    calls, results = directory
+    results["add_account_user"] = {"userId": USER, "email": "Ann@example.test", "status": "invited", "new": True}
+    fake = aws(api, cameras=ACCOUNT_CAMERAS)
+    _expect_create(fake, "Ann@example.test")
+    status, out = route("POST", f"accounts/{ACCOUNT}/users", {"email": "Ann@example.test", "superAdmin": True,
+                                                              "cameras": ["cam-03"]})
+    assert status == 201 and out["new"] is True
+    assert [c[0] for c in calls] == ["add_account_user", "link_sub"]
+    assert calls[0][2]["cameras"] == [] and calls[1][2] == {"userId": USER, "sub": NEW_SUB}   # a Super Admin shares none
+
+
+def test_a_new_address_cognito_refuses_is_taken_back_out(aws, route, directory):
+    calls, results = directory
+    results["add_account_user"] = {"userId": USER, "email": "ann@example.test", "status": "invited", "new": True}
+    fake = aws(api)
+    fake.stub("cognito-idp").add_client_error("admin_create_user", "UsernameExistsException")
+    assert route("POST", f"accounts/{ACCOUNT}/users", {"email": "ann@example.test", "superAdmin": True}) == \
+        (409, {"error": "can't add this address"})
+    assert calls[1] == ("remove_account_user", ME["sub"], {"id": ACCOUNT, "userId": USER})
+
+
+@pytest.mark.parametrize("cameras, error", [
+    (["cam-05"], "no such camera: cam-05"),                               # unregistered
+    (["cam-99", "cam-03", "cam-30"], "no such camera: cam-99, cam-30"),   # unknown; no adapter
+    ("cam-03", "cameras: a list of camera IDs"),
+    ([{"cameraId": "cam-03", "thing": "adapter-01"}], "cameras: a list of camera IDs"),   # the adapter is the registry's
+])
+def test_a_camera_the_registry_doesnt_serve_is_refused_before_the_directory(aws, route, directory, cameras, error):
+    calls, _ = directory
+    aws(api, cameras=ACCOUNT_CAMERAS)
+    assert route("POST", f"accounts/{ACCOUNT}/users", {"email": "x@example.test", "superAdmin": False,
+                                                       "cameras": cameras}) == (400, {"error": error})
+    assert calls == []
+
+
+def test_an_edit_carries_each_cameras_adapter_as_the_registry_says(aws, route, directory):
+    calls, _ = directory
+    aws(api, cameras=ACCOUNT_CAMERAS)
+    assert route("PATCH", f"accounts/{ACCOUNT}/users/{USER}", {"superAdmin": False, "cameras": ["cam-20"]})[0] == 200
+    assert calls == [("update_account_user", ME["sub"], {"superAdmin": False, "id": ACCOUNT, "userId": USER,
+                                                          "cameras": [{"cameraId": "cam-20", "thing": "adapter-02"}]})]
+
+
+@pytest.mark.parametrize("path", [f"accounts/{ACCOUNT}/users/{USER}/remove", f"accounts/{ACCOUNT}/invites/{USER}/cancel"])
+def test_an_invitation_cancelled_before_it_was_used_takes_its_sign_in_with_it(aws, route, directory, path):
+    calls, results = directory
+    results["remove_account_user"] = {"userId": USER, "deleted": True, "email": "ann@example.test", "sub": NEW_SUB}
+    fake = aws(api)
+    fake.stub("cognito-idp").add_response("admin_delete_user", {}, {"UserPoolId": "eu-central-1_test", "Username": NEW_SUB})
+    assert route("POST", path) == (200, {"userId": USER, "deleted": True})
+    assert calls == [("remove_account_user", ME["sub"], {"id": ACCOUNT, "userId": USER})]
+
+
+def test_removing_someone_who_has_signed_in_leaves_their_sign_in(aws, route, directory):
+    _, results = directory
+    results["remove_account_user"] = {"userId": USER, "deleted": False, "email": None, "sub": None}
+    aws(api)                                              # no Cognito answer queued: a call would fail
+    assert route("POST", f"accounts/{ACCOUNT}/users/{USER}/remove") == (200, {"userId": USER, "deleted": False})
+
+
+@pytest.mark.parametrize("code, reported", [("UserNotFoundException", False), ("AccessDeniedException", True)])
+def test_a_sign_in_cognito_wont_delete_is_reported_and_the_removal_stands(aws, route, directory, code, reported):
+    _, results = directory
+    results["remove_account_user"] = {"userId": USER, "deleted": True, "email": "ann@example.test", "sub": None}
+    fake = aws(api)
+    fake.stub("cognito-idp").add_client_error("admin_delete_user", code)
+    status, out = route("POST", f"accounts/{ACCOUNT}/invites/{USER}/cancel")
+    assert status == 200 and out["deleted"] is True
+    assert ("may be refused" in out.get("cognitoError", "")) is reported
+
+
+def test_an_account_invitation_is_resent_to_its_address(aws, route, directory):
+    _, results = directory
+    results["resend_account_invite"] = {"userId": USER, "email": "ann@example.test"}
+    fake = aws(api)
+    fake.stub("cognito-idp").add_response(
+        "admin_create_user", {"User": {"Username": "x"}},
+        {"UserPoolId": "eu-central-1_test", "Username": "ann@example.test", "MessageAction": "RESEND",
+         "DesiredDeliveryMediums": ["EMAIL"]})
+    assert route("POST", f"accounts/{ACCOUNT}/invites/{USER}/resend") == (200, {"userId": USER, "resent": "ann@example.test"})
+
+
+def test_removing_a_user_is_a_post_since_the_preflight_allows_no_delete(route, directory):
+    assert route("DELETE", f"accounts/{ACCOUNT}/users/{USER}")[0] == 405
+
+
+def test_the_new_policy_deletes_sign_ins_of_the_same_pool_only():
+    from pathlib import Path
+    iam = Path(__file__).resolve().parents[2] / "cloud" / "iam"
+    [new] = json.loads((iam / "vsz-directory-api-accounts-policy.json").read_text())["Statement"]
+    pool = next(s["Resource"] for s in json.loads((iam / "vsz-directory-api-policy.json").read_text())["Statement"]
+                if "cognito-idp:AdminCreateUser" in s["Action"])
+    assert (new["Action"], new["Resource"]) == ("cognito-idp:AdminDeleteUser", pool)

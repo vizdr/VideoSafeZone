@@ -725,7 +725,7 @@ admin (with `?dealerId=` to narrow).
 | `GET /directory/customers/{id}/adapters` | same | the customer's adapters, each with its current plan and plan vs. actual; the total (D19) |
 | `GET /directory/adapters/{id}/plan` · `PUT` | same | an adapter's current plan · a new version, priced by the server |
 | `GET /directory/adapters/{id}/plans` | same | that adapter's plan history (its current activation; owners and admins can ask for earlier ones) |
-| `GET /directory/accounts/{id}/plans` | holder | Plan & Billing: each adapter's plan and history, the total, invoices |
+| `GET /directory/accounts/{id}/plans` | holder | Plan & Billing: each adapter's plan and history, the total, invoices and this month's estimate, the dealer's contact |
 | `GET /directory/customers/{id}/cameras` | same | inventory from the registry by the customer's adapters; no credentials, no thumbnails (D5) |
 | `GET /directory/customers/{id}/users` · `POST` | same | users · invite (Cognito `AdminCreateUser`, email with a temporary password) |
 | `POST /directory/users/{id}/{disable,enable,reset-password,resend-invite}` | the user's scope (a holder: own account's users) | Cognito admin calls + directory status |
@@ -734,8 +734,8 @@ admin (with `?dealerId=` to narrow).
 | `POST /directory/adapters` | owner, admin | generate N adapters: Things, certificates, Cloud IDs — codes, labels and identity bundles returned once |
 | `POST /directory/adapters/{id}/{allocate,release,revoke,new-code}` | owner, admin | to a dealer or back · leave its customer · and deactivate its certificate · a new Cloud ID |
 | `DELETE /directory/adapters/{id}` | holder, Super Admin | remove the adapter from the account — a release (D15) |
-| `GET /directory/accounts/{id}/users` · `POST` | holder, Super Admin | Users and Pending invites · add one: `{email, superAdmin, cameras[]}` (D18) |
-| `PATCH /directory/accounts/{id}/users/{userId}` · `DELETE` | holder, Super Admin (never on the holder) | the Super Admin switch and the shared cameras · remove from the account |
+| `GET /directory/accounts/{id}/users` · `POST` | holder, Super Admin | Users and Pending invites, and the account's cameras (from the registry) · add one: `{email, superAdmin, cameras[]}` (D18) |
+| `PATCH /directory/accounts/{id}/users/{userId}` · `POST …/{userId}/remove` | holder, Super Admin (never on the holder, never on oneself) | the Super Admin switch and the shared cameras · remove from the account (POST: the preflight allows no DELETE, as for adapters) |
 | `POST /directory/accounts/{id}/invites/{userId}/{resend,cancel}` | holder, Super Admin | Pending invites |
 | `POST /directory/accounts/{id}/holder` | holder | hand the holder role to a Super Admin or user |
 | `GET /directory/dealer` · `PATCH` | dealer, admin | own company details |
@@ -1550,6 +1550,63 @@ an address that already has an account (another demo customer's holder): it show
 once, and that person sees the shared camera beside their own within about 3 minutes. A Super
 Admin can't remove the holder.
 
+*Built 2026-11-14* (1461 offline pytest, 164 tests_db, 290 Vitest):
+- **The directory's operations** (`vsz-directory`): `account_plans`, `account_users`, `add_account_user`,
+  `update_account_user`, `remove_account_user`, `resend_account_invite`, `hand_over_holder`. An account is
+  administered by its holder and Super Admins (and, for support, a system administrator); anyone else —
+  a user, a dealer, another account's holder — is told "no such account". **Plan & Billing is the
+  holder's alone**: each adapter's current plan and its history, read-only, the total, the invoices and
+  this month's estimate (Phase 8's), and the dealer's contact, since the dealer changes plans.
+- **The rules** (each with its own `tests_db` test): one holder — a hand-over swaps the two roles in one
+  transaction, the old holder staying on as a Super Admin, and only to someone who has signed in;
+  **nobody changes the holder's access, or their own**; a share only on one of the account's open
+  adapters — checked by the operation, with 001's trigger behind it; **a staff address gets the generic
+  "can't add this address"**, the same as Cognito's refusal of a taken one, so it tells nothing; a
+  release ends the shares (001's trigger, now also through the operations and the claims); a Super Admin
+  sees every camera, so becoming one drops the person's shares; at most 100 cameras shared with a person
+  across accounts, since every one goes into their ID token (D18).
+- **Add user** (§6's invite flow): an address that has an account gets the membership at once — at their
+  next token, within about 3 minutes; a new one is an invited person, whose Cognito account the API
+  creates (the email with a temporary password), and whose sub the holder may store (`link_sub` now
+  allows that for someone invited to one's own account and not signed in yet); if Cognito refuses, the
+  directory's rows are taken out again. **The API checks each camera against the registry** and passes
+  the adapter the registry names; the directory then checks that adapter is the account's. **Remove**
+  and **Cancel** of a pending invite take the membership and its shares; someone invited who never
+  signed in and is in no other account is deleted, and the API deletes their Cognito account
+  (`AdminDeleteUser`, a new inline policy, `provision.sh accounts`) — without it the address could never
+  be invited again. **Resend** sends Cognito's invitation again. Removal is `POST …/remove`: the
+  `/directory` preflight allows no DELETE (§6 corrected, as for adapters).
+- **`/directory/me`** gives each account's adapters (Thing, name, site): every one for a holder or Super
+  Admin, those of the cameras shared for a user — for the camera list.
+- **Screens:** the Account page's tabs follow the person's roles — Account details for everyone; **Plan &
+  Billing** for a holder (each adapter's plan as on the dealer's Plan page, read-only, its history, the
+  total, the month so far, the invoices, the demo banner; no control or input at all); **Additional
+  users** for a holder or Super Admin — Add user (email, the Super Admin switch, the cameras to share
+  when it is off, D18's texts), Users (Super Admin, or the cameras shared; Edit, Remove after asking —
+  neither on oneself), Pending invites (Resend, Cancel after asking), and the holder's card with *Hand
+  the account over…*. An **account picker** appears on both tabs for someone with more than one such
+  account. Dealers, owners and administrators keep Account details only and the page never asks the
+  directory for them. The **camera list groups by place** — account (when there are several), site,
+  the adapter's name — then by tag as before, with no heading when there is one place; an
+  administrator's view is unchanged. The month-so-far block is one component on the portal's Invoices
+  page and on Plan & Billing.
+- **Tests:** `tests_db/test_accounts.py` (27), `tests/cloud/test_directory_api.py` (+20: the routes, the
+  registry check before the directory, Cognito only for a new address, the undo when it refuses, the
+  sign-in deleted with a cancelled invitation and kept otherwise, a failed deletion reported, the policy
+  naming the same pool), `client-app/tests/account.spec.ts` (+17), `shell.spec.ts` (+4) and `places.spec.ts`
+  (2: the camera list asks the directory for a customer, not for staff). Broken on purpose once each,
+  turning red (26): the holder's access changeable, a staff address added, a share on another account's
+  adapter left to the trigger, a new Super Admin keeping shares, a cancelled invitation's person kept,
+  a person in another account deleted with it, a new holder keeping shares, a hand-over to someone who
+  never signed in, a user managing the account, Plan & Billing for Super Admins, a user's `/me` listing
+  every adapter, a holder storing anyone's sub, no limit of 100 shares; in the API a camera the registry
+  doesn't serve passed on, Cognito asked for an existing address, a cancelled invitation's sign-in kept,
+  another account's cameras offered; on the page a user given Additional users, a Super Admin given Plan
+  & Billing, Edit on oneself, a new Super Admin sent cameras, Remove without asking, a hand-over to
+  someone invited, one place headed, the account named when there is one — and the camera list never
+  asking for the places, which first stayed green (the shell asked, and no test mounts the shell): the
+  list now asks itself, and `places.spec.ts` pins it.
+
 ### Phase 10: A second adapter at another customer (§4b)
 
 Must be complete before a second adapter serves a real customer.
@@ -1625,7 +1682,8 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 7: deployed (`deploy.sh lambda list-cameras`, `lambda publish-cmd`, `provision.sh cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page`, 2026-11-08); the user reports Phase 7 complete (2026-11-14)
 - [x] Phase 7 addition (unregister any camera, Re-register): `deploy.sh lambda list-cameras`, `lambda adapter-cameras`, the Pi's agent and admin GUI restarted, `deploy.sh page` (2026-11-08)
 - [x] Phase 8: Billing seam with fakes — built and tested (2026-11-14)
-- [ ] Phase 8: deployed (`deploy.sh lambda vsz-db-admin`, `db-migrate` (003), `lambda vsz-directory`, `lambda vsz-directory-api`, `deploy.sh page`) and its *Verify* recorded
-- [ ] Phase 9: Account page and additional users
+- [x] Phase 8: deployed (`deploy.sh lambda vsz-db-admin`, `db-migrate` (003), `lambda vsz-directory`, `lambda vsz-directory-api`, `deploy.sh page`); the user reports billing working (2026-11-14)
+- [x] Phase 9: Account page and additional users — built and tested (2026-11-14)
+- [ ] Phase 9: deployed (`deploy.sh lambda vsz-directory`, `lambda vsz-directory-api`, `provision.sh accounts`, `deploy.sh page`) and its *Verify* recorded
 - [ ] Phase 10: A second adapter at another customer — spike, device isolation
 - [ ] §9 measurements recorded here

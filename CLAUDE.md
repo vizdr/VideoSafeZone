@@ -118,6 +118,7 @@ bash cloud/provision.sh portal --dry-run          # the dealer portal's registry
 bash cloud/provision.sh adapters --dry-run        # Cloud IDs' key, retained configs, the IoT rule for last seen
 bash cloud/adapter-identity.sh pending            # a new adapter's AWS identity: the owner's script (D15 amended)
 bash cloud/provision.sh cameras --dry-run         # adding cameras from the web page: tables, IoT rules, adapter-cameras
+bash cloud/provision.sh accounts --dry-run        # Additional users: the API may delete a cancelled invitation's sign-in
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -470,7 +471,11 @@ signed-in person sees follows their role (`DEALER-PANEL-PLAN.md` D6, D7): owners
 also get the **System console** (`src/views/system/`: dealers, customers, users, adapters, the
 price list, the fake billing run, over `/directory/*`), and dealers, owners and administrators the
 **Dealer portal** (`src/views/dealer/`: customers, a plan per adapter priced as it is edited, plan
-history, invoices, cameras, people) — dealers instead of the camera pages. The page only hides;
+history, invoices, cameras, people) — dealers instead of the camera pages. The **Account** page (`src/views/account/`) follows the
+person's role in each account (D18): Account details for everyone, Plan & Billing (read-only) for the
+holder, Additional users — add by email, Super Admin or shared cameras, pending invites, handing the
+account over — for the holder and Super Admins; the camera list groups by account, site and adapter
+(`/directory/me`). The page only hides;
 `vsz-directory` decides every call again from the database. Billing is data real, money fake (D9):
 invoices are the directory's, a provider sits behind `BillingProvider` in `vsz-directory-api`
 (today `FakeBillingProvider`), and no page has a card or bank field. A plan's price is computed twice, by the page for the preview

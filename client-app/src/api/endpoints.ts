@@ -1,7 +1,7 @@
 // One function per API route the page uses, with the request bodies the Lambdas expect.
 import type { ApiClient } from "./client";
 import type {
-  ActivationRequest, Activation, BillingRun, CameraRequest, CameraScan, AdapterChange, AdapterSummary, Address, NewAdapters, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
+  AccountAccess, AccountPlans, AccountUsers, ActivationRequest, Activation, BillingRun, CameraRequest, CameraScan, AdapterChange, AdapterSummary, Address, NewAdapters, BillingInterval, Camera, CameraSettings, ClipsPage, CommandAction, CustomerAdapters,
   CustomerDetail, CustomerInvoices, CustomerPerson, CustomerSummary, Dealer, DealerDetails, DirectoryUser, HlsSession, InvoiceList, IrMode, Me,
   MemberRole, NewCustomer, Overview, Plan, PlanLine, Price, Pricing, RecordingMode, StorageTier, UserAction,
   UserSettings,
@@ -106,6 +106,20 @@ export function makeEndpoints(api: ApiClient) {
     },
     customerInvoices: (id: string) => api.request<CustomerInvoices>("GET", `/directory/customers/${q(id)}/invoices`),
     runBillingPeriod: (period: string) => api.request<BillingRun>("POST", "/directory/billing/run-period", { period }),
+
+    // An account's own pages (DEALER-PANEL-PLAN.md Phase 9, D18): Plan & Billing, Additional users.
+    accountPlans: (id: string) => api.request<AccountPlans>("GET", `/directory/accounts/${q(id)}/plans`),
+    accountUsers: (id: string) => api.request<AccountUsers>("GET", `/directory/accounts/${q(id)}/users`),
+    addAccountUser: (id: string, user: AccountAccess & { email: string }) =>
+      api.request<{ userId: string; email: string; status: string; new: boolean }>("POST", `/directory/accounts/${q(id)}/users`, user),
+    updateAccountUser: (id: string, userId: string, access: AccountAccess) =>
+      api.request<{ userId: string; role: string; cameras: string[] }>("PATCH", `/directory/accounts/${q(id)}/users/${q(userId)}`, access),
+    removeAccountUser: (id: string, userId: string) =>
+      api.request<{ userId: string; deleted: boolean; cognitoError?: string }>("POST", `/directory/accounts/${q(id)}/users/${q(userId)}/remove`),
+    accountInvite: (id: string, userId: string, action: "resend" | "cancel") =>
+      api.request<{ userId: string }>("POST", `/directory/accounts/${q(id)}/invites/${q(userId)}/${action}`),
+    handOverAccount: (id: string, userId: string) =>
+      api.request<{ accountId: string; holder: { id: string; email: string } }>("POST", `/directory/accounts/${q(id)}/holder`, { userId }),
 
     // Adding and removing cameras through the adapter (DEALER-PANEL-PLAN.md Phase 7, D16).
     scanForCameras: (thing: string) => api.request<{ requestId: string }>("POST", `/adapters/${q(thing)}/discover`),

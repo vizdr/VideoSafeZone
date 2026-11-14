@@ -120,7 +120,10 @@ export interface Me {
   role: Role;
   org: { id: string; kind: "platform" | "dealer"; name: string } | null;
   accounts: Array<{ id: string; name: string; role: MemberRole; dealer: string;
-                    sites: Array<{ id: string; name: string; timezone: string }> }>;
+                    sites: Array<{ id: string; name: string; timezone: string }>;
+                    /** Where the account's cameras are (the camera list's groups): every adapter for a
+                     *  holder or Super Admin, those of the cameras shared for a user. */
+                    adapters?: Array<{ thingName: string; name: string | null; siteId: string }> }>;
 }
 
 export interface Overview {
@@ -305,3 +308,34 @@ export interface BillingRun {
   alreadyInvoiced: number; nothingToBill: number;
   skipped: Array<{ customer: { id: string; name: string }; reason: string }>;
 }
+
+// --- an account's own pages (DEALER-PANEL-PLAN.md Phase 9, D18) ---------------------------------------
+
+/** Plan & Billing, for the holder: each adapter's plan and history, read-only; the invoices. */
+export interface AccountPlans extends InvoiceList {
+  account: { id: string; name: string };
+  dealer: { name: string; email: string | null; phone: string | null };
+  adapters: Array<{ id: string; thingName: string; name: string | null; activatedAt: string; site: string;
+                    plan: Plan | null; history: Plan[] }>;
+  total: { adapters: number; centsMonth: number; cameras: number; currency: string };
+  next: NextInvoice;
+}
+export interface AccountPerson {
+  id: string; email: string; name: string | null; status: DirectoryUser["status"]; lastSignInAt: string | null;
+  role: "customer" | "customer_admin" | "customer_user"; addedAt: string;
+  /** The cameras shared with a user (none for the holder or a Super Admin, who see every one). */
+  cameras: string[];
+  /** The signed-in person themselves. */
+  you: boolean;
+}
+export interface AccountUsers {
+  account: { id: string; name: string };
+  /** The viewer's role here (a system administrator's, for support). */
+  role: "customer" | "customer_admin" | "system_admin";
+  things: string[];
+  people: AccountPerson[];
+  /** The account's cameras to share, from the registry; null when it couldn't be read. */
+  cameras: Array<{ id: string; name: string | null; thing: string }> | null;
+  registryError?: string;
+}
+export interface AccountAccess { superAdmin: boolean; cameras: string[] }

@@ -441,7 +441,16 @@ def op_me(con, actor, args):
                                "WHERE c.id = :o", o=org_id)[0]
         sites = [{"id": i, "name": n, "timezone": t} for i, n, t in con.run(
             "SELECT id, name, timezone FROM vsz.site WHERE customer_id = :o ORDER BY lower(name)", o=org_id)]
-        out["accounts"].append({"id": org_id, "name": name, "role": role, "dealer": dealer, "sites": sites})
+        # Where the account's cameras are, for the camera list's groups (D18, D19): every adapter for its
+        # holder and Super Admins, those of the cameras shared for a user.
+        adapters = [{"thingName": t, "name": n, "siteId": s} for t, n, s in con.run(
+            "SELECT a.thing_name, act.name, act.site_id FROM vsz.adapter_activation act "
+            "JOIN vsz.adapter a ON a.id = act.adapter_id WHERE act.customer_id = :o AND act.released_at IS NULL "
+            "AND (:full OR EXISTS (SELECT 1 FROM vsz.camera_share s WHERE s.account_id = :o AND s.user_id = :u "
+            "AND s.adapter_id = a.id)) ORDER BY length(a.thing_name), a.thing_name",
+            o=org_id, full=role in FULL_ACCESS, u=actor["user_id"])]
+        out["accounts"].append({"id": org_id, "name": name, "role": role, "dealer": dealer, "sites": sites,
+                                "adapters": adapters})
     out["accounts"].sort(key=lambda a: a["name"].lower())
     return out
 
@@ -657,10 +666,17 @@ def _manageable_user(con, actor, user_id):
 
 
 def op_link_sub(con, actor, args):
-    user = _manageable_user(con, actor, args.get("userId"))
-    con.run("UPDATE vsz.app_user SET cognito_sub = CAST(:s AS uuid) WHERE id = :u AND cognito_sub IS NULL",
-            s=an_id(args.get("sub"), "Cognito sub"), u=user[0])
-    return {"userId": user[0]}
+    """The Cognito sub of someone just invited: by whoever may manage them, or by a holder or Super Admin
+    of an account they are invited to and haven't signed in to yet (Add user, D18)."""
+    uid = an_id(args.get("userId"), "user id")
+    mine = [str(o) for o, r in actor["accounts"].items() if r in FULL_ACCESS]
+    invited_here = mine and con.run(
+        "SELECT 1 FROM vsz.membership m JOIN vsz.app_user u ON u.id = m.user_id WHERE m.user_id = CAST(:u AS uuid) "
+        "AND u.status = 'invited' AND u.cognito_sub IS NULL AND m.org_id = ANY(CAST(:mine AS uuid[]))", u=uid, mine=mine)
+    user = uid if invited_here else _manageable_user(con, actor, uid)[0]
+    con.run("UPDATE vsz.app_user SET cognito_sub = CAST(:s AS uuid) WHERE id = CAST(:u AS uuid) AND cognito_sub IS NULL",
+            s=an_id(args.get("sub"), "Cognito sub"), u=str(user))
+    return {"userId": user}
 
 
 def op_cancel_invite(con, actor, args):
@@ -1206,6 +1222,12 @@ def op_list_invoices(con, actor, args):
         an_id(dealer, "dealer id")
     customer = _customer(con, actor, args["customerId"])[0] if args.get("customerId") is not None else None
     start = _period(args["period"])[0] if args.get("period") is not None else None
+    return _invoices(con, dealer=dealer, customer=customer, start=start)
+
+
+def _invoices(con, dealer=None, customer=None, start=None):
+    """Invoices with their lines, the newest month first: every one, or a dealer's customers', one
+    customer's, one month's -- the caller has checked who may see them."""
     rows = con.run(
         "SELECT i.id, i.period_start, i.period_end, i.cents, i.currency, i.status, i.provider, i.created_at, "
         "c.id, c.name, d.id, d.name FROM vsz.invoice i JOIN vsz.org c ON c.id = i.customer_id "
@@ -1233,7 +1255,11 @@ def op_list_invoices(con, actor, args):
 def op_billing_preview(con, actor, args):
     """The provider's quote for a customer: what the fake run would bill it for the month under way if it
     ran now, and whether that month is invoiced already. Nothing is written."""
-    cid = _customer(con, actor, args.get("customerId"))[0]
+    return _estimate(con, _customer(con, actor, args.get("customerId"))[0])
+
+
+def _estimate(con, cid):
+    """This month's bill for one customer as a run would make it now (billing_preview)."""
     start, end = _this_month()
     cutoff, billable = _billable(con, start, end, [cid])
     lines = billable.get(cid, [])
@@ -1243,6 +1269,221 @@ def op_billing_preview(con, actor, args):
             "lines": lines, "cents": sum(line["cents"] for line in lines),
             "currency": lines[0]["currency"] if lines else _setting(con, "currency"),
             "invoiceId": invoiced[0][0] if invoiced else None}
+
+
+# --- an account's own pages (Phase 9, D18): Plan & Billing, Additional users --------------------------
+#
+# A customer account has one holder (customer), Super Admins (customer_admin) and users with cameras
+# shared (customer_user). The holder and Super Admins manage the account's people; nobody changes the
+# holder here, or their own access; only the holder sees Plan & Billing, and hands the account over.
+# The database keeps the rules underneath (001): one holder, a share only for a user of the account and
+# only on one of its open adapters, a release ending its shares, staff never in a customer account.
+
+SHARE_CAMERA = re.compile(r"^cam-[0-9]{2,4}$")
+THING = re.compile(r"^adapter-[0-9]{2,6}$")
+
+
+def _account(con, actor, account_id, holder_only=False):
+    """(id, name, the actor's role there) of a customer account the actor may administer: its holder, a
+    Super Admin of it (not with holder_only), or -- for support -- a system administrator. Anyone else is
+    told there is no such account, as for one that doesn't exist."""
+    rows = con.run("SELECT id, name FROM vsz.org WHERE id = CAST(:a AS uuid) AND kind = 'customer'",
+                   a=an_id(account_id, "account id"))
+    role = actor["accounts"].get(rows[0][0]) if rows else None
+    allowed = ("customer",) if holder_only else FULL_ACCESS
+    if not rows or not (role in allowed or (actor["role"] == "system_admin" and not holder_only)):
+        raise DirectoryError("no such account", 404)
+    return rows[0][0], rows[0][1], role or "system_admin"
+
+
+def _account_things(con, account):
+    return [r[0] for r in con.run(
+        "SELECT a.thing_name FROM vsz.adapter_activation act JOIN vsz.adapter a ON a.id = act.adapter_id "
+        "WHERE act.customer_id = :c AND act.released_at IS NULL ORDER BY length(a.thing_name), a.thing_name", c=account)]
+
+
+def op_account_plans(con, actor, args):
+    """Plan & Billing (D18, D19), for the holder: each of the account's adapters with its current plan and
+    its history, read-only -- changes go through the dealer, whose contact comes with it -- the total,
+    the invoices and this month's estimate (D9: fake)."""
+    acc, name, _ = _account(con, actor, args.get("id"), holder_only=True)
+    rows = con.run(
+        "SELECT act.id, a.id, a.thing_name, act.name, act.activated_at, s.name FROM vsz.adapter_activation act "
+        "JOIN vsz.adapter a ON a.id = act.adapter_id JOIN vsz.site s ON s.id = act.site_id "
+        "WHERE act.customer_id = :c AND act.released_at IS NULL "
+        "ORDER BY lower(s.name), lower(coalesce(act.name, '')), a.thing_name", c=acc)
+    history = {}
+    for p in [] if not rows else _plan_rows(con, "p.activation_id = ANY(CAST(:a AS uuid[]))", a=[str(r[0]) for r in rows]):
+        history.setdefault(p["activationId"], []).append(p)
+    adapters = [{"id": r[1], "thingName": r[2], "name": r[3], "activatedAt": r[4], "site": r[5],
+                 "plan": (history.get(r[0]) or [None])[0], "history": history.get(r[0], [])} for r in rows]
+    billed = [a["plan"] for a in adapters if a["plan"] and a["plan"]["effectiveStatus"] in BILLED]
+    dealer = con.run("SELECT d.name, d.email, d.phone FROM vsz.org c JOIN vsz.org d ON d.id = c.parent_id "
+                     "WHERE c.id = :c", c=acc)[0]
+    return {"account": {"id": acc, "name": name}, "dealer": {"name": dealer[0], "email": dealer[1], "phone": dealer[2]},
+            "adapters": adapters,
+            "total": {"adapters": len(adapters), "centsMonth": sum(p["centsMonth"] for p in billed),
+                      "cameras": sum(p["cameras"] for p in billed), "currency": _setting(con, "currency")},
+            **_invoices(con, customer=acc), "next": _estimate(con, acc)}
+
+
+def op_account_users(con, actor, args):
+    """Additional users (D18): everyone with access to the account -- the holder first, then Super Admins
+    and users with the cameras shared with each -- for its holder and Super Admins. Someone invited who
+    hasn't signed in yet is status 'invited' (Pending invites). The API adds the account's cameras."""
+    acc, name, mine = _account(con, actor, args.get("id"))
+    rows = con.run(
+        "SELECT u.id, u.email, u.name, u.status, u.last_sign_in_at, m.role, m.created_at FROM vsz.membership m "
+        "JOIN vsz.app_user u ON u.id = m.user_id WHERE m.org_id = :a "
+        "ORDER BY array_position(ARRAY['customer','customer_admin','customer_user'], m.role), lower(u.email)", a=acc)
+    shares = {}
+    for user, camera in con.run("SELECT user_id, camera_id FROM vsz.camera_share WHERE account_id = :a "
+                                "ORDER BY camera_id", a=acc):
+        shares.setdefault(user, []).append(camera)
+    return {"account": {"id": acc, "name": name}, "role": mine, "things": _account_things(con, acc),
+            "people": [{"id": r[0], "email": r[1], "name": r[2], "status": r[3], "lastSignInAt": r[4], "role": r[5],
+                        "addedAt": r[6], "cameras": shares.get(r[0], []), "you": r[0] == actor["user_id"]}
+                       for r in rows]}
+
+
+def _shares(con, account, given):
+    """[(camera id, adapter id)] for cameras to share: each {cameraId, thing} as the API read it from the
+    registry, on one of the account's open adapters (the database checks it again, camera_share_check)."""
+    if not isinstance(given, list) or len(given) > MAX_SHARES:
+        raise DirectoryError(f"cameras: a list of at most {MAX_SHARES}")
+    out, seen = [], set()
+    for c in given:
+        camera, thing = (c.get("cameraId"), c.get("thing")) if isinstance(c, dict) else (None, None)
+        if not isinstance(camera, str) or not SHARE_CAMERA.match(camera) or not isinstance(thing, str) \
+                or not THING.match(thing):
+            raise DirectoryError("each camera is {cameraId, thing}")
+        if camera in seen:
+            raise DirectoryError(f"{camera} is given twice")
+        seen.add(camera)
+        adapter = con.run("SELECT a.id FROM vsz.adapter a JOIN vsz.adapter_activation act ON act.adapter_id = a.id "
+                          "AND act.released_at IS NULL WHERE a.thing_name = :t AND act.customer_id = :c",
+                          t=thing, c=account)
+        if not adapter:
+            raise DirectoryError(f"{camera} isn't one of this account's cameras")
+        out.append((camera, adapter[0][0]))
+    return out
+
+
+def _set_shares(con, account, user_id, shares):
+    """The person's shares on this account become exactly these; at most MAX_SHARES across accounts,
+    since every one goes into their ID token (D18)."""
+    con.run("DELETE FROM vsz.camera_share WHERE account_id = :a AND user_id = :u", a=account, u=user_id)
+    for camera, adapter in shares:
+        con.run("INSERT INTO vsz.camera_share (account_id, user_id, camera_id, adapter_id) VALUES (:a, :u, :c, :d)",
+                a=account, u=user_id, c=camera, d=adapter)
+    if int(con.run("SELECT count(*) FROM vsz.camera_share WHERE user_id = :u", u=user_id)[0][0]) > MAX_SHARES:
+        raise DirectoryError(f"a person can have at most {MAX_SHARES} cameras shared with them")
+
+
+def _access(args):
+    """(role, whether it is a Super Admin) from the page's superAdmin switch."""
+    if not isinstance(args.get("superAdmin"), bool):
+        raise DirectoryError("superAdmin: true or false")
+    return ("customer_admin" if args["superAdmin"] else "customer_user"), args["superAdmin"]
+
+
+def op_add_account_user(con, actor, args):
+    """Add user (D18). An address that has an account already gets access at once -- at their next token,
+    within about 3 minutes; a new one is invited, and the API creates its Cognito account. A Super Admin
+    sees every camera of the account; a user the cameras ticked. An address of a dealer's or the
+    platform's staff gets the generic answer, which says nothing about whose it is."""
+    acc, _, _ = _account(con, actor, args.get("id"))
+    email = str(args.get("email") or "").strip()
+    if not EMAIL.match(email) or len(email) > 254:
+        raise DirectoryError("give a valid email address")
+    role, super_admin = _access(args)
+    shares = [] if super_admin else _shares(con, acc, args.get("cameras", []))
+    found = con.run("SELECT id, status FROM vsz.app_user WHERE lower(email) = lower(:e)", e=email)
+    if found:
+        user, status = found[0]
+        members = con.run("SELECT org_id, role FROM vsz.membership WHERE user_id = :u", u=user)
+        if any(r in STAFF for _, r in members):
+            raise DirectoryError("can't add this address", 409)
+        if any(o == acc for o, _ in members):
+            raise DirectoryError("they have access to this account already: change it under Users", 409)
+    else:
+        user, status = con.run("INSERT INTO vsz.app_user (email) VALUES (:e) RETURNING id, status", e=email)[0]
+    con.run("INSERT INTO vsz.membership (user_id, org_id, role) VALUES (:u, :a, :r)", u=user, a=acc, r=role)
+    _set_shares(con, acc, user, shares)
+    audit(con, actor, "add_account_user", "app_user", user,
+          {"accountId": str(acc), "role": role, "cameras": [c for c, _ in shares], "new": not found})
+    return {"userId": user, "email": email, "status": status, "new": not found}
+
+
+def _member(con, actor, account, user_id):
+    """(id, email, status, cognito sub, last sign-in, role) of someone on the account whose access the actor
+    may change: never the holder's, never their own."""
+    rows = con.run("SELECT u.id, u.email, u.status, u.cognito_sub, u.last_sign_in_at, m.role FROM vsz.membership m "
+                   "JOIN vsz.app_user u ON u.id = m.user_id WHERE m.org_id = :a AND m.user_id = CAST(:u AS uuid)",
+                   a=account, u=an_id(user_id, "user id"))
+    if not rows:
+        raise DirectoryError("no such person on this account", 404)
+    if rows[0][0] == actor["user_id"]:
+        raise DirectoryError("not your own access: ask another administrator of the account")
+    if rows[0][5] == "customer":
+        raise DirectoryError("the account holder's access can't be changed", 403)
+    return rows[0]
+
+
+def op_update_account_user(con, actor, args):
+    """Edit (D18): the Super Admin switch and the cameras shared. A Super Admin sees every camera, so their
+    shares go."""
+    acc, _, _ = _account(con, actor, args.get("id"))
+    user, _, _, _, _, was = _member(con, actor, acc, args.get("userId"))
+    role, super_admin = _access(args)
+    shares = [] if super_admin else _shares(con, acc, args.get("cameras", []))
+    if role != was:
+        con.run("UPDATE vsz.membership SET role = :r WHERE user_id = :u AND org_id = :a", r=role, u=user, a=acc)
+    _set_shares(con, acc, user, shares)
+    audit(con, actor, "update_account_user", "app_user", user,
+          {"accountId": str(acc), "role": role, "cameras": [c for c, _ in shares]})
+    return {"userId": user, "role": role, "cameras": [c for c, _ in shares]}
+
+
+def op_remove_account_user(con, actor, args):
+    """Remove, or Cancel a pending invite (D18): the person leaves the account, their shares with them
+    (001's cascade). Someone invited who never signed in and is in no other account is deleted too --
+    the API then deletes their Cognito account, so the address can be invited again."""
+    acc, _, _ = _account(con, actor, args.get("id"))
+    user, email, status, sub, signed_in, _ = _member(con, actor, acc, args.get("userId"))
+    con.run("DELETE FROM vsz.membership WHERE user_id = :u AND org_id = :a", u=user, a=acc)
+    gone = status == "invited" and signed_in is None and not con.run(
+        "SELECT 1 FROM vsz.membership WHERE user_id = :u", u=user)
+    if gone:
+        con.run("DELETE FROM vsz.app_user WHERE id = :u", u=user)
+    audit(con, actor, "remove_account_user", "app_user", user, {"accountId": str(acc), "deleted": gone})
+    return {"userId": user, "deleted": gone, "email": email if gone else None, "sub": sub if gone else None}
+
+
+def op_resend_account_invite(con, actor, args):
+    """Resend (D18): for someone on the account who hasn't signed in yet; the API asks Cognito to send the
+    invitation again, with a new temporary password."""
+    acc, _, _ = _account(con, actor, args.get("id"))
+    user, email, status, _, _, _ = _member(con, actor, acc, args.get("userId"))
+    if status != "invited":
+        raise DirectoryError("they have signed in already: there is no invitation to send", 409)
+    audit(con, actor, "resend_account_invite", "app_user", user, {"accountId": str(acc)})
+    return {"userId": user, "email": email}
+
+
+def op_hand_over_holder(con, actor, args):
+    """The holder hands the account over (D18) to a Super Admin or user of it who has signed in, and stays
+    on as a Super Admin. One holder per account (001's index) holds throughout."""
+    acc, _, _ = _account(con, actor, args.get("id"), holder_only=True)
+    user, email, status, _, _, _ = _member(con, actor, acc, args.get("userId"))
+    if status != "active":
+        raise DirectoryError("only someone who has signed in can take the account over", 409)
+    con.run("UPDATE vsz.membership SET role = 'customer_admin' WHERE user_id = :me AND org_id = :a",
+            me=actor["user_id"], a=acc)
+    con.run("DELETE FROM vsz.camera_share WHERE account_id = :a AND user_id = :u", a=acc, u=user)
+    con.run("UPDATE vsz.membership SET role = 'customer' WHERE user_id = :u AND org_id = :a", u=user, a=acc)
+    audit(con, actor, "hand_over_holder", "org", acc, {"to": str(user)})
+    return {"accountId": acc, "holder": {"id": user, "email": email}}
 
 
 # --- adapters: Cloud IDs, activation, release, revoke (Phase 6, D15) --------------------------------
@@ -1560,6 +1801,11 @@ USER_OPS = {
     # billing (Phase 8)
     "run_billing_period": (op_run_billing_period, True), "list_invoices": (op_list_invoices, False),
     "billing_preview": (op_billing_preview, False),
+    # an account's own pages (Phase 9)
+    "account_plans": (op_account_plans, False), "account_users": (op_account_users, False),
+    "add_account_user": (op_add_account_user, True), "update_account_user": (op_update_account_user, True),
+    "remove_account_user": (op_remove_account_user, True), "resend_account_invite": (op_resend_account_invite, True),
+    "hand_over_holder": (op_hand_over_holder, True),
     # adapters (Phase 6)
     "generate_adapters": (op_generate_adapters, True), "allocate_adapter": (op_allocate_adapter, True),
     "new_code": (op_new_code, True), "activate_adapter": (op_activate_adapter, True),

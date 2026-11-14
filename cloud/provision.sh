@@ -33,6 +33,9 @@
 #   bash cloud/provision.sh cameras                   adding cameras from the web page (DEALER-PANEL-PLAN.md
 #                                                     Phase 7): tables adapter-discovery and camera-requests, the
 #                                                     IoT rules filling them, Lambda adapter-cameras on /adapters
+#   bash cloud/provision.sh accounts                  an account's Additional users (DEALER-PANEL-PLAN.md Phase 9):
+#                                                     the API may delete the sign-in of an invitation cancelled
+#                                                     before it was used; checked as the demo holder
 #   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
 #                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
 #                                                     on every function with the check, vsz-users beside
@@ -1042,6 +1045,54 @@ PY
   say "on each adapter's Pi, once: systemctl --user restart kvs-agent  (it then answers discover, register, unregister)"
 }
 
+# --- an account's own pages: Additional users (DEALER-PANEL-PLAN.md Phase 9, D18) ---------------------
+
+provision_accounts() {
+  local url
+  aws lambda get-function-configuration --function-name vsz-directory-api >/dev/null 2>&1 ||
+    die "no function vsz-directory-api: bash cloud/provision.sh directory first"
+  [ -n "$POOL_ID" ] || die "no user pool $POOL_NAME: bash cloud/provision.sh identity first"
+  grep -q "userpool/$POOL_ID\"" "$IAM_DIR/vsz-directory-api-accounts-policy.json" ||
+    die "cloud/iam/vsz-directory-api-accounts-policy.json doesn't name $POOL_NAME ($POOL_ID)"
+  ensure_inline_policy vsz-directory-api-role cancelled-invitations vsz-directory-api-accounts-policy.json
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  # Done means the demo holder sees the demo account's people through API Gateway. Nobody is invited or
+  # deleted to check it: the policy is used only when an invitation is cancelled.
+  url="https://$API.execute-api.$REGION.amazonaws.com/$STAGE/directory"
+  python3 - "$url" "$DEMO_FILE" "$REGION" "$(aws cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
+      --query "UserPoolClients[?ClientName=='$CLIENT_NAME'].ClientId" --output text)" <<'PY' || die "the demo holder can't list the account's people -- is the new code of both directory functions deployed? (deploy.sh lambda vsz-directory, lambda vsz-directory-api)"
+import json, sys, urllib.error, urllib.request
+url, demo, region, client = sys.argv[1:5]
+pw = dict(line.split() for line in open(demo) if line.strip())["demo-holder@example.com"]
+auth = urllib.request.Request(f"https://cognito-idp.{region}.amazonaws.com/", data=json.dumps({
+    "AuthFlow": "USER_PASSWORD_AUTH", "ClientId": client,
+    "AuthParameters": {"USERNAME": "demo-holder@example.com", "PASSWORD": pw}}).encode(),
+    headers={"Content-Type": "application/x-amz-json-1.1",
+             "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"})
+token = json.load(urllib.request.urlopen(auth, timeout=30))["AuthenticationResult"]["IdToken"]
+
+
+def get(path):
+    try:
+        req = urllib.request.Request(f"{url}/{path}", headers={"Authorization": token})
+        return json.load(urllib.request.urlopen(req, timeout=30))
+    except urllib.error.HTTPError as e:
+        print(f"GET /directory/{path} as demo-holder: {e.code} {e.read().decode()[:200]}", file=sys.stderr)
+        sys.exit(1)
+
+
+held = [a for a in get("me")["accounts"] if a["role"] == "customer"]
+if not held:
+    print("demo-holder holds no account", file=sys.stderr)
+    sys.exit(1)
+got = get(f"accounts/{held[0]['id']}/users")
+for p in got["people"]:
+    print(f"  {p['email']}: {p['role']}, {p['status']}, cameras {', '.join(p['cameras']) or '-'}")
+sys.exit(0 if any(p["you"] and p["role"] == "customer" for p in got["people"]) else 1)
+PY
+  say "verified: the demo holder lists the account's people (and the cancelled-invitations policy is in place)"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -1055,5 +1106,6 @@ case "${1:-}" in
   portal)          preflight; find_pool; provision_portal ;;
   adapters)        preflight; provision_adapters ;;
   cameras)         preflight; provision_cameras ;;
-  *) sed -n '2,39p' "$0"; exit 1 ;;
+  accounts)        preflight; find_pool; provision_accounts ;;
+  *) sed -n '2,42p' "$0"; exit 1 ;;
 esac

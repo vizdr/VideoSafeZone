@@ -1,7 +1,7 @@
 // The camera list's search and grouping (WEB-PANEL-PLAN.md §4.1): search on name, ID and tag;
 // grouped by first tag, untagged last. Until tags exist (Phase 4) every camera is untagged, and
 // the list shows a single group with no heading.
-import type { Camera } from "../api/types";
+import type { Camera, Me } from "../api/types";
 
 export interface CameraGroup {
   tag: string | null;        // null: the untagged cameras
@@ -32,6 +32,37 @@ export function groupCameras(cameras: Camera[]): CameraGroup[] {
   return [...groups.entries()]
     .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
     .map(([tag, cams]) => ({ tag, cameras: cams }));
+}
+
+export interface CameraPlace {
+  key: string;
+  /** "Acme · Home · Garage": the account (when there is more than one), the site, the adapter's name;
+   *  null when every camera is in one place. */
+  label: string | null;
+  groups: CameraGroup[];
+}
+
+/** The camera list by place (DEALER-PANEL-PLAN.md D18, D19): a group per adapter, in the order of the
+ *  person's accounts, each labelled by account, site and the adapter's name -- and within each place the
+ *  tag groups as before. A camera on no adapter of the person's accounts (an administrator's view) goes
+ *  last, as "Other cameras"; with a single place there is no heading at all. */
+export function groupByPlace(cameras: Camera[], accounts: Me["accounts"] = []): CameraPlace[] {
+  const several = accounts.length > 1;
+  const places: Array<{ key: string; label: string; cameras: Camera[] }> = [];
+  const byThing = new Map<string, Camera[]>();
+  for (const account of accounts) {
+    for (const a of account.adapters ?? []) {
+      const site = account.sites.find(s => s.id === a.siteId)?.name;
+      const label = [several ? account.name : null, site, a.name].filter(Boolean).join(" · ") || a.thingName;
+      const list: Camera[] = [];
+      places.push({ key: a.thingName, label, cameras: list });
+      byThing.set(a.thingName, list);
+    }
+  }
+  const other: Camera[] = [];
+  for (const c of cameras) (byThing.get(c.adapterId ?? "") ?? other).push(c);
+  const shown = [...places, { key: "", label: "Other cameras", cameras: other }].filter(p => p.cameras.length);
+  return shown.map(p => ({ key: p.key, label: shown.length > 1 ? p.label : null, groups: groupCameras(p.cameras) }));
 }
 
 const CODEC_NAMES: Record<string, string> = { h264: "H.264", h265: "H.265" };
