@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ItsOwnEventTopic",
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-central-1:596633517506:topic/adapter/${credentials-iot:ThingName}/event"
+    }
+  ]
+}

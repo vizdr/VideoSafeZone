@@ -1032,6 +1032,45 @@ systemctl --user restart kvs-outage-uploader      # its uploads under the Thing
 `kvs-event-watcher`, `kvs-outage-buffer`, `kvs-outage-uploader` — and take a code change only at a restart;
 the timers (rematch, schedules, thumbnails) and the producers' scripts take it at their next run.
 
+### The narrowed role
+
+`DEALER-PANEL-PLAN.md` Phase 10.2f: the device role reduced to each adapter's own resources. It waits
+until VMS's card runs on copies of its own (D14) — today it shares the role — but one part goes now.
+
+**Now** — the agent reads the web page's camera requests through the registry route, and the older keys
+go. In this order: the route first, the agent after it (an agent restarted earlier can't read a request):
+
+```bash
+bash cloud/provision.sh registry                  # adds vsz-registry-role's camera-requests policy
+bash cloud/deploy.sh lambda vsz-registry          # the request route; clip keys only under the Thing
+bash cloud/deploy.sh lambda list-cameras          # thumbnails only under the camera's adapter
+bash cloud/deploy.sh lambda vsz-directory-api
+systemctl --user restart kvs-agent
+# the thumbnails' older keys, no longer read (look, then delete):
+aws s3 rm s3://vms-demo-evidence-596633517506/thumbs/ --recursive --exclude "*" --include "cam*.jpg" --dryrun
+aws s3 rm s3://vms-demo-evidence-596633517506/thumbs/ --recursive --exclude "*" --include "cam*.jpg"
+```
+
+**Later, once VMS runs on its own copies:**
+
+```bash
+bash cloud/provision.sh narrow --dry-run          # PASS/FAIL per condition; changes nothing (any time)
+bash cloud/provision.sh narrow --vms-moved        # only with every condition met: saves the live
+                                                  # policies, puts the narrowed ones, drops the wide,
+                                                  # sets vsz-registry's ROW_SECRETS=drop
+# on each adapter's Pi:
+sudo sed -i 's/^ADOPT_UNSTAMPED_ROWS=yes/ADOPT_UNSTAMPED_ROWS=no/' /etc/adapter/adapter.env   # its scan is refused now
+systemctl --user restart kvs-agent onvif-admin kvs-event-watcher kvs-outage-buffer kvs-outage-uploader
+venv-adapter/bin/python3 adapter/device_access.py check   # what it needs allowed, the wide access gone
+venv-adapter/bin/python3 adapter/camera_secrets.py strip  # the rows rid of their secrets (SSM checked first)
+venv-adapter/bin/python3 adapter/camera_secrets.py check
+```
+
+`provision.sh narrow-rollback ~/.local/state/videosafezone/kvs-adapter-role-<time>.json` puts back the role
+and `ROW_SECRETS` as they were. Afterwards remove the dropped policies' files from `cloud/iam/`
+(`kvs-producer-policy.json`, `outage-backfill-policy.json`, `thumbnails-policy.json`,
+`kvs-adapter-camera-requests-policy.json`), so the folder is what is deployed (FoundAndFixed.md #41).
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

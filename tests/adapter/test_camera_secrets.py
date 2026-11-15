@@ -259,3 +259,36 @@ def test_the_role_may_reach_only_its_own_things_secrets():
     assert sorted(st["Action"]) == ["ssm:DeleteParameter", "ssm:GetParameters", "ssm:PutParameter"]
     assert st["Resource"].endswith(":parameter/vsz/adapters/${credentials-iot:ThingName}/*")
     assert "Condition" not in st
+
+
+# --- strip: the rows rid of their secrets, after the narrowing (Phase 10.2f) ----------------------------
+
+def test_strip_takes_the_secrets_out_of_rows_whose_ssm_copy_is_whole(registry, monkeypatch, capsys):
+    table = registry([CAM03, CAM04, USB])
+    monkeypatch.setattr(table.route.lam, "ROW_SECRETS", "drop")         # provision.sh narrow sets it
+    camera_secrets.mirror(now=1000)
+    before = dict(table.session.ssm.params)
+    assert camera_secrets.strip() == 0
+    for cid in ("cam-03", "cam-04"):
+        assert not set(camera_secrets.FIELDS) & set(table.row(cid))
+    assert table.session.ssm.params == before                            # SSM untouched
+    assert registry_reads.own_row("cam-03")["onvifPassword"] == PW       # readers now get them from SSM
+    out = capsys.readouterr().out
+    assert "cam-03: secrets in SSM only" in out and PW not in out and MAIN not in out
+
+
+def test_strip_leaves_a_row_whose_ssm_copy_differs(registry, monkeypatch, capsys):
+    table = registry([CAM03])
+    monkeypatch.setattr(table.route.lam, "ROW_SECRETS", "drop")
+    camera_secrets.write("cam-03", {"onvifPassword": PW, "rtspUrl": MAIN})        # no liveRtspUrl
+    assert camera_secrets.strip() == 1
+    assert table.row("cam-03")["liveRtspUrl"] == SUB and table.row("cam-03")["onvifPassword"] == PW
+    assert "cam-03: SSM doesn't hold the row's secrets (liveRtspUrl differ)" in capsys.readouterr().out
+
+
+def test_strip_before_the_route_drops_secrets_says_so(registry, capsys):
+    table = registry([CAM03])                                             # ROW_SECRETS: keep
+    camera_secrets.mirror(now=1000)
+    assert camera_secrets.strip() == 1
+    assert table.row("cam-03")["onvifPassword"] == PW
+    assert "is vsz-registry's ROW_SECRETS=drop set" in capsys.readouterr().out

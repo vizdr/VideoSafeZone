@@ -21,13 +21,15 @@ is refused, in case the route were ever left open by mistake.
   POST /registry/<thing>/clips                       {item} -- a clip row of one of this Thing's cameras
   POST /registry/<thing>/devices                     {endpointRefs} -- which belong to another adapter's
                                                      cameras (the scan's mark, D16)
+  GET  /registry/<thing>/requests/<requestId>        a camera request of the page's Add cameras for this
+                                                     Thing, password included (D16; Phase 10.2f)
 
 A row is this Thing's when its adapterId says so; a row without one is the adopting adapter's
 (ADOPTING_THING, adapter-01), unless it was released (camera_control.is_mine on the Pi). Never through
 here: a row's key, or whose it is (adapterId, releasedFrom -- the directory API's, D15); a claim token
 (`registering`) is set only by /claim. Completing a registration and abandoning a claim are field
 updates that expect the token. Values are written as given -- the data contract's field-by-field rule
-is the caller's -- and nothing here logs a value: rows still carry camera passwords (until 10.2d).
+is the caller's -- and nothing here logs a value: rows, and requests, carry camera passwords.
 """
 import json
 import os
@@ -41,13 +43,18 @@ from botocore.exceptions import ClientError
 
 REGION = os.environ["AWS_REGION"]
 CAMERAS_TABLE = os.environ.get("CAMERAS_TABLE", "cameras")
+REQUESTS_TABLE = os.environ.get("REQUESTS_TABLE", "camera-requests")
+# "keep": rows hold the camera secrets as well as SSM, while VMS's card still reads them there; "drop"
+# once it doesn't (DEALER-PANEL-PLAN.md Phase 10.2f, set by provision.sh narrow). Anything else refuses.
+ROW_SECRETS = os.environ.get("ROW_SECRETS", "keep")
+SECRET_FIELDS = ("onvifPassword", "rtspUrl", "liveRtspUrl")      # camera_secrets.FIELDS on the Pi
 CLIPS_TABLE = os.environ.get("CLIPS_TABLE", "clips")
 ADOPTING_THING = os.environ.get("ADOPTING_THING", "")       # adopts unstamped rows (D12): adapter-01
 DEVICE_ROLE = os.environ.get("DEVICE_ROLE", "KVSAdapterRole")
 CORS = {"Access-Control-Allow-Origin": "*"}
 THING = re.compile(r"^adapter-[0-9]{2,6}$")
 CAMERA = re.compile(r"^cam-[0-9]{2,4}$")
-YEAR = re.compile(r"^[0-9]{4}$")             # the older clip key's third part (until 10.2f)
+REQUEST = re.compile(r"^[0-9a-f-]{8,64}$")    # adapter-cameras' request IDs (agent.REQUEST_ID_RE)
 FIELD = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 OWNERSHIP = {"cameraId", "adapterId", "releasedFrom"}       # the key, and whose the row is
 NEVER_SET = OWNERSHIP | {"registering"}                     # a claim is made by /claim alone
@@ -142,6 +149,16 @@ def update(thing, camera, body):
         raise Refused(403, f"never from an adapter: {', '.join(sorted((set(sets) & NEVER_SET) | (set(removes) & OWNERSHIP)))}")
     if any(v is None for v in expect.values()):
         raise Refused(400, "expect a value; for an absent field use missing")
+    if ROW_SECRETS not in ("keep", "drop"):
+        raise Refused(500, "ROW_SECRETS must be keep or drop")
+    if ROW_SECRETS == "drop":
+        # The rows hold no camera secrets any more and never get them back: the Pi keeps them in SSM
+        # (camera_secrets.keep_beside), so here a secret field is left out -- and every write takes away
+        # whatever secrets a row still holds (camera_secrets.py strip relies on that).
+        if {*expect, *exists, *missing} & {*SECRET_FIELDS}:
+            raise Refused(400, "no condition on a camera secret: the rows hold none")
+        sets = {k: v for k, v in sets.items() if k not in SECRET_FIELDS}
+        removes = [*(k for k in removes if k not in SECRET_FIELDS), *SECRET_FIELDS]
 
     def write(owned):
         e = Expression()
@@ -240,10 +257,9 @@ def clip(thing, camera, body):
     if not isinstance(cid, str) or not CAMERA.match(cid) or not isinstance(item["startTs"], str):
         raise Refused(400, "item: a camera ID and a start time")
     # Its own camera's key, under its own Thing: clips/<cameraId>/<thing>/... (Phase 10.2e) -- the
-    # camera where every clip reader takes it from. Until the role is narrowed (10.2f), an uploader not
-    # yet restarted may still send the older clips/<cameraId>/<YYYY>/... .
+    # camera where every clip reader takes it from.
     parts = item["s3Key"].split("/") if isinstance(item["s3Key"], str) else []
-    if len(parts) < 4 or parts[0] != "clips" or parts[1] != cid or not (parts[2] == thing or YEAR.match(parts[2])):
+    if len(parts) < 4 or parts[0] != "clips" or parts[1] != cid or parts[2] != thing:
         raise Refused(400, f"item: the clip's key is under clips/{cid}/{thing}/")
     row = table(CAMERAS_TABLE).get_item(Key={"cameraId": cid}).get("Item")
     if not row or not is_mine(row, thing):
@@ -276,6 +292,21 @@ def devices(thing, camera, body):
                                       if r.get("onvifEndpointRef") in wanted and not is_mine(r, thing)})}
 
 
+REQUEST_FIELDS = ("requestId", "thing", "xaddr", "endpointRef", "user", "password", "displayName")
+
+
+def camera_request(thing, request_id, body):
+    """A camera request of the web page's Add cameras (D16), for the agent of the adapter it is for:
+    the password it carries reaches that adapter only, and the device role needs no read of the table
+    (DEALER-PANEL-PLAN.md Phase 10.2f). Another adapter's request is no request."""
+    if not REQUEST.match(request_id or ""):
+        raise Refused(400, "a request ID")
+    item = table(REQUESTS_TABLE).get_item(Key={"requestId": request_id}).get("Item")
+    if not item or item.get("thing") != thing:
+        raise Refused(404, "no such request for this adapter")
+    return 200, {"request": {k: item[k] for k in REQUEST_FIELDS if k in item}}
+
+
 ROUTES = [
     ("GET", r"(?P<thing>[^/]+)/ping", who_asks),
     ("POST", r"(?P<thing>[^/]+)/cameras/claim", claim),
@@ -283,6 +314,7 @@ ROUTES = [
     ("POST", r"(?P<thing>[^/]+)/cameras/(?P<camera>cam-[0-9]{2,4})", update),
     ("POST", r"(?P<thing>[^/]+)/clips", clip),
     ("POST", r"(?P<thing>[^/]+)/devices", devices),
+    ("GET", r"(?P<thing>[^/]+)/requests/(?P<request>[^/]+)", camera_request),
 ]
 
 
@@ -309,7 +341,7 @@ def lambda_handler(event, context):
                 continue
             if not THING.match(m["thing"]):
                 return registry_answer(404, {"error": f"no adapter {m['thing']}"})
-            status, out = fn(m["thing"], m.groupdict().get("camera"), body)
+            status, out = fn(m["thing"], m.groupdict().get("camera") or m.groupdict().get("request"), body)
             return registry_answer(status, out)
         if allowed:
             return registry_answer(405, {"error": f"{method} isn't allowed here: {', '.join(sorted(set(allowed)))}"})

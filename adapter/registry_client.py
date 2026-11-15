@@ -138,6 +138,15 @@ def elsewhere(endpoint_refs, session=None):
     return set(_answer(*call("POST", "devices", {"endpointRefs": refs}, session=session))["elsewhere"])
 
 
+def camera_request(request_id, session=None):
+    """The web page's camera request for this adapter (D16), password included; None when there is no
+    such request for this adapter (another adapter's is none) -- read through the route (Phase 10.2f)."""
+    try:
+        return _answer(*call("GET", f"requests/{request_id}", session=session))["request"]
+    except NotMine:
+        return None
+
+
 def check(camera_id=None, session=None):
     """The route's three promises, on this Pi: it answers; another Thing's path is refused; a write
     to one of this Pi's cameras goes through. Returns how many failed."""

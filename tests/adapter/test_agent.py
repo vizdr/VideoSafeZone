@@ -513,6 +513,8 @@ REQUEST = {"requestId": "5678efab-0000-4000-8000-000000000001", "thing": "test-t
 def test_a_request_is_registered_as_the_admin_gui_would_and_the_password_never_travels(web):
     w = web(requests=[REQUEST])
     agent.on_message(CMD, json.dumps({"action": "register", "requestId": "5678efab-0000-4000-8000-000000000001"}).encode())
+    # read through the registry route, which hands an adapter only its own requests (Phase 10.2f)
+    assert ("GET", "requests/5678efab-0000-4000-8000-000000000001") in [c[:2] for c in w.table.route.calls]
     assert [m["status"] for m in w.sent(REGISTRATION)] == ["registering", "done"]
     assert w.sent(REGISTRATION)[1]["cameraId"] == "cam-10"
     assert w.enriched == [(REQUEST["xaddr"], "admin", "s3cret-pw")]

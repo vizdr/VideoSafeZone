@@ -26,7 +26,6 @@ CONFIG_T = f"{config.TOPIC_PREFIX}/config"   # retained: whether the adapter is 
 # Thing policy keeps each Pi to its own topics, so no Pi can answer for another.
 DISCOVERY_T    = f"{config.TOPIC_PREFIX}/discovery"
 REGISTRATION_T = f"{config.TOPIC_PREFIX}/registration"
-REQUESTS_TABLE = "camera-requests"     # the Lambda adapter-cameras' requests, password included
 DISCOVERY_SEC  = 5
 REQUEST_ID_RE  = re.compile(r"^[0-9a-f-]{8,64}$")
 
@@ -192,8 +191,8 @@ def on_message(topic, payload, **kwargs):
 #
 # The browser can't reach the customer's LAN, and WS-Discovery works only on it: the page asks this
 # agent, over its own outbound MQTT session. `discover` scans and publishes what it found; `register`
-# carries only a request's ID -- the password waits in the camera-requests table, read here and
-# never sent over MQTT -- and registers the camera exactly as the admin GUI does
+# carries only a request's ID -- the password waits in the camera-requests table, read here through
+# the registry route (which hands an adapter only its own requests) and never sent over MQTT -- and registers the camera exactly as the admin GUI does
 # (camera_registration); `unregister` is the admin GUI's Unregister.
 
 def _now():
@@ -258,8 +257,8 @@ def run_registration(request_id):
         _publish(REGISTRATION_T, {"requestId": request_id, "status": status, "at": _now(), **fields})
 
     try:
-        req = get_session().resource("dynamodb").Table(REQUESTS_TABLE).get_item(
-            Key={"requestId": request_id}).get("Item")
+        # Through the registry route, which hands an adapter only its own requests (Phase 10.2f).
+        req = registry_client.camera_request(request_id)
     except Exception as e:  # noqa: BLE001
         return report("failed", error=f"the request couldn't be read ({type(e).__name__})")
     if not req or req.get("thing") != THING or not req.get("xaddr") or not req.get("user"):

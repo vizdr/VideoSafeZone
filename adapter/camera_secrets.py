@@ -153,6 +153,39 @@ def mirror(rows=None, dry_run=False, force=False, now=None, session=None, log=pr
     return changed
 
 
+def strip(session=None, log=print):
+    """After the narrowing (Phase 10.2f, the route's ROW_SECRETS=drop): each of this Pi's rows rid of its
+    secrets, once SSM is seen to hold exactly the row's -- a row whose SSM copy differs keeps them (run
+    `mirror` first). The route's every write now takes the secrets out of a row, so a harmless one is
+    enough (`updatedAt`); a row that still holds them afterwards means the route still keeps them.
+    Returns how many rows still hold secrets. Values are never printed."""
+    import registry_client
+    import registry_reads
+    from datetime import datetime, timezone
+    left = 0
+    for row in registry_reads.own_rows(session=session, secrets=False):
+        if row.get("mode") != "passthrough" or not holds_secrets(row):
+            continue
+        cid, want = row["cameraId"], _wanted(row)
+        have = read(cid, session)
+        diff = sorted(f for f in {*want, *have} if want.get(f) != have.get(f))
+        if diff:
+            log(f"{cid}: SSM doesn't hold the row's secrets ({', '.join(diff)} differ) -- left in the row; "
+                f"camera_secrets.py mirror, then strip again")
+            left += 1
+            continue
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        registry_client.update(cid, set={"updatedAt": stamp}, session=session)
+    for row in registry_reads.own_rows(session=session, secrets=False):
+        if row.get("mode") == "passthrough" and holds_secrets(row) and _wanted(row) == read(row["cameraId"], session):
+            log(f"{row['cameraId']}: the row still holds its secrets -- is vsz-registry's ROW_SECRETS=drop set "
+                f"(provision.sh narrow)?")
+            left += 1
+        elif row.get("mode") == "passthrough" and not holds_secrets(row):
+            log(f"{row['cameraId']}: secrets in SSM only")
+    return left
+
+
 def check(session=None):
     """On this Pi: IAM refuses another Thing's secrets, and each camera's SSM copy is its row's (or, for
     a row that holds none, SSM has them). Returns how many failed."""
@@ -201,4 +234,6 @@ if __name__ == "__main__":
     if sys.argv[1:] in (["mirror"], ["mirror", "--dry-run"]):
         mirror(dry_run=sys.argv[2:] == ["--dry-run"], force=True)
         sys.exit(0)
-    sys.exit("usage: camera_secrets.py check | mirror [--dry-run]")
+    if sys.argv[1:] == ["strip"]:
+        sys.exit(1 if strip() else 0)
+    sys.exit("usage: camera_secrets.py check | mirror [--dry-run] | strip   (strip: after provision.sh narrow only)")

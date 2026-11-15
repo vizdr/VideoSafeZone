@@ -122,6 +122,7 @@ bash cloud/provision.sh accounts --dry-run        # Additional users: the API ma
 bash cloud/provision.sh registry --dry-run        # the adapters' registry route: vsz-registry, IAM-signed, own Thing's path
 bash cloud/provision.sh adapter-index --dry-run   # cameras' adapterId-index; the device role queries its own Thing's rows
 bash cloud/provision.sh camera-secrets --dry-run  # the device role reads/writes its own Thing's camera secrets in SSM
+bash cloud/provision.sh narrow --dry-run          # 10.2f's narrowed device role: readiness; applied only --vms-moved
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -438,7 +439,8 @@ rows** (Phase 10.2c): `adapter/registry_reads.py` — `own_rows(fields)` / `own_
 `adapterId-index`, which IAM limits to the caller's Thing (the adopting Pi also scans for unstamped rows
 until 10.2f) — never `scan`/`get_item`; it always reads the fields `acts_on` needs (FoundAndFixed.md #96).
 What needs every adapter's rows is the route's: the next free ID (`claim()`), and which discovered devices
-are another adapter's cameras (`elsewhere()`, yes or no only).
+are another adapter's cameras (`elsewhere()`, yes or no only); so is a web-page camera request for this
+adapter (`camera_request()`, Phase 10.2f).
 
 **Recording triggers are per camera** (`adapter/onvif_events.py`): which ONVIF topic and
 on/off field serve each mode comes from the camera's own `GetEventProperties`, recorded as
@@ -454,8 +456,10 @@ Values are JSON (an empty password is kept). Until the role is narrowed (10.2f) 
 and stays what readers use — VMS's card may change a row, and an SSM copy taken for the truth would
 shadow it — so `registry_client.update()` writes a secret field to SSM after the row, rematch mirrors
 each row into SSM (once a day per camera, or when its row changes), and `registry_reads` fills a row
-from SSM only when the row holds none (`own_rows(secrets=False)` reads the table as it is). Never print
-a secret's value: field names only. **S3 keys** the Pi writes are under its Thing (Phase 10.2e):
+from SSM only when the row holds none (`own_rows(secrets=False)` reads the table as it is). At 10.2f
+`provision.sh narrow` sets `vsz-registry`'s `ROW_SECRETS=drop` and `camera_secrets.py strip` empties the
+rows; `adapter/device_access.py check` then tries the narrowed role on the Pi. Never print a secret's
+value: field names only. **S3 keys** the Pi writes are under its Thing (Phase 10.2e):
 thumbnails `thumbs/<thing>/<cameraId>.jpg`, outage clips `clips/<cameraId>/<thing>/…` — the camera stays
 second, where every clip reader takes it from (`clips/<cameraId>/…`).
 

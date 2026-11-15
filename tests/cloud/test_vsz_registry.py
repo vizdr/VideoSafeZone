@@ -235,7 +235,7 @@ def test_a_clip_row_only_for_ones_own_camera_and_never_over_another(aws):
 
 @pytest.mark.parametrize("key, ok", [
     ("clips/cam-02/adapter-02/2026/11/15/090000-outage.mp4", True),     # its camera, under its Thing (10.2e)
-    ("clips/cam-02/2026/11/15/090000-outage.mp4", True),                # an uploader not yet restarted (until 10.2f)
+    ("clips/cam-02/2026/11/15/090000-outage.mp4", False),               # the older key: gone at 10.2f
     ("clips/cam-02/adapter-07/2026/11/15/090000-outage.mp4", False),    # under another adapter's Thing
     ("clips/cam-03/adapter-02/2026/11/15/090000-outage.mp4", False),    # another camera's key
     ("clips/cam-02/x.mp4", False), ("thumbs/adapter-02/cam-02.jpg", False), ("clips/cam-02", False),
@@ -270,3 +270,64 @@ def test_the_scan_learns_which_devices_are_another_adapters(aws, adopting):
     assert call("POST", "adapter-01/devices", {"endpointRefs": refs})[1]["elsewhere"] == \
         ["urn:uuid:mine", "urn:uuid:released", "urn:uuid:theirs"]          # unstamped rows are adapter-01's
     assert call("POST", "adapter-02/devices", {"endpointRefs": "urn:uuid:mine"})[0] == 400
+
+
+# --- the web page's camera requests (D16), for their adapter only (Phase 10.2f) ------------------------
+
+REQ = {"requestId": "5678efab-0000-4000-8000-000000000001", "thing": "adapter-02", "status": "sent",
+       "xaddr": "http://192.0.2.20/onvif/device_service", "endpointRef": "urn:uuid:d0", "user": "admin",
+       "password": "s3cret-pw", "displayName": "Yard", "createdAt": "2026-11-15T15:00:00Z", "expiresAt": 1794760000}
+
+
+def requests_table(aws, *items):
+    from fakes import FakeTable
+    fake = aws(reg)
+    fake.tables["camera-requests"] = FakeTable(list(items), hash_key="requestId")
+    return fake.tables["camera-requests"]
+
+
+def test_a_camera_request_reaches_the_adapter_it_is_for_and_no_other(aws):
+    requests_table(aws, REQ)
+    status, out = call("GET", f"adapter-02/requests/{REQ['requestId']}")
+    assert status == 200 and out["request"] == {k: REQ[k] for k in reg.REQUEST_FIELDS}      # no status, no expiry
+    assert call("GET", f"adapter-07/requests/{REQ['requestId']}") == (404, {"error": "no such request for this adapter"})
+    assert call("GET", "adapter-02/requests/0000aaaa-0000")[0] == 404                       # none such
+    assert call("GET", "adapter-02/requests/..%2Fx")[0] == 400
+    assert call("POST", f"adapter-02/requests/{REQ['requestId']}")[0] == 405
+
+
+# --- the rows without camera secrets, once VMS has its own copies (Phase 10.2f) -------------------------
+
+def test_with_row_secrets_kept_a_secret_is_written_to_the_row(aws, monkeypatch):
+    cams, _ = rows(aws, cam("cam-02", "adapter-02"))
+    assert call("POST", "adapter-02/cameras/cam-02", {"set": {"rtspUrl": "rtsp://u:pw@h/s"}})[0] == 200
+    assert cams.row("cam-02")["rtspUrl"] == "rtsp://u:pw@h/s"
+
+
+def test_with_row_secrets_dropped_no_secret_reaches_a_row_and_any_write_takes_them_away(aws, monkeypatch):
+    monkeypatch.setattr(reg, "ROW_SECRETS", "drop")
+    cams, _ = rows(aws, cam("cam-02", "adapter-02", onvifPassword="pw", rtspUrl="rtsp://u:pw@h/s", liveRtspUrl="rtsp://u:pw@h/l"),
+                   cam("cam-03", "adapter-02"))
+    assert call("POST", "adapter-02/cameras/cam-02", {"set": {"updatedAt": "t"}}) == (200, {"updated": "cam-02"})
+    assert not {"onvifPassword", "rtspUrl", "liveRtspUrl"} & set(cams.row("cam-02"))      # taken away (strip)
+    assert cams.row("cam-02")["updatedAt"] == "t"
+    assert call("POST", "adapter-02/cameras/cam-03", {"set": {"rtspUrl": "rtsp://x", "displayName": "Yard"}})[0] == 200
+    assert "rtspUrl" not in cams.row("cam-03") and cams.row("cam-03")["displayName"] == "Yard"
+    assert call("POST", "adapter-02/cameras/cam-03", {"set": {"liveRtspUrl": "rtsp://x"}})[0] == 200   # only a secret
+    assert call("POST", "adapter-02/cameras/cam-03", {"remove": ["liveRtspUrl"]})[0] == 200
+
+
+@pytest.mark.parametrize("cond", [{"expect": {"rtspUrl": "x"}}, {"exists": ["onvifPassword"]}, {"missing": ["liveRtspUrl"]}])
+def test_with_row_secrets_dropped_no_condition_on_a_secret(aws, monkeypatch, cond):
+    monkeypatch.setattr(reg, "ROW_SECRETS", "drop")
+    rows(aws, cam("cam-02", "adapter-02"))
+    assert call("POST", "adapter-02/cameras/cam-02", {"set": {"updatedAt": "t"}, **cond}) == \
+        (400, {"error": "no condition on a camera secret: the rows hold none"})
+
+
+def test_row_secrets_set_to_anything_else_refuses_every_write(aws, monkeypatch):
+    monkeypatch.setattr(reg, "ROW_SECRETS", "dropp")
+    cams, _ = rows(aws, cam("cam-02", "adapter-02"))
+    assert call("POST", "adapter-02/cameras/cam-02", {"set": {"updatedAt": "t"}}) == \
+        (500, {"error": "ROW_SECRETS must be keep or drop"})
+    assert "updatedAt" not in cams.row("cam-02")

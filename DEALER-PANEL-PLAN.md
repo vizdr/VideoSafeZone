@@ -1951,6 +1951,57 @@ are deployed the page shows each camera's older thumbnail, frozen. `vsz-registry
 its live code is this tree's of 10.2b, never committed (checked: the live copy differs from the tree only by
 the clip-key check).
 
+*10.2f, 2026-11-15 — prepared, not applied: VMS still shares the role.* The account shows it (read
+only): one role alias (`KVSAdapterRoleAlias`), one adapter Thing (`adapter-01`), one camera table, only
+the `cam-*` streams — and `KVSAdapterRole` even carries VMS's own inline policy `PirLocal`. Narrowing now
+would break VMS's card four ways: its admin GUI writes and scans `cameras` directly, its registration
+makes streams untagged, its outage uploader writes clips and clip rows directly, and `PirLocal` would go.
+So (the user's choice, 2026-11-15): **prepare now, apply once VMS runs on its own copies.**
+*Applied now, since nothing of it reaches VMS* (step A): **the web page's camera requests go through the
+route** — the open point of the inventory above, decided as `GET <thing>/requests/<requestId>` on
+`vsz-registry` (`camera_request`: the request only if its `thing` is the caller's, its seven fields and
+nothing else; another adapter's or a missing one is "no such request for this adapter"), rather than a
+`LeadingKeys` condition on request IDs that would have to start with the Thing — the route was there,
+and the device role then needs no read of `camera-requests` at all; `vsz-registry-role` gets `GetItem` on
+it (`cloud/iam/vsz-registry-requests-policy.json`, added by `provision.sh registry`), the agent reads
+through `registry_client.camera_request`. And **10.2e's older keys go**: a thumbnail only under its row's
+adapter (none for a row without one), a clip row's key only `clips/<cameraId>/<thing>/…`.
+*Prepared, applied later* (step B): the target policies, each scoped by the caller's Thing —
+`cloud/iam/kvs-adapter-streams-policy.json` (Describe, GetDataEndpoint, PutMedia and UpdateStream by
+`aws:ResourceTag/adapterId`; CreateStream only with `aws:RequestTag/adapterId` = its Thing and no other
+tag key; TagStream needing both tags and only that key — the spike's shapes; **UpdateStream by tag is
+untried**: if it fails, only `stream-codec.py`'s best-effort MediaType record does),
+`kvs-adapter-uploads-policy.json` (`thumbs/${Thing}/*`; `clips/*/${Thing}/*`, PutObject and GetObject),
+`kvs-adapter-events-policy.json` (`topic/adapter/${Thing}/event`), beside the kept `own-rows`,
+`registry-route`, `camera-secrets`; to go: `KVSProducer`, `OutageBackfill`, `Thumbnails`, `camera-requests`,
+`PirLocal`. **`provision.sh narrow`** checks first (each a PASS/FAIL line, its dry run any time): `--vms-moved`
+given (the operator's word for D14 — nothing in the account can tell); the kept policies as their files;
+`vsz-registry` this tree's and reading camera requests; every `cam-*` stream tagged; every camera row
+stamped; every row's secrets in SSM. Only with all met: it saves the live policies and `vsz-registry`'s
+`ROW_SECRETS` (0600, `~/.local/state/videosafezone/kvs-adapter-role-<time>.json`), puts the three, deletes
+the five, sets `ROW_SECRETS=drop`, and checks the role is exactly the files (#41); `provision.sh
+narrow-rollback <file>` puts back what was saved. **The rows without secrets**: `vsz-registry`'s
+`ROW_SECRETS` (`keep` until then; `drop`; anything else refuses every write) — in `drop`, a secret field
+never reaches a row, every write takes away any a row still holds, and a condition on one is refused;
+`camera_secrets.py strip` on each Pi then makes one harmless write per row whose SSM copy it has checked
+(a row whose copy differs keeps its secrets: mirror first), leaving SSM untouched, and the readers take
+them from SSM (10.2d's `fill`). **`adapter/device_access.py check`** on each Pi, afterwards: probes that
+change nothing either way — its rows by the index (allowed), a Scan, a row by key, a clip row written
+directly (under a condition that can never hold), a camera request read directly (each refused), each
+camera's recorded stream (allowed by its tag), a thumbnail under its Thing — then the index's and the
+secrets' own checks. Its dry run against the account now: **two conditions not met** — VMS (expected) and
+`vsz-registry` not yet this tree's (until step A is deployed) — the other four met (kept policies as the
+files, every stream tagged, every row stamped, every row's secrets in SSM); it takes about a minute and a
+half (each AWS CLI call is ~3 s on the Pi). Tests (pytest 1621 → 1643): the request route, the client and
+the agent through it, the readers with no older key, `ROW_SECRETS` (kept, dropped, conditions, a bad
+value), `strip` (whole copy, differing copy, before the switch), `device_access` (narrowed, wide, what a
+probe proves), the policy files (every statement scoped by the Thing; the lists in `provision.sh`; the
+refusal and the save before any change). Broken on purpose once each, red (17), two after a fix: the
+portal's older thumbnail key passed — an extra request fell into its catch-all — until the test asked
+`thumbnail_keys` directly; and `drop` still setting a secret it also removed passed because `FakeTable`
+applied both, where DynamoDB refuses an update naming one field twice — the fake now refuses it too.
+Built across two sessions after two more SSH drops; the second took over with the first's account.
+
 
 Fleet provisioning by claim, behind the same Enter Cloud ID screen (D15); USB cameras on new
 adapters (A6); SSO with Microsoft and Apple, on the sign-in page and as the Account page's "Convert
@@ -2028,5 +2079,7 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 10.2d: `provision.sh camera-secrets` (the user), then `camera_secrets.py mirror` and `check` on `adapter-01` — four PASS; restart 14:48 (2026-11-15)
 - [x] Phase 10.2e: the Pi's S3 keys under its Thing (thumbnails, outage clips), readers following — built and tested (2026-11-15)
 - [x] Phase 10.2e: `deploy.sh lambda list-cameras`, `lambda vsz-directory-api`, `lambda vsz-registry --force` and `systemctl --user restart kvs-outage-uploader` (the user, 15:16) — all three live as this tree; checked: `list-cameras` (invoked as `adapter-01`'s customer) links all four thumbnails under `thumbs/adapter-01/` and each link loads (206, image/jpeg); the live route refuses a clip key under another Thing and one of another camera (400, nothing written); the uploader up on the new code. Not tried live: the portal's thumbnail time (`vsz-directory-api`, the same `thumbnail_keys`), and an outage backfill (needs an outage) (2026-11-15)
-- [ ] Phase 10.2f: the narrowed role, once VMS runs on its own copies
+- [x] Phase 10.2f, prepared: the narrowed policies, `provision.sh narrow` / `narrow-rollback`, `ROW_SECRETS`, `camera_secrets.py strip`, `device_access.py check`; built and tested; dry run: VMS not moved, `vsz-registry` not yet this tree's (2026-11-15)
+- [x] Phase 10.2f, step A (the user, 16:07): `provision.sh registry`, `deploy.sh lambda vsz-registry`, `lambda list-cameras`, `lambda vsz-directory-api`, `systemctl --user restart kvs-agent`; the older thumbnails deleted — checked: `vsz-registry-role`'s `camera-requests` as the file, the three Lambdas this tree's; with the Pi's credentials the request route answers an unknown request 404 (it reads the table), IAM refuses `adapter-99`'s path (403), the older clip key is refused (400); `list-cameras` links all four thumbnails under `thumbs/adapter-01/` and only those exist; `narrow --dry-run`: **5 of 6 met, only VMS's move left** (2026-11-15)
+- [ ] Phase 10.2f, applied: once VMS runs on its own copies — `provision.sh narrow --vms-moved`, then on each Pi `ADOPT_UNSTAMPED_ROWS=no`, the five units restarted, `device_access.py check`, `camera_secrets.py strip`, `check`; the dropped policies' files removed from `cloud/iam/`
 - [ ] §9 measurements recorded here

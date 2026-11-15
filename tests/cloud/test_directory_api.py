@@ -266,14 +266,14 @@ def test_each_adapter_gets_its_cameras_and_plan_vs_actual_without_a_credential(a
     monkeypatch.setattr(api, "THUMB_BUCKET", "evidence")
     fake = aws(api, cameras=REGISTRY)
     s3 = fake.stub("s3")
-    # Under the camera's adapter first, then the older key (DEALER-PANEL-PLAN.md Phase 10.2e).
+    # Under the camera's adapter (DEALER-PANEL-PLAN.md Phase 10.2e/f); a row without one has none.
+    assert api.thumbnail_keys("cam-02", "adapter-01") == ["thumbs/adapter-01/cam-02.jpg"]
+    assert api.thumbnail_keys("cam-02", None) == []
     s3.add_response("head_object", {"LastModified": datetime(2026, 11, 7, 9, 30, tzinfo=timezone.utc)},
                     {"Bucket": "evidence", "Key": "thumbs/adapter-01/cam-01.jpg"})
     s3.add_client_error("head_object", "404", expected_params={"Bucket": "evidence", "Key": "thumbs/adapter-01/cam-02.jpg"})
-    s3.add_client_error("head_object", "404", expected_params={"Bucket": "evidence", "Key": "thumbs/cam-02.jpg"})
-    s3.add_client_error("head_object", "404", expected_params={"Bucket": "evidence", "Key": "thumbs/adapter-01/cam-03.jpg"})
     s3.add_response("head_object", {"LastModified": datetime(2026, 11, 7, 9, 31, tzinfo=timezone.utc)},
-                    {"Bucket": "evidence", "Key": "thumbs/cam-03.jpg"})
+                    {"Bucket": "evidence", "Key": "thumbs/adapter-01/cam-03.jpg"})
     status, out = route("GET", f"customers/{CUSTOMER}/adapters")
     assert status == 200 and "registryError" not in out
     first, second = out["adapters"]

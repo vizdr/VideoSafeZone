@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OwnStreamsByTag",
+      "Effect": "Allow",
+      "Action": ["kinesisvideo:DescribeStream", "kinesisvideo:GetDataEndpoint", "kinesisvideo:PutMedia", "kinesisvideo:UpdateStream"],
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-*/*",
+      "Condition": {"StringEquals": {"aws:ResourceTag/adapterId": "${credentials-iot:ThingName}"}}
+    },
+    {
+      "Sid": "NewStreamsOnlyTaggedAsOwn",
+      "Effect": "Allow",
+      "Action": "kinesisvideo:CreateStream",
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-*/*",
+      "Condition": {
+        "StringEquals": {"aws:RequestTag/adapterId": "${credentials-iot:ThingName}"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["adapterId"]}
+      }
+    },
+    {
+      "Sid": "TagOnlyOwnStreamsAsOwn",
+      "Effect": "Allow",
+      "Action": "kinesisvideo:TagStream",
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-*/*",
+      "Condition": {
+        "StringEquals": {"aws:RequestTag/adapterId": "${credentials-iot:ThingName}",
+                         "aws:ResourceTag/adapterId": "${credentials-iot:ThingName}"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["adapterId"]}
+      }
+    }
+  ]
+}

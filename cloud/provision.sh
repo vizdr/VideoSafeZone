@@ -44,6 +44,10 @@
 #                                                     query it for its own Thing only
 #   bash cloud/provision.sh camera-secrets            each adapter's camera secrets in SSM (DEALER-PANEL-PLAN.md Phase
 #                                                     10.2d): KVSAdapterRole may read and write /vsz/adapters/<its Thing>/*
+#   bash cloud/provision.sh narrow --dry-run          the narrowed device role (DEALER-PANEL-PLAN.md Phase 10.2f): checks
+#                                                     what it needs; with --vms-moved (D14) and every check met, puts
+#                                                     the narrowed policies, drops the wide ones, sets ROW_SECRETS=drop
+#   bash cloud/provision.sh narrow-rollback FILE      the role as narrow saved it before changing it
 #   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
 #                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
 #                                                     on every function with the check, vsz-users beside
@@ -63,6 +67,8 @@
 #     vsz-db-client). Adding a rule removes nothing; the other project's rules stay as they are.
 #     And adapter-index adds an index to the cameras table, which VMS shares: its rows, key and
 #     reads stay as they are; the index only adds a way to read the rows that have an adapterId.
+#     And narrow changes KVSAdapterRole itself -- the one step that takes permissions away, refused
+#     until VMS runs on its own copies (--vms-moved) and every adapter's data is ready; saved first.
 #
 # Needs the operator's AWS CLI, logged in to the account below (aws login --remote).
 set -euo pipefail
@@ -91,8 +97,8 @@ say()  { printf '%s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-DRY=0 ARGS=()
-for a in "$@"; do case "$a" in --dry-run) DRY=1 ;; *) ARGS+=("$a") ;; esac; done
+DRY=0 VMS_MOVED=0 ARGS=()
+for a in "$@"; do case "$a" in --dry-run) DRY=1 ;; --vms-moved) VMS_MOVED=1 ;; *) ARGS+=("$a") ;; esac; done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 # shellcheck source=cloud/package.sh
@@ -1125,6 +1131,8 @@ provision_registry() {
   rid=$(ensure_resource "/registry/{proxy+}")
   ensure_method "$rid" "/registry/{proxy+}" ANY vsz-registry iam
   ensure_inline_policy KVSAdapterRole registry-route kvs-adapter-registry-route-policy.json
+  # The web page's camera requests (D16), for the agent of their adapter only (Phase 10.2f).
+  ensure_inline_policy vsz-registry-role camera-requests vsz-registry-requests-policy.json
   deploy_stage registry
   if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
   # Done means: an unsigned call is turned away by IAM, and the function is reached through the route
@@ -1209,6 +1217,151 @@ provision_camera_secrets() {
   say "   venv-adapter/bin/python3 adapter/camera_secrets.py check    # IAM refuses another Thing's; SSM = the rows"
 }
 
+# --- the narrowed device role (DEALER-PANEL-PLAN.md D13, Phase 10.2f) -----------------------------------
+#
+# KVSAdapterRole reduced to what an adapter needs, each part scoped by ${credentials-iot:ThingName}: its
+# streams by tag, its rows by the index, its secrets, its route, its uploads, its event topic. VMS's card
+# uses the same role until it runs on copies of its own (D14), so this refuses unless told --vms-moved,
+# and only once every adapter's data is ready for it: every stream tagged, every row stamped, every
+# row's secrets in SSM, the route live with the camera requests. The live policies are saved first;
+# narrow-rollback puts them back.
+
+NARROW_ADD="streams:kvs-adapter-streams-policy.json uploads:kvs-adapter-uploads-policy.json events:kvs-adapter-events-policy.json"
+NARROW_KEEP="own-rows:kvs-adapter-own-rows-policy.json registry-route:kvs-adapter-registry-route-policy.json camera-secrets:kvs-adapter-camera-secrets-policy.json"
+NARROW_DROP="KVSProducer OutageBackfill Thumbnails camera-requests PirLocal"
+NARROW_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/videosafezone"
+
+set_env() {   # set_env FUNCTION KEY VALUE -- sets one environment variable, whatever it was (narrow only)
+  local fn=$1 key=$2 value=$3 vars merged
+  vars=$(aws lambda get-function-configuration --function-name "$fn" --query 'Environment.Variables' --output json)
+  merged=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]) or {}; d[sys.argv[2]]=sys.argv[3]; print(json.dumps({"Variables": d}))' "$vars" "$key" "$value")
+  aws lambda update-function-configuration --function-name "$fn" --environment "$merged" >/dev/null
+  aws lambda wait function-updated --function-name "$fn"
+}
+
+narrow_ready() {   # one PASS/FAIL line per condition; returns how many failed
+  local fails=0 p name file live
+  pass() { say "PASS  $*"; }
+  fail() { say "FAIL  $*"; fails=$((fails + 1)); }
+  if [ "$VMS_MOVED" -eq 1 ]; then pass "VMS runs on copies of its own (--vms-moved, D14)"
+  else fail "VMS's card still uses KVSAdapterRole (D14) -- once it runs on its own copies, add --vms-moved"; fi
+  for p in $NARROW_KEEP; do
+    name=${p%%:*} file="$IAM_DIR/${p#*:}"
+    if live=$(aws iam get-role-policy --role-name KVSAdapterRole --policy-name "$name" --query PolicyDocument --output json 2>/dev/null) &&
+       python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1]) != json.load(open(sys.argv[2])))' "$live" "$file"; then
+      pass "KVSAdapterRole keeps $name, as cloud/iam/${p#*:}"
+    else fail "KVSAdapterRole has no $name as cloud/iam/${p#*:} (provision.sh adapter-index / registry / camera-secrets)"; fi
+  done
+  if aws iam get-role-policy --role-name vsz-registry-role --policy-name camera-requests >/dev/null 2>&1 &&
+     bash "$VMS_HOME/cloud/deploy.sh" lambda vsz-registry --dry-run 2>&1 | grep -q "already live, unchanged"; then
+    pass "vsz-registry is this tree's, and reads camera requests for the agents"
+  else fail "vsz-registry isn't this tree's, or can't read camera requests -- provision.sh registry, deploy.sh lambda vsz-registry"; fi
+  aws kinesisvideo list-streams --output json > "$TMP/streams.json"
+  local untagged=""
+  for arn in $(python3 -c 'import json,sys; print(" ".join(s["StreamARN"] for s in json.load(open(sys.argv[1]))["StreamInfoList"] if s["StreamName"].startswith("cam-")))' "$TMP/streams.json"); do
+    [ -n "$(aws kinesisvideo list-tags-for-stream --stream-arn "$arn" --query 'Tags.adapterId' --output text | sed 's/^None$//')" ] ||
+      untagged="$untagged ${arn#*:stream/}"
+  done
+  if [ -z "$untagged" ]; then pass "every cam-* stream carries its adapter's tag"
+  else fail "untagged streams (their producers would stop):${untagged// /, } -- rematch tags its own within a day"; fi
+  aws dynamodb scan --table-name cameras --output json > "$TMP/rows.json"
+  aws ssm describe-parameters --parameter-filters "Key=Name,Option=BeginsWith,Values=/vsz/adapters/" \
+      --query 'Parameters[].Name' --output json > "$TMP/params.json"
+  python3 - "$TMP/rows.json" "$TMP/params.json" > "$TMP/ready.txt" <<'PY'
+import json, sys
+rows = [{k: list(v.values())[0] for k, v in i.items()} for i in json.load(open(sys.argv[1]))["Items"]]
+params = set(json.load(open(sys.argv[2])) or [])
+cams = [r for r in rows if r.get("mode") in ("transcode", "passthrough")]
+unstamped = sorted(r["cameraId"] for r in cams if not r.get("adapterId") and not r.get("releasedFrom"))
+def absent(r):      # the secret fields a row holds whose SSM copy isn't there
+    base = "/vsz/adapters/%s/cameras/%s/" % (r.get("adapterId"), r["cameraId"])
+    return [f for f in ("onvifPassword", "rtspUrl", "liveRtspUrl") if f in r and base + f not in params]
+missing = sorted("%s (%s)" % (r["cameraId"], ", ".join(absent(r))) for r in cams
+                 if r.get("mode") == "passthrough" and "onvifPassword" in r and absent(r))
+print("PASS  every camera row has its adapter" if not unstamped else
+      f"FAIL  rows without an adapter (no Pi would see them): {', '.join(unstamped)} -- rematch on the adopting Pi stamps them")
+print("PASS  every row's secrets are in SSM" if not missing else
+      f"FAIL  secrets not in SSM: {'; '.join(missing)} -- camera_secrets.py mirror on that adapter's Pi")
+PY
+  cat "$TMP/ready.txt"
+  fails=$((fails + $(grep -c '^FAIL' "$TMP/ready.txt" || true)))
+  return "$fails"
+}
+
+provision_narrow() {
+  local fails=0 p backup names want
+  aws iam get-role --role-name KVSAdapterRole >/dev/null 2>&1 || die "no role KVSAdapterRole (the adapters' role)"
+  for p in $NARROW_ADD $NARROW_KEEP; do [ -e "$IAM_DIR/${p#*:}" ] || die "no cloud/iam/${p#*:}"; done
+  narrow_ready || fails=$?
+  say "the narrowing: put ${NARROW_ADD//:/ from }; delete $NARROW_DROP; keep ${NARROW_KEEP//:/ as }; vsz-registry ROW_SECRETS=drop"
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed ($fails condition(s) not met)"; return; fi
+  [ "$fails" -eq 0 ] || die "$fails condition(s) not met -- nothing was changed"
+  mkdir -p "$NARROW_DIR"
+  backup="$NARROW_DIR/kvs-adapter-role-$(date +%Y%m%dT%H%M%S).json"
+  python3 - "$backup" <<'PY'
+import json, os, subprocess, sys
+def aws(*a):
+    return json.loads(subprocess.run(["aws", "--region", "eu-central-1", *a, "--output", "json"], check=True,
+                                     capture_output=True, text=True).stdout)
+names = aws("iam", "list-role-policies", "--role-name", "KVSAdapterRole")["PolicyNames"]
+saved = {n: aws("iam", "get-role-policy", "--role-name", "KVSAdapterRole", "--policy-name", n)["PolicyDocument"] for n in names}
+env = (aws("lambda", "get-function-configuration", "--function-name", "vsz-registry").get("Environment") or {}).get("Variables") or {}
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump({"policies": saved, "ROW_SECRETS": env.get("ROW_SECRETS", "keep")}, f, indent=1)
+PY
+  say "saved the live policies: $backup"
+  for p in $NARROW_ADD; do
+    say "putting ${p%%:*} (cloud/iam/${p#*:})"
+    aws iam put-role-policy --role-name KVSAdapterRole --policy-name "${p%%:*}" --policy-document "file://$IAM_DIR/${p#*:}"
+  done
+  for p in $NARROW_DROP; do
+    if aws iam get-role-policy --role-name KVSAdapterRole --policy-name "$p" >/dev/null 2>&1; then
+      say "deleting $p"; aws iam delete-role-policy --role-name KVSAdapterRole --policy-name "$p"
+    fi
+  done
+  say "setting vsz-registry's ROW_SECRETS=drop"; set_env vsz-registry ROW_SECRETS drop
+  # Done means: the role is exactly the files (#41).
+  names=$(aws iam list-role-policies --role-name KVSAdapterRole --query 'PolicyNames' --output text | tr '\t' '\n' | sort | xargs)
+  want=$(for p in $NARROW_ADD $NARROW_KEEP; do echo "${p%%:*}"; done | sort | xargs)
+  [ "$names" = "$want" ] || die "KVSAdapterRole has $names, not $want -- narrow-rollback $backup"
+  for p in $NARROW_ADD $NARROW_KEEP; do
+    python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1]) != json.load(open(sys.argv[2])))' \
+      "$(aws iam get-role-policy --role-name KVSAdapterRole --policy-name "${p%%:*}" --query PolicyDocument --output json)" \
+      "$IAM_DIR/${p#*:}" || die "${p%%:*} isn't cloud/iam/${p#*:} -- narrow-rollback $backup"
+  done
+  say "verified: KVSAdapterRole is $want, as the files; next, on each adapter's Pi (LAUNCH.md, the narrowed role):"
+  say "   ADOPT_UNSTAMPED_ROWS=no in /etc/adapter/adapter.env, then restart the five long-running units"
+  say "   venv-adapter/bin/python3 adapter/device_access.py check"
+  say "   venv-adapter/bin/python3 adapter/camera_secrets.py strip && venv-adapter/bin/python3 adapter/camera_secrets.py check"
+  say "and remove the dropped policies' files from cloud/iam/ (kvs-producer, outage-backfill, thumbnails, kvs-adapter-camera-requests)"
+}
+
+provision_narrow_rollback() {   # narrow-rollback FILE -- the role and ROW_SECRETS as they were saved
+  local file=$1
+  [ -n "$file" ] && [ -r "$file" ] || die "usage: provision.sh narrow-rollback <saved file> (in $NARROW_DIR)"
+  if [ "$DRY" -eq 1 ]; then
+    say "would restore KVSAdapterRole to: $(python3 -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["policies"])))' "$file")"
+    say "dry run: nothing was changed"; return
+  fi
+  python3 - "$file" <<'PY'
+import json, subprocess, sys
+saved = json.load(open(sys.argv[1]))
+def aws(*a, out=True):
+    r = subprocess.run(["aws", "--region", "eu-central-1", *a, "--output", "json"], check=True, capture_output=True, text=True)
+    return json.loads(r.stdout) if out and r.stdout.strip() else None
+for name, doc in saved["policies"].items():
+    print(f"restoring {name}")
+    aws("iam", "put-role-policy", "--role-name", "KVSAdapterRole", "--policy-name", name, "--policy-document", json.dumps(doc), out=False)
+for name in aws("iam", "list-role-policies", "--role-name", "KVSAdapterRole")["PolicyNames"]:
+    if name not in saved["policies"]:
+        print(f"deleting {name}")
+        aws("iam", "delete-role-policy", "--role-name", "KVSAdapterRole", "--policy-name", name, out=False)
+PY
+  set_env vsz-registry ROW_SECRETS "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ROW_SECRETS"])' "$file")"
+  say "restored KVSAdapterRole and vsz-registry's ROW_SECRETS from $file"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -1226,5 +1379,7 @@ case "${1:-}" in
   registry)        preflight; provision_registry ;;
   adapter-index)   preflight; provision_adapter_index ;;
   camera-secrets)  preflight; provision_camera_secrets ;;
-  *) sed -n '2,50p' "$0"; exit 1 ;;
+  narrow)          preflight; provision_narrow ;;
+  narrow-rollback) preflight; shift; provision_narrow_rollback "${1:-}" ;;
+  *) sed -n '2,54p' "$0"; exit 1 ;;
 esac

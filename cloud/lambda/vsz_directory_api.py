@@ -238,10 +238,9 @@ def recording_class(mode):
 
 
 def thumbnail_keys(camera_id, owner):
-    """Where a camera's thumbnail may be, in order: under the adapter that serves it (each Pi uploads
-    under its own Thing, DEALER-PANEL-PLAN.md Phase 10.2e), then the older key -- a row without an owner,
-    or a camera whose adapter hasn't uploaded under its Thing yet. The older key goes at 10.2f."""
-    return ([f"thumbs/{owner}/{camera_id}.jpg"] if owner else []) + [f"thumbs/{camera_id}.jpg"]
+    """Where a camera's thumbnail is: under the adapter that serves it (each Pi uploads under its own
+    Thing, DEALER-PANEL-PLAN.md Phase 10.2e); a row without an owner has none."""
+    return [f"thumbs/{owner}/{camera_id}.jpg"] if owner else []
 
 
 def thumbnail_times(rows):

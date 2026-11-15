@@ -172,3 +172,17 @@ def test_a_route_that_cant_be_reached_is_a_registry_error_without_a_status(monke
 def test_only_what_json_and_dynamodb_share_goes_to_the_route(sent):
     with pytest.raises(TypeError):
         rc.call("POST", "cameras/cam-02", {"set": {"tags": {"a", "b"}}}, session=SESSION)
+
+
+def test_a_camera_request_through_the_route(registry):
+    # The web page's Add cameras (D16): only this adapter's request comes back (Phase 10.2f).
+    from fakes import FakeTable
+    table = registry([])
+    req = {"requestId": "5678efab-0000-4000-8000-000000000001", "thing": "test-thing", "xaddr": "http://x", "user": "u",
+           "password": "pw"}
+    table.session.tables["camera-requests"] = FakeTable([req, {**req, "requestId": "aaaabbbb-1", "thing": "adapter-07"}],
+                                                        hash_key="requestId")
+    assert rc.camera_request(req["requestId"]) == req
+    assert rc.camera_request("aaaabbbb-1") is None and rc.camera_request("ccccdddd-2") is None
+    assert [c[:2] for c in table.route.calls] == [("GET", f"requests/{req['requestId']}"), ("GET", "requests/aaaabbbb-1"),
+                                                   ("GET", "requests/ccccdddd-2")]

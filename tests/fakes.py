@@ -164,12 +164,20 @@ class FakeTable:
                                        "ConditionExpression": ConditionExpression}))
         n = self._index(Key)
         row = self.items[n] if n is not None else None
-        if ConditionExpression and not self._holds(ConditionExpression, row, names, values):
-            raise _conditional_check_failed()
         m = re.fullmatch(r"(?:SET\s+(?P<set>.+?))?\s*(?:REMOVE\s+(?P<remove>.+))?",
                          UpdateExpression.strip())
         if not m or not (m.group("set") or m.group("remove")):
             raise NotImplementedError(f"FakeTable.update_item: {UpdateExpression}")
+        # DynamoDB refuses an expression that names one attribute twice -- SET and REMOVE of the same
+        # field included -- before it looks at the item or the condition.
+        named = [names.get(x.split("=")[0].strip(), x.split("=")[0].strip()) for x in (m.group("set") or "").split(",") if x.strip()]
+        named += [names.get(x.strip(), x.strip()) for x in (m.group("remove") or "").split(",") if x.strip()]
+        if len(named) != len(set(named)):
+            raise ClientError({"Error": {"Code": "ValidationException",
+                                         "Message": "Invalid UpdateExpression: Two document paths overlap with each other"}},
+                              "UpdateItem")
+        if ConditionExpression and not self._holds(ConditionExpression, row, names, values):
+            raise _conditional_check_failed()
         if row is None:                      # DynamoDB creates the item
             row = dict(Key)
             self.items.append(row)
