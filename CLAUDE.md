@@ -100,9 +100,11 @@ python3 adapter/observe_state.py
 **The AWS account (596633517506) is shared with the base project, `VMS`
 (github.com/vizdr/VMS).** Since October this repository owns the unprefixed Lambdas,
 `kvs-demo-api`, the client bucket and its distribution; VMS deploys only `pir-*` copies and
-never these — and this repository **never deploys a `pir-*` resource**. Two exceptions to
-keep in mind: `clip-to-s3` is still used by VMS for its ONVIF detection clips, so a change
-there must stay backward compatible; and other projects (`pico2w-*`) share the account. The
+never these — and this repository **never deploys a `pir-*` resource**. Since 2026-11-15 VMS runs
+on copies of its own (VMS's `OWN-COPIES-PLAN.md`, `DEALER-PANEL-PLAN.md` D14): its own Thing
+`pir-adapter-01` and MQTT root `pir/`, role alias and role, tables `pir-cameras` / `pir-clips`,
+streams `pir-cam-*`, bucket and `pir-clip-to-s3` — nothing of this repository's is VMS's any more,
+`clip-to-s3` included. Other projects (`pico2w-*`) share the account too. The
 older rule still holds: before deploying, look at what is live and where it came from
 (FoundAndFixed.md #48). **Deploy with `cloud/deploy.sh`** (LAUNCH.md Part H), which does that
 check itself:
@@ -390,14 +392,14 @@ camera-ARN-scoped actions (`kinesisvideo:*`, per-Lambda) uses a `stream/cam-*/*`
 rather than enumerated ARNs specifically so this stays true without an IAM edit per
 camera — a deliberate least-privilege tradeoff, not an oversight.
 
-**The table is shared with VMS** (same AWS account, and the same board via an SD-card swap,
-`VMS-PORT-PLAN.md` D1). The data contract: rows are updated **field by field**, never
+**The table was shared with VMS** until 2026-11-15, when VMS moved to `pir-cameras` (D14); the board
+and its cameras still are (an SD-card swap, `VMS-PORT-PLAN.md` D1), so a camera's ONVIF event slots
+are too (#65). The data contract stays: rows are updated **field by field**, never
 overwritten whole; new fields are fine, new values in an existing enum are not
 (`recordingMode` keeps exactly `manual`, `motion`, `cellMotion`, `human`); every clip row
 carries `cameraId`, `startTs`, `s3Key`, `labels`, `durationSec`, `videoCodec`; `list-cameras`
-never returns `rtspUrl` or `liveRtspUrl` (credentials). A camera registered from the other card
-has a row and a MediaMTX path here but no producer until it is re-registered here
-(`camera_control.has_producer`, status "no producer on this Pi").
+never returns `rtspUrl` or `liveRtspUrl` (credentials). A row with no producer on this Pi shows
+"no producer on this Pi" (`camera_control.has_producer`) rather than "inactive".
 
 **Unregister** (either GUI — the cloud page through the adapter — and any camera, the USB camera
 too) is a soft mark, `unregisteredAt` (`camera_control.is_unregistered`): the row, KVS stream, clips

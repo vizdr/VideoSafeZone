@@ -49,3 +49,16 @@ def test_the_narrowing_refuses_without_vms_moved():
     ready = SH[SH.index("narrow_ready() {"):SH.index("provision_narrow() {")]
     assert 'if [ "$VMS_MOVED" -eq 1 ]' in ready
     assert body.index("backup=") < body.index("put-role-policy") < body.index("delete-role-policy")    # saved first
+
+
+def test_no_provisioning_step_puts_a_dropped_policy_back_on_the_device_role():
+    # After the narrowing (applied 2026-11-15) a rerun of provision.sh thumbnails or cameras put the wide
+    # Thumbnails / camera-requests policies back; only the narrowed and kept ones may be put on KVSAdapterRole.
+    allowed = {*listed("NARROW_ADD"), *listed("NARROW_KEEP")}
+    put = set(re.findall(r"ensure_inline_policy KVSAdapterRole (\S+)", SH))
+    assert put <= allowed, put - allowed
+    drop = set(re.search(r'^NARROW_DROP="([^"]*)"', SH, re.M).group(1).split())
+    for name in ("kvs-producer-policy.json", "outage-backfill-policy.json", "thumbnails-policy.json",
+                 "kvs-adapter-camera-requests-policy.json"):
+        assert not (ROOT / "cloud/iam" / name).exists(), f"{name} is no longer deployed (#41)"
+    assert drop == {"KVSProducer", "OutageBackfill", "Thumbnails", "camera-requests", "PirLocal"}

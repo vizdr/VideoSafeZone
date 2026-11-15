@@ -9,6 +9,11 @@
 #                                                                and the folder its Pi restores from
 #   bash cloud/adapter-identity.sh revoke THING [--dry-run]      deactivate its certificates, once the
 #                                                                System console has revoked it
+#   bash cloud/adapter-identity.sh retire-others [--dry-run]     on an adapter's own Pi: every other
+#                                                                certificate of its Thing deactivated and
+#                                                                detached, the one this Pi presents kept --
+#                                                                adapter-01's older ones once VMS runs as
+#                                                                pir-adapter-01 (D14; VMS's OWN-COPIES-PLAN D8)
 #
 # Why a script the owner runs, and not the System console: making, attaching and deactivating a
 # certificate needs IAM permissions on certificates, and IAM can't limit those to this project's --
@@ -31,7 +36,7 @@ ACCOUNT=596633517506
 REGION=eu-central-1
 POLICY=KVSAdapterThingPolicy                # cloud/iot/kvs-adapter-thing-policy.json: scoped by Thing name
 OUT_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/videosafezone/adapter-identities"
-SHARED_THING=adapter-01                     # shared with the VMS card (VMS-PORT-PLAN.md D1): never here
+SHARED_THING=adapter-01                     # the first Pi's: setup-identity.sh made it, not this script
 
 AWS="$(command -v aws || echo "$HOME/.local/bin/aws")"
 aws() { "$AWS" --region "$REGION" "$@"; }
@@ -92,7 +97,7 @@ print(f"{len(todo)} without an identity" + (f":  bash cloud/adapter-identity.sh 
 create_one() {
   local thing=$1 out="$OUT_ROOT/$1" state arn cert principals
   valid_thing "$thing"
-  [ "$thing" != "$SHARED_THING" ] || die "$thing has its identity already, shared with the VMS card -- setup-identity.sh is its tool"
+  [ "$thing" != "$SHARED_THING" ] || die "$thing has its identity already -- setup-identity.sh is its tool"
   state=$(directory_state "$thing")
   [ -n "$state" ] || die "$thing isn't in the directory: make it in the System console (Adapters → New adapters) first"
   [ "${state% *}" != revoked ] || die "$thing is revoked"
@@ -136,7 +141,7 @@ revoke_one() {
   local thing=$1 state arns arn
   valid_thing "$thing"
   [ "$thing" != "$SHARED_THING" ] ||
-    die "$thing's certificates are shared with the VMS card (VMS-PORT-PLAN.md D1): deactivate one by hand if you mean it"
+    die "$thing is the first Pi's, made by setup-identity.sh -- retire-others, on its Pi, retires its older certificates"
   state=$(directory_state "$thing")
   [ "${state% *}" = revoked ] || die "$thing isn't revoked in the directory -- revoke it in the System console first (now: ${state% *})"
   arns=$(aws iot list-thing-principals --thing-name "$thing" --query principals --output text 2>/dev/null | tr '\t' '\n' | sed '/^$/d;/^None$/d') || true
@@ -150,6 +155,35 @@ revoke_one() {
   done <<<"$arns"
 }
 
+retire_others() {   # on the adapter's own Pi: its Thing's other certificates, never the one it presents
+  local thing keep arns arn id status created policies p
+  thing=$( (source "$VMS_HOME/adapter/bin/adapter-config.sh" && printf '%s' "$THING_NAME") ) ||
+    die "no adapter identity here (/etc/adapter/adapter.env): run this on the adapter's own Pi"
+  [ -r "$VMS_HOME/certs/adapter.cert.pem" ] || die "no certs/adapter.cert.pem: run this on the adapter's own Pi"
+  # A certificate's ID is the SHA-256 of its DER form: the one this Pi presents, worked out, not typed.
+  keep=$(openssl x509 -in "$VMS_HOME/certs/adapter.cert.pem" -outform DER | sha256sum | cut -d' ' -f1)
+  arns=$(aws iot list-thing-principals --thing-name "$thing" --query principals --output text | tr '\t' '\n' | sed '/^$/d;/^None$/d')
+  grep -q "/$keep\$" <<<"$arns" ||
+    die "this Pi's certificate (${keep:0:12}...) isn't attached to $thing -- nothing retired (is adapter.env's THING_NAME right?)"
+  say "$thing: keeping ${keep:0:12}... (this Pi's)"
+  while IFS= read -r arn; do
+    id=${arn##*/}
+    [ "$id" != "$keep" ] || continue
+    read -r status created < <(aws iot describe-certificate --certificate-id "$id" \
+      --query 'certificateDescription.[status,creationDate]' --output text)
+    if [ "$DRY" -eq 1 ]; then say "would retire ${id:0:12}... ($status, made $created): deactivate, detach from $thing and its policies"; continue; fi
+    aws iot update-certificate --certificate-id "$id" --new-status INACTIVE
+    policies=$(aws iot list-attached-policies --target "$arn" --query 'policies[].policyName' --output text | sed 's/^None$//')
+    for p in $policies; do aws iot detach-policy --policy-name "$p" --target "$arn"; done
+    aws iot detach-thing-principal --thing-name "$thing" --principal "$arn"
+    [ "$(aws iot describe-certificate --certificate-id "$id" --query certificateDescription.status --output text)" = INACTIVE ] ||
+      die "${id:0:12}... isn't INACTIVE afterwards"
+    say "$thing: ${id:0:12}... retired (made $created): INACTIVE, detached from $thing${policies:+ and $policies}"
+  done <<<"$arns"
+  [ "$DRY" -eq 0 ] || { say "dry run: nothing was changed"; return; }
+  say "kept: ${keep:0:12}... -- check this Pi still reaches AWS:  venv-adapter/bin/python3 adapter/registry_client.py check"
+}
+
 case "${1:-}" in
   pending) preflight; pending ;;
   create)  shift; [ $# -gt 0 ] || die "name the adapters: create adapter-02 [adapter-03 ...]"; preflight
@@ -157,5 +191,6 @@ case "${1:-}" in
            [ "$DRY" -eq 0 ] || say "dry run: nothing was changed" ;;
   revoke)  [ $# -eq 2 ] || die "revoke one adapter: revoke adapter-02"; preflight; revoke_one "$2"
            [ "$DRY" -eq 0 ] || say "dry run: nothing was changed" ;;
-  *) sed -n '2,27p' "$0"; exit 1 ;;
+  retire-others) [ $# -eq 1 ] || die "retire-others takes no Thing: it is this Pi's"; preflight; retire_others ;;
+  *) sed -n '2,31p' "$0"; exit 1 ;;
 esac

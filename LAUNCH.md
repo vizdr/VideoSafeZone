@@ -1066,6 +1066,14 @@ venv-adapter/bin/python3 adapter/camera_secrets.py strip  # the rows rid of thei
 venv-adapter/bin/python3 adapter/camera_secrets.py check
 ```
 
+Then `adapter-01`'s older certificates go — one of them is in the VMS card's `certs/adapter-01/` — run on
+`adapter-01`'s Pi, which keeps the one it presents:
+
+```bash
+bash cloud/adapter-identity.sh retire-others --dry-run   # which it would retire, which it keeps
+bash cloud/adapter-identity.sh retire-others             # deactivated, detached from the Thing and its policy
+```
+
 `provision.sh narrow-rollback ~/.local/state/videosafezone/kvs-adapter-role-<time>.json` puts back the role
 and `ROW_SECRETS` as they were. Afterwards remove the dropped policies' files from `cloud/iam/`
 (`kvs-producer-policy.json`, `outage-backfill-policy.json`, `thumbnails-policy.json`,

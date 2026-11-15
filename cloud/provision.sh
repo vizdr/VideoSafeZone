@@ -339,17 +339,17 @@ provision_thumbnails() {
   local bucket; bucket=$(aws lambda get-function-configuration --function-name record-clip \
     --query 'Environment.Variables.BUCKET' --output text)
   [ -n "$bucket" ] && [ "$bucket" != None ] || die "record-clip has no BUCKET: can't tell the evidence bucket"
-  grep -q "arn:aws:s3:::$bucket/thumbs/" "$IAM_DIR/thumbnails-policy.json" "$IAM_DIR/list-cameras-thumbnails-policy.json" ||
-    die "the policies in cloud/iam/ don't name $bucket"
-  ensure_inline_policy KVSAdapterRole Thumbnails thumbnails-policy.json
+  grep -q "arn:aws:s3:::$bucket/thumbs/" "$IAM_DIR/list-cameras-thumbnails-policy.json" ||
+    die "cloud/iam/list-cameras-thumbnails-policy.json doesn't name $bucket"
+  # The Pi's side -- thumbs/<its Thing>/* -- is the narrowed role's `uploads` (provision.sh narrow,
+  # DEALER-PANEL-PLAN.md Phase 10.2f): the wide Thumbnails policy is never put back.
   ensure_inline_policy ListCamerasLambdaRole thumbnails-read list-cameras-thumbnails-policy.json
   ensure_env list-cameras BUCKET "$bucket"
   if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
-  aws iam get-role-policy --role-name KVSAdapterRole --policy-name Thumbnails >/dev/null &&
-    aws iam get-role-policy --role-name ListCamerasLambdaRole --policy-name thumbnails-read >/dev/null &&
+  aws iam get-role-policy --role-name ListCamerasLambdaRole --policy-name thumbnails-read >/dev/null &&
     [ "$(aws lambda get-function-configuration --function-name list-cameras --query 'Environment.Variables.BUCKET' --output text)" = "$bucket" ] ||
     die "thumbnails: a policy or list-cameras' BUCKET isn't there afterwards"
-  say "verified: both policies attached, list-cameras knows the bucket"
+  say "verified: list-cameras may read the thumbnails and knows the bucket"
 }
 
 # --- the directory database (DEALER-PANEL-PLAN.md Phase 1, D2, D3) ---------------------------------
@@ -1015,7 +1015,8 @@ provision_cameras() {
   ensure_iot_tables_role
   ensure_topic_rule vsz_adapter_discovery vsz-adapter-discovery-rule.json
   ensure_topic_rule vsz_camera_registration vsz-camera-registration-rule.json
-  ensure_inline_policy KVSAdapterRole camera-requests kvs-adapter-camera-requests-policy.json
+  # The agents read their requests through the registry route (vsz-registry's camera-requests policy,
+  # provision.sh registry; Phase 10.2f) -- the device role has no read of the table any more.
   ensure_inline_policy "$cmd_role" any-adapter-cmd publish-cmd-any-adapter-policy.json
   ensure_role adapter-cameras-role adapter-cameras adapter-cameras-policy.json
   ensure_function adapter-cameras adapter-cameras-role 256 10
