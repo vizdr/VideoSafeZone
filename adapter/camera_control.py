@@ -59,6 +59,13 @@ def live_stream_name(camera_id: str) -> str:
     return f"{camera_id}-live"
 
 
+def stream_tags() -> dict:
+    # The tag every KVS stream of this adapter carries -- its Thing (DEALER-PANEL-PLAN.md D13, Phase
+    # 10.2a). Once the device role is narrowed, a stream is this adapter's only when it carries it,
+    # and a stream can be created only so tagged, with no other tag key (the spike, Phase 10.1).
+    return {"adapterId": config.THING_NAME}
+
+
 def live_unit_name(camera_id: str) -> str:
     # Its producer: an instance of the kvs-live@ template, started by the cloud page's Live
     # control (agent.py `live`), independent of the recording producer, and stopped by its own

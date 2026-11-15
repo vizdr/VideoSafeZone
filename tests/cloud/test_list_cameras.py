@@ -119,6 +119,25 @@ def test_quality_options_follow_the_ceiling():
 
 
 
+def test_a_thumbnail_is_looked_for_under_the_cameras_adapter_first(aws, monkeypatch):
+    # DEALER-PANEL-PLAN.md Phase 10.2e: each Pi uploads under its own Thing; the older key until 10.2f.
+    from datetime import datetime, timezone
+    monkeypatch.setattr(list_cameras, "BUCKET", "evidence-bucket")
+    rows = [{**r, "adapterId": "adapter-01"} for r in ROWS]
+    fake = aws(list_cameras, rows)
+    s3 = fake.stub("s3")
+    at = {"LastModified": datetime(2026, 11, 15, 14, 0, tzinfo=timezone.utc)}
+    s3.add_client_error("head_object", "403", "Forbidden",
+                        expected_params={"Bucket": "evidence-bucket", "Key": "thumbs/adapter-01/cam-01.jpg"})
+    s3.add_response("head_object", at, {"Bucket": "evidence-bucket", "Key": "thumbs/cam-01.jpg"})   # older only
+    s3.add_response("head_object", at, {"Bucket": "evidence-bucket", "Key": "thumbs/adapter-01/cam-02.jpg"})
+    code, out = invoke(list_cameras)
+    cams = {c["id"]: c for c in out["cameras"]}
+    assert "/evidence-bucket/thumbs/cam-01.jpg?" in cams["cam-01"]["thumbnailUrl"]
+    assert "/evidence-bucket/thumbs/adapter-01/cam-02.jpg?" in cams["cam-02"]["thumbnailUrl"]   # never the older one
+    assert list_cameras.thumbnail_keys("cam-02", None) == ["thumbs/cam-02.jpg"]                 # no owner: older only
+
+
 def test_thumbnails_are_linked_when_the_pi_has_uploaded_one(aws, monkeypatch):
     # WEB-PANEL-PLAN.md Phase 5.3: a HEAD per camera; a missing key (403 without ListBucket) is no thumbnail.
     from datetime import datetime, timezone

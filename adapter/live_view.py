@@ -27,6 +27,7 @@ import subprocess
 
 import camera_control
 import mediamtx_api
+import registry_client
 import onvif_media2
 
 # KVS serves HLS only from a stream that keeps data (retention 0 is ingest-only). One hour is
@@ -53,21 +54,21 @@ def _ensure_kvs_stream(kv, camera_id: str) -> str:
         # video/h264 as at registration: stream-codec.py --live corrects MediaType at the
         # first start.
         return kv.create_stream(StreamName=name, DataRetentionInHours=LIVE_RETENTION_HOURS,
-                                MediaType="video/h264")["StreamARN"]
+                                MediaType="video/h264", Tags=camera_control.stream_tags())["StreamARN"]
 
 
-def apply(camera_id: str, item: dict, uri: str | None, table, kv) -> dict:
+def apply(camera_id: str, item: dict, uri: str | None, kv) -> dict:
     """Make the camera's live view match `uri` (live_uri()), and say what changed.
 
-    `item` is the camera's registry row as it is now; `table` the cameras table and `kv` a
-    kinesisvideo client, both through the device identity. Idempotent: an unchanged camera costs
-    one KVS describe, one MediaMTX read and no write anywhere."""
+    `item` is the camera's registry row as it is now, and `kv` a kinesisvideo client through the
+    device identity; the row is written through the registry route (registry_client, DEALER-PANEL-PLAN.md
+    Phase 10.2b). Idempotent: an unchanged camera costs one KVS describe, one MediaMTX read and no write
+    anywhere."""
     path = camera_control.live_path_name(camera_id)
     if uri:
         stream_arn = _ensure_kvs_stream(kv, camera_id)
         if item.get("liveRtspUrl") != uri:
-            table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET liveRtspUrl = :u",
-                              ExpressionAttributeValues={":u": uri})
+            registry_client.update(camera_id, set={"liveRtspUrl": uri})
         want = {"source": uri, "rtspTransport": "tcp"}
         conf = mediamtx_api.get_path_conf(path)
         if conf is None:
@@ -84,5 +85,5 @@ def apply(camera_id: str, item: dict, uri: str | None, table, kv) -> dict:
                    check=False, capture_output=True)
     mediamtx_api.delete_path(path)
     if item.get("liveRtspUrl"):
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="REMOVE liveRtspUrl")
+        registry_client.update(camera_id, remove=["liveRtspUrl"])
     return {"live": "recorded stream", "path": camera_control.mediamtx_path_name(camera_id)}

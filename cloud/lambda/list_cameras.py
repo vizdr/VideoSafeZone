@@ -30,24 +30,33 @@ def record_quality_options(item):
     return [ceiling] if ceiling else []
 
 
-def thumbnails(camera_ids):
-    """{cameraId: (link, taken at)} for each camera with a thumbnail: a GET link valid for an hour,
-    and the upload time. A HEAD per camera; without s3:ListBucket a missing key answers 403, not
-    404, so any error just means no thumbnail. The regional endpoint, as play-clip does: without
-    it a presigned URL can be built for the global one and fail its signature."""
+def thumbnail_keys(camera_id, owner):
+    """Where a camera's thumbnail may be, in order: under the adapter that serves it (each Pi uploads
+    under its own Thing, DEALER-PANEL-PLAN.md Phase 10.2e), then the older key -- a row without an owner,
+    or a camera whose adapter hasn't uploaded under its Thing yet. The older key goes at 10.2f."""
+    return ([f"thumbs/{owner}/{camera_id}.jpg"] if owner else []) + [f"thumbs/{camera_id}.jpg"]
+
+
+def thumbnails(cameras):
+    """{cameraId: (link, taken at)} for each camera ({id, adapterId}) with a thumbnail: a GET link
+    valid for an hour, and the upload time. A HEAD per key tried (thumbnail_keys); without
+    s3:ListBucket a missing key answers 403, not 404, so any error just means not there. The regional
+    endpoint, as play-clip does: without it a presigned URL can be built for the global one and fail
+    its signature."""
     if not BUCKET:
         return {}
     s3 = boto3.client("s3", region_name=REGION, endpoint_url=f"https://s3.{REGION}.amazonaws.com")
     out = {}
-    for cid in camera_ids:
-        key = f"thumbs/{cid}.jpg"
-        try:
-            head = s3.head_object(Bucket=BUCKET, Key=key)
-        except Exception:  # noqa: BLE001
-            continue
-        url = s3.generate_presigned_url("get_object", Params={"Bucket": BUCKET, "Key": key},
-                                        ExpiresIn=THUMB_URL_SEC)
-        out[cid] = (url, head["LastModified"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    for cam in cameras:
+        for key in thumbnail_keys(cam["id"], cam.get("adapterId")):
+            try:
+                head = s3.head_object(Bucket=BUCKET, Key=key)
+            except Exception:  # noqa: BLE001
+                continue
+            url = s3.generate_presigned_url("get_object", Params={"Bucket": BUCKET, "Key": key},
+                                            ExpiresIn=THUMB_URL_SEC)
+            out[cam["id"]] = (url, head["LastModified"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            break
     return out
 
 
@@ -212,7 +221,7 @@ def lambda_handler(event, context):
             ),
             key=lambda c: c["id"],
         )
-        thumbs = thumbnails([c["id"] for c in cameras])
+        thumbs = thumbnails(cameras)
         for c in cameras:
             c["thumbnailUrl"], c["thumbnailAt"] = thumbs.get(c["id"], (None, None))
         return {"statusCode": 200, "headers": CORS, "body": json.dumps({"cameras": plain(cameras)})}

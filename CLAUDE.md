@@ -119,6 +119,9 @@ bash cloud/provision.sh adapters --dry-run        # Cloud IDs' key, retained con
 bash cloud/adapter-identity.sh pending            # a new adapter's AWS identity: the owner's script (D15 amended)
 bash cloud/provision.sh cameras --dry-run         # adding cameras from the web page: tables, IoT rules, adapter-cameras
 bash cloud/provision.sh accounts --dry-run        # Additional users: the API may delete a cancelled invitation's sign-in
+bash cloud/provision.sh registry --dry-run        # the adapters' registry route: vsz-registry, IAM-signed, own Thing's path
+bash cloud/provision.sh adapter-index --dry-run   # cameras' adapterId-index; the device role queries its own Thing's rows
+bash cloud/provision.sh camera-secrets --dry-run  # the device role reads/writes its own Thing's camera secrets in SSM
 ```
 It refuses `pir-*` names, refuses to overwrite live code that matches neither this tree nor
 HEAD unless `--force`, saves the live copy first (`rollback` puts it back), zips the single
@@ -378,8 +381,8 @@ A DynamoDB table `cameras` (PK `cameraId`, e.g. `"cam-01"`) holds each camera's 
 stream ARN, and its video-codec capabilities and choice (`videoCodecCaps`, `videoCodec`,
 `videoCodecActive`; guide §21.2), and the web panel's per-camera settings — `tags`, `schedule`,
 `recordQuality` (written by `set-camera-settings`) under the quality ceiling `recordStream`/
-`recordSize`/`recordFps` that the admin GUI writes (`WEB-PANEL-PLAN.md` §5.1, D5). Every Lambda that needs to validate a camera ID, and `agent.py`'s MQTT
-handler, read this table directly — there is no hardcoded allow-list anywhere. Adding a
+`recordSize`/`recordFps` that the admin GUI writes (`WEB-PANEL-PLAN.md` §5.1, D5). Every Lambda that needs to validate a camera ID reads this table directly, and
+`agent.py`'s MQTT handler reads its own Pi's rows of it — there is no hardcoded allow-list anywhere. Adding a
 camera through the ONVIF admin GUI (below) makes it work everywhere (cloud client,
 MQTT control, all API routes) immediately, with no code change. IAM for
 camera-ARN-scoped actions (`kinesisvideo:*`, per-Lambda) uses a `stream/cam-*/*` wildcard
@@ -412,8 +415,9 @@ needs `systemctl disable`, which the sudo rule allows since #80. A new reader of
 acts on cameras must skip it too. **Each Pi acts only on its own rows**
 (`DEALER-PANEL-PLAN.md` D12): `camera_control.is_mine(row)` — `adapterId` is this Pi's Thing, or none
 on a Pi with `ADOPT_UNSTAMPED_ROWS=yes`, and never a row with `releasedFrom` — and `acts_on(row)`
-(mine and not unregistered) filter the same readers; another adapter's camera gets 409 from the
-admin GUI and is ignored by the agent, Stop aside. A new reader filters with `acts_on`.
+(mine and not unregistered) filter the same readers. A Pi reads only its own rows (below), so another
+adapter's camera is unknown here — 404 from the admin GUI, ignored by the agent — though Stop still
+reaches a producer or live view running here. A new reader filters with `acts_on`.
 
 **Whose camera it is: `adapterId`** — the IoT Thing that serves it, written by the admin GUI at
 registration and stamped by `rematch_cameras.py` on the Pi with `ADOPT_UNSTAMPED_ROWS=yes`. Every
@@ -423,6 +427,19 @@ view only; a camera the caller may not see gets that route's unknown-camera answ
 logs instead of refusing; unset means enforce. A row without `adapterId` is an administrator's alone,
 and a new Lambda that acts on a camera takes the same three functions.
 
+**Every registry write from a Pi goes through the registry route** (`DEALER-PANEL-PLAN.md` D13 as
+amended, Phase 10.2b): `adapter/registry_client.py` signs each call with the device credentials to
+`/registry/<this Thing>/…` (`REGISTRY_URL` in `adapter.env`); IAM lets a Pi call only its own Thing's
+path, and Lambda `vsz-registry` writes only that Thing's rows — field updates under conditions, the ID
+claim (the next free one past every adapter's), adoption, clip rows — never a row's owner. A new writer
+on the Pi uses `update()` / `claim()` / `adopt()` / `add_clip()`, never `update_item`/`put_item`; tests
+reach the real function through the `registry` fixture (`table.route`). **Every read is of the Pi's own
+rows** (Phase 10.2c): `adapter/registry_reads.py` — `own_rows(fields)` / `own_row(id)`, a query on the
+`adapterId-index`, which IAM limits to the caller's Thing (the adopting Pi also scans for unstamped rows
+until 10.2f) — never `scan`/`get_item`; it always reads the fields `acts_on` needs (FoundAndFixed.md #96).
+What needs every adapter's rows is the route's: the next free ID (`claim()`), and which discovered devices
+are another adapter's cameras (`elsewhere()`, yes or no only).
+
 **Recording triggers are per camera** (`adapter/onvif_events.py`): which ONVIF topic and
 on/off field serve each mode comes from the camera's own `GetEventProperties`, recorded as
 `detectionModes`/`detectionTopics`; a mode the camera doesn't publish is refused by both
@@ -430,9 +447,17 @@ mode routes. Every ONVIF event subscription goes through `PullSubscription`, whi
 and always unsubscribes — cameras have few slots (cam-03: 10), and a leaked subscription
 blocks VMS's card too (FoundAndFixed.md #65).
 
-Credential storage in that table is phased: currently a plain `onvifPassword` attribute
-(Phase 1); a planned Phase 2 moves it to an SSM Parameter Store `SecureString` referenced
-by a `credentialRef`, decrypted only via the adapter's own device identity. Not yet built.
+**Camera secrets** — `onvifPassword`, `rtspUrl`, `liveRtspUrl` (the URIs carry the camera's login) — are
+also SSM `SecureString`s, one per field, at `/vsz/adapters/<this Thing>/cameras/<cameraId>/<field>`, which
+IAM lets only that Thing read and write (`adapter/camera_secrets.py`, `DEALER-PANEL-PLAN.md` Phase 10.2d).
+Values are JSON (an empty password is kept). Until the role is narrowed (10.2f) the row holds them too
+and stays what readers use — VMS's card may change a row, and an SSM copy taken for the truth would
+shadow it — so `registry_client.update()` writes a secret field to SSM after the row, rematch mirrors
+each row into SSM (once a day per camera, or when its row changes), and `registry_reads` fills a row
+from SSM only when the row holds none (`own_rows(secrets=False)` reads the table as it is). Never print
+a secret's value: field names only. **S3 keys** the Pi writes are under its Thing (Phase 10.2e):
+thumbnails `thumbs/<thing>/<cameraId>.jpg`, outage clips `clips/<cameraId>/<thing>/…` — the camera stays
+second, where every clip reader takes it from (`clips/<cameraId>/…`).
 
 ### Device identity: one X.509 cert, no static keys on the Pi
 

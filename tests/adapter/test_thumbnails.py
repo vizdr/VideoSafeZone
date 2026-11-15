@@ -38,7 +38,7 @@ def world(monkeypatch, registry):
 
 
 def put(camera_id):
-    return {"Bucket": "test-evidence-bucket", "Key": f"thumbs/{camera_id}.jpg", "Body": JPEG,
+    return {"Bucket": "test-evidence-bucket", "Key": f"thumbs/test-thing/{camera_id}.jpg", "Body": JPEG,
             "ContentType": "image/jpeg", "CacheControl": "no-cache"}
 
 

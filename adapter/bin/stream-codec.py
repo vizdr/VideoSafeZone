@@ -79,9 +79,10 @@ def chosen_sub(camera_id: str) -> bool:
     try:
         from botocore.config import Config
         from aws_device_creds import get_session   # loads config; inside the try on purpose
+        import registry_reads
         quick = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
-        item = (get_session().resource("dynamodb", config=quick).Table("cameras")
-                .get_item(Key={"cameraId": camera_id}).get("Item") or {})
+        item = registry_reads.own_row(camera_id, table=get_session().resource("dynamodb", config=quick)
+                                      .Table("cameras")) or {}
     except Exception as e:  # noqa: BLE001 -- the camera's own stream is always a safe choice
         print(f"stream-codec.py: registry unreachable ({type(e).__name__}): recording the camera's "
               f"own stream", file=sys.stderr)
@@ -129,46 +130,49 @@ def record(camera_id: str, codec: str, stream: str, live: bool,
 
 def record_registry(table, camera_id: str, codec: str, sub: bool = False,
                     size: str | None = None) -> None:
-    item = table.get_item(Key={"cameraId": camera_id}).get("Item") or {}
+    item = _own_row(table, camera_id)
     prev, prev_active = item.get("videoCodecActive"), item.get("recordQualityActive")
     active = {"stream": "sub" if sub else (item.get("recordStream") or "recorded"),
               **({"size": size} if size else {})}
-    sets, values = [], {}
+    fields = {}
     if prev != codec:
-        sets.append("videoCodecActive = :c")
-        values[":c"] = codec
+        fields["videoCodecActive"] = codec
     if prev_active != active:
-        sets.append("recordQualityActive = :q")
-        values[":q"] = active
+        fields["recordQualityActive"] = active
     # "Since" only marks a real switch -- of codec or of picture. On the very first record there
     # is nothing earlier in the archive, so there is no boundary to clamp clips to.
     picture = lambda a: (a.get("stream"), a.get("size"))   # noqa: E731
     if (prev and prev != codec) or (prev_active and picture(prev_active) != picture(active)):
-        sets.append("videoCodecActiveSince = :t")
-        values[":t"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if sets and _update_camera(table, camera_id, "SET " + ", ".join(sets), values):
+        fields["videoCodecActiveSince"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if fields and _update_camera(camera_id, fields):
         print(f"stream-codec.py: {camera_id} now streams {codec} {active} "
               f"(was {prev or 'unrecorded'} {prev_active or ''})", file=sys.stderr)
 
 
 def record_live_registry(table, camera_id: str, codec: str) -> None:
-    prev = (table.get_item(Key={"cameraId": camera_id}).get("Item") or {}).get("liveVideoCodecActive")
-    if prev != codec and _update_camera(table, camera_id, "SET liveVideoCodecActive = :c", {":c": codec}):
+    prev = _own_row(table, camera_id).get("liveVideoCodecActive")
+    if prev != codec and _update_camera(camera_id, {"liveVideoCodecActive": codec}):
         print(f"stream-codec.py: {camera_id} live view now {codec} (was {prev or 'unrecorded'})",
               file=sys.stderr)
 
 
-def _update_camera(table, camera_id: str, expression: str, values: dict) -> bool:
-    """An update of an existing camera's row only. DynamoDB's UpdateItem creates the item when the
-    key is new: a mistyped ID -- a MediaMTX path, cam01 for cam-01 -- made a registry row that the
-    readers then took for a camera (FoundAndFixed.md #93)."""
+def _own_row(table, camera_id: str) -> dict:
+    """This adapter's row for the camera, or {} -- another adapter's camera is none of this Pi's
+    (registry_reads, DEALER-PANEL-PLAN.md Phase 10.2c); the route then refuses the write as well."""
+    import registry_reads
+    return registry_reads.own_row(camera_id, table=table) or {}
+
+
+def _update_camera(camera_id: str, fields: dict) -> bool:
+    """An update of an existing camera's row only, through the registry route (DEALER-PANEL-PLAN.md
+    Phase 10.2b), which writes only this adapter's rows and never makes one: a mistyped ID -- a
+    MediaMTX path, cam01 for cam-01 -- once made a registry row that the readers then took for a
+    camera (FoundAndFixed.md #93)."""
+    import registry_client
     try:
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression=expression,
-                          ConditionExpression="attribute_exists(cameraId)", ExpressionAttributeValues=values)
+        registry_client.update(camera_id, set=fields)
         return True
-    except Exception as e:  # noqa: BLE001
-        if "ConditionalCheckFailed" not in type(e).__name__ + str(getattr(e, "response", "")):
-            raise
+    except registry_client.NotMine:
         print(f"stream-codec.py: no registry row for {camera_id}: nothing recorded", file=sys.stderr)
         return False
 

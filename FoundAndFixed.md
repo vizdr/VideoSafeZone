@@ -21,7 +21,7 @@ advice (guide §15 "Known traps").
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
 found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
-planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07); #92 deploying Phase 7 (2026-11-08); #93 on the cloud page after it (2026-11-08).
+planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07); #92 deploying Phase 7 (2026-11-08); #93 on the cloud page after it (2026-11-08); #94 trying Phase 7's addition (2026-11-08); #95 by the D13 spike's first run (2026-11-15); #96 writing Phase 10.2c's tests (2026-11-15).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -119,6 +119,8 @@ planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-
 | 92 | `provision.sh` reported a route it had just made as broken: its check asked once, before the deployment reached every edge | cloud tooling | 2026-11-08 | fixed 2026-11-08 |
 | 93 | `stream-codec.py`, given a path name, made a registry row that rematch adopted and the page showed as a fifth camera | registry | 2026-11-08 | fixed 2026-11-08 (the Pi's scripts run from the clone); the stray row deleted |
 | 94 | The web page's scan offered a camera in use as new — it announced a new WS-Discovery identity — and adding it made a second camera | agent / registry | 2026-11-08 | fixed 2026-11-08, the agent restarted and the page deployed to apply it; the duplicate removed |
+| 95 | The D13 spike's first run: a role alias just made was unknown to the credentials endpoint (404), and the tool misread kvssink's log and iot-data's refusal | cloud tooling | 2026-11-15 | fixed 2026-11-15 |
+| 96 | Readers moved to the adapter index read rows without `adapterId`: every row looked unstamped, so any adapter but the adopting one would have seen none of its cameras | registry | 2026-11-15 | fixed 2026-11-15, before it reached a Pi that doesn't adopt |
 
 ### What they have in common
 
@@ -1796,3 +1798,60 @@ to delete. `cam-04`'s identity is relearned by the next rematch run.
 **The rule:** a WS-Discovery identity is usually stable, not always — it never decides alone that a
 device is new. A device answering at a camera's own address is that camera; an identity no longer
 announced is relearned at the camera's address, never guessed elsewhere.
+
+### #95 — The D13 spike's first run: a role alias just made was unknown to the credentials endpoint (404), and the tool misread kvssink's log and iot-data's refusal
+
+**Found:** 2026-11-15, by the user's first `bash cloud/spike-d13.sh run` (`DEALER-PANEL-PLAN.md`
+Phase 10.1) and its rerun. **Referenced from:** `cloud/spike_d13.py`.
+
+Three faults in the spike's own tooling, none in what it measured:
+1. `run`, started seconds after `setup` had made the role alias `VszSpikeD13RoleAlias`, ended in a
+   traceback: the credentials endpoint answered 404. The alias was there (`describe-role-alias`), the
+   endpoint was the account's (`describe-endpoint` matched `adapter.env`), and about three and a half
+   minutes later the same request answered 200. A new role alias takes minutes to reach the endpoint
+   that hands out its credentials; setup's closing note said so, but the tool didn't wait.
+2. The rerun reported two good PutMedia sends as refused: it looked for "403" in kvssink's log, and
+   every SDK line carries a thread ID (`[547533140320]`), and the retention warning a number
+   (`-1014444032`), holding those digits. KVS's own count (`verify`) showed both streams had received
+   their fragments.
+3. It then crashed on its 28th check: iot-data's refusal (`ForbiddenException`) carries no message,
+   and the tool sliced `None`.
+
+**Fix:** the first credentials request asks again on 403 or 404 for up to five minutes, saying so, and a
+refusal prints AWS's message instead of a traceback; kvssink's outcome is read in the SDK's own words
+(`HTTP Error 403`, `Unable to create Kinesis Video stream`, `persisted ACK`) by `kvssink_outcome`; a
+missing message is an empty one; and a stream an earlier run made (`ResourceInUseException`) counts as
+allowed, since KVS checks the permission before the name. `test_ff95_kvssink_is_read_in_its_own_words_never_by_status_digits`,
+`test_ff95_an_error_without_a_message_is_still_a_refusal`, `test_ff95_a_stream_an_earlier_run_made_was_allowed`
+and `test_ff95_a_new_role_alias_is_waited_for_not_taken_as_a_refusal` (`tests/cloud/test_spike_d13.py`)
+fail without them — each broken on purpose once. With them, all 30 checks came out as expected.
+
+**The rule:** like a deployment (#92), a role alias works only once it has reached the endpoint that
+uses it: a script that makes one waits for it before relying on it. And a tool reads another program's
+log in that program's own words, never by digits a line may carry for other reasons.
+
+### #96 — Readers moved to the adapter index read rows without `adapterId`: every row looked unstamped, so any adapter but the adopting one would have seen none of its cameras
+
+**Found:** 2026-11-15, writing Phase 10.2c's tests (`DEALER-PANEL-PLAN.md`, step 2). **Referenced from:**
+`adapter/registry_reads.py`.
+
+`registry_reads.own_rows(fields)` read only the fields a caller asked for, plus `cameraId`. The outage
+supervisor asked for `outageBufferSec` and `unregisteredAt`, the schedule runner for `schedule` and
+`unregisteredAt`, and each then kept what `camera_control.acts_on` keeps — which decides by `adapterId`
+and `releasedFrom`. Neither was in the rows, so every row looked unstamped: kept on `adapter-01`, which
+adopts unstamped rows (so its outage buffer and schedules went on working, and a live check of them
+passed), dropped on every other adapter, whose outage buffer and schedules would have seen no camera at
+all. A caller that left out `unregisteredAt` would likewise have acted on an unregistered camera. The
+schedule runner ran it from the clone, on `adapter-01` only, for about a quarter of an hour.
+
+Caught by a test that ran the readers on a Pi that doesn't adopt (`test_readers_read_this_pis_rows_by_the_index_never_a_scan`):
+the outage supervisor and the schedule runner returned nothing.
+
+**Fix:** `own_rows` and `unstamped_rows` always read `ACTS_ON_FIELDS` — `cameraId`, `adapterId`,
+`releasedFrom`, `unregisteredAt`, what `acts_on` decides by — whatever the caller asks for.
+`test_ff96_rows_read_by_field_still_say_whose_they_are` (`tests/adapter/test_registry_reads.py`) fails
+without it, on an adopting Pi (an unregistered camera kept) and on one that doesn't adopt (every camera
+dropped) — broken on purpose both ways.
+
+**The rule:** a read that narrows the fields must keep every field its callers decide by; a check that
+passes on the adopting adapter proves nothing about the others — try a reader on a Pi that doesn't adopt.

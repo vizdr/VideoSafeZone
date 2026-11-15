@@ -10,7 +10,6 @@ import event_watcher
 import outage_buffer
 import sync_mediamtx_paths
 import codec_caps
-from fakes import FakeTable
 
 UNREGISTERED = "2026-10-25T12:00:00Z"
 ROWS = [
@@ -44,7 +43,7 @@ def test_event_watcher_also_needs_a_detection_mode_and_a_host(registry):
     assert set(event_watcher.load_cameras()) == {"cam-04"}
 
 
-def test_codec_caps(monkeypatch):
-    table = FakeTable(ROWS)
+def test_codec_caps(monkeypatch, registry):
+    table = registry(ROWS)
     monkeypatch.setattr(codec_caps, "probe", lambda item: {k: None for k in codec_caps.FIELDS})
     assert set(codec_caps.refresh(table, log=lambda msg: None)) == {"cam-02"}

@@ -10,6 +10,8 @@ import config
 import camera_control
 import camera_registration
 import onvif_discovery
+import registry_client
+import registry_reads
 from aws_device_creds import get_session
 
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
@@ -85,6 +87,11 @@ def set_live(camera, on):
     return deadline
 
 
+def _live_here(camera):
+    """Whether this Pi has a live view of the camera to stop: its deadline file (set_live)."""
+    return os.path.exists(os.path.join(LIVE_DIR, camera_control.mediamtx_path_name(camera)))
+
+
 def _ensure_live_stream(camera):
     """The camera's "-live" KVS stream. live_view.py creates it for a camera recording its main
     stream; a camera with no sub stream gets it here, the first time someone watches it."""
@@ -94,7 +101,8 @@ def _ensure_live_stream(camera):
         kv.describe_stream(StreamName=name)
     except kv.exceptions.ResourceNotFoundException:
         # 1 h: KVS serves HLS only from a stream that keeps data, and nothing else reads it.
-        kv.create_stream(StreamName=name, DataRetentionInHours=1, MediaType="video/h264")
+        kv.create_stream(StreamName=name, DataRetentionInHours=1, MediaType="video/h264",
+                         Tags=camera_control.stream_tags())          # whose it is (D13)
         print(f"agent: created KVS stream {name}", flush=True)
 
 
@@ -119,19 +127,26 @@ def on_message(topic, payload, **kwargs):
     if cmd in ("unregister", "reregister") and not msg.get("camera"):
         return                                 # never the cam-01 default below
     camera = msg.get("camera", "cam-01")   # older clients/messages omit this -- default cam-01
-
-    cam_item = get_cameras_table().get_item(Key={"cameraId": camera}).get("Item")
-    if not cam_item:
+    # A camera ID or nothing: it names units, MediaMTX paths and the live view's deadline file.
+    if not isinstance(camera, str) or not camera_registration.CAMERA_ID_RE.match(camera):
+        print(f"agent: ignoring {cmd!r} for {camera!r}: not a camera ID", flush=True)
         return
+
+    # This Pi's row, by the adapterId-index (DEALER-PANEL-PLAN.md Phase 10.2c): another adapter's
+    # camera, one released from this one (D12, D15) or none at all isn't found -- not this Pi's to
+    # start, light or point anywhere. Stop stays possible for what still runs here: a released
+    # camera's producer, or its live view.
+    cam_item = registry_reads.own_row(camera)
+    if cam_item is None:
+        if (cmd == "stop" and camera_control.has_producer(camera)) or (cmd == "live-stop" and _live_here(camera)):
+            cam_item = {"cameraId": camera}
+        else:
+            print(f"agent: ignoring {cmd!r} for {camera}: not this adapter's camera", flush=True)
+            return
     # An unregistered camera is hidden from both GUIs, but an open page or a direct API call can
     # still name it, and the MQTT session is shared with VMS: refuse everything but Stop.
-    if camera_control.is_unregistered(cam_item) and cmd not in ("stop", "live-stop", "reregister"):
+    elif camera_control.is_unregistered(cam_item) and cmd not in ("stop", "live-stop", "reregister"):
         print(f"agent: ignoring {cmd!r} for unregistered {camera}", flush=True)
-        return
-    # Another adapter's camera, or one released from this one (D12, D15): not this Pi's to start,
-    # light or point anywhere. Stop stays possible -- its producer may still run here.
-    if not camera_control.is_mine(cam_item) and cmd not in ("stop", "live-stop"):
-        print(f"agent: ignoring {cmd!r} for {camera}: not this adapter's camera", flush=True)
         return
 
     if cmd == "start" and not camera_control.has_producer(camera):
@@ -196,32 +211,35 @@ def agent_env():
         table=table, kinesisvideo=lambda: get_session().client("kinesisvideo"),
         provision=camera_registration.provision, wait_for_flowing=camera_registration.wait_for_flowing,
         read_detection=camera_registration.read_detection,
-        record_detection=lambda camera_id, dmap, item=None, web_url=None: camera_registration.record_detection(
-            table, camera_id, dmap, item=item, web_url=web_url))
+        record_detection=camera_registration.record_detection)
 
 
 def discover_devices(table):
     """What WS-Discovery finds on this LAN, each device marked against the registry: added here (its
-    camera ID), removed here (unregistered: adding it brings it back), another adapter's, or new."""
-    rows = camera_registration.all_rows(table, "cameraId, adapterId, onvifEndpointRef, onvifHost, onvifPort, "
-                                               "unregisteredAt, releasedFrom, displayName")
+    camera ID), removed here (unregistered: adding it brings it back), another adapter's, or new.
+    This Pi's rows come by the adapterId-index; which devices are another adapter's cameras, by
+    identity only (its LAN's addresses aren't this one's), the registry route says -- it alone sees
+    every adapter's rows, and answers only yes or no (DEALER-PANEL-PLAN.md Phase 10.2c)."""
+    rows = registry_reads.own_rows(["onvifEndpointRef", "onvifHost", "onvifPort", "displayName"], table=table)
     devices = []
     for svc in onvif_discovery.scan(timeout=DISCOVERY_SEC):
         xaddrs, epr = svc.getXAddrs(), svc.getEPR()
         scopes = [x.getValue() if hasattr(x, "getValue") else str(x) for x in svc.getScopes()]
         host, port = onvif_discovery.xaddr_host_port(xaddrs[0]) if xaddrs else (None, None)
-        # By identity or at this Pi's camera's address (FoundAndFixed.md #94); another adapter's by
-        # identity only -- its LAN's addresses aren't this one's.
+        # By identity or at this Pi's camera's address (FoundAndFixed.md #94).
         here = camera_registration.match_device(rows, epr, host, port)
-        elsewhere = any(epr and r.get("onvifEndpointRef") == epr and not camera_control.is_mine(r) for r in rows)
-        state = ("removed" if camera_control.is_unregistered(here) else "added") if here else \
-            ("elsewhere" if elsewhere else None)
         device = {"endpointRef": epr, "xaddr": xaddrs[0] if xaddrs else None, "host": host, "port": port,
                   "name": camera_registration.scope_value(scopes, "name"),
-                  "hardware": camera_registration.scope_value(scopes, "hardware"), "state": state}
+                  "hardware": camera_registration.scope_value(scopes, "hardware"),
+                  "state": ("removed" if camera_control.is_unregistered(here) else "added") if here else None}
         if here:
             device.update(cameraId=here["cameraId"], displayName=here.get("displayName"))
         devices.append(device)
+    unknown = [d["endpointRef"] for d in devices if d["state"] is None and d["endpointRef"]]
+    elsewhere = registry_client.elsewhere(unknown) if unknown else set()
+    for d in devices:
+        if d["state"] is None and d["endpointRef"] in elsewhere:
+            d["state"] = "elsewhere"
     return devices
 
 
@@ -363,21 +381,15 @@ def stop_released_producers():
     """After a release (D15) the adapter's camera rows lose adapterId, so no customer reaches them --
     and nobody would press Stop: their producers would push to KVS, unattended, until someone found
     them (the cost rule, guide §1.2). Every producer and live view this Pi has for a camera that
-    isn't its own is stopped. Stopping is always allowed (D12)."""
+    isn't its own is stopped. Stopping is always allowed (D12). Which cameras are this Pi's comes by
+    the adapterId-index (Phase 10.2c): the producers to stop are found on this Pi, not in the table."""
     try:
-        table, rows, kw = get_cameras_table(), [], {}
-        while True:
-            page = table.scan(**kw)
-            rows += page["Items"]
-            if "LastEvaluatedKey" not in page:
-                break
-            kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+        mine = {r["cameraId"] for r in registry_reads.own_rows(["cameraId"])}
     except Exception as e:  # noqa: BLE001 -- AWS unreachable: the next config message tries again
         print(f"agent: couldn't read the registry to stop released cameras: {e}", flush=True)
         return
-    for row in rows:
-        camera = row["cameraId"]
-        if camera_control.is_mine(row) or not camera_control.has_producer(camera):
+    for camera in local_producers():
+        if camera in mine:
             continue
         print(f"agent: {camera} isn't this adapter's any more: stopping its producer", flush=True)
         camera_control.set_stream(camera, False)
@@ -385,6 +397,21 @@ def stop_released_producers():
             set_live(camera, False)
         except Exception as e:  # noqa: BLE001
             print(f"agent: live view of {camera} not stopped: {e}", flush=True)
+
+
+def local_producers():
+    """The cameras this Pi has a recording producer for: cam-01 and cam-02's own units, and each
+    kvs-cam@ instance's channel file (camera_control.unit_name)."""
+    found = {c for c in camera_registration.LEGACY_UNITS if camera_control.has_producer(c)}
+    try:
+        names = os.listdir(camera_control.CHANNELS_DIR)
+    except OSError:
+        names = []
+    for name in names:
+        m = re.fullmatch(r"cam(\d{2,4})\.env", name)
+        if m and camera_control.has_producer(f"cam-{m.group(1)}"):
+            found.add(f"cam-{m.group(1)}")
+    return sorted(found)
 
 
 def _heartbeat_loop():

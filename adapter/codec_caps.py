@@ -39,6 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import camera_control
 import mediamtx_api
 import onvif_media2
+import registry_client
+import registry_reads
 from onvif_media2 import OnvifError
 
 VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -131,8 +133,9 @@ def fallback(item: dict, err: Exception) -> dict:
             "videoCodecProbe": f"fallback: {str(err)[:160]}"}
 
 
-def refresh_item(table, item: dict, write: bool = True) -> tuple:
-    """Probe one row and write the FIELDS if they changed. Returns (fields, status).
+def refresh_item(item: dict, write: bool = True) -> tuple:
+    """Probe one row and write the FIELDS if they changed -- through the registry route, which writes
+    only this adapter's rows (DEALER-PANEL-PLAN.md Phase 10.2b). Returns (fields, status).
 
     A camera that cannot be asked right now keeps the caps it already has: cam-02 drops off
     the network for minutes at a time on its own (codec-phase0.md §2), and overwriting a
@@ -145,11 +148,7 @@ def refresh_item(table, item: dict, write: bool = True) -> tuple:
             return {k: item.get(k) for k in FIELDS}, f"kept existing ({e})"
         fields, status = fallback(item, e), f"fallback ({e})"
     if write and any(item.get(k) != fields[k] for k in FIELDS):
-        table.update_item(
-            Key={"cameraId": item["cameraId"]},
-            UpdateExpression="SET " + ", ".join(f"{k} = :{k}" for k in FIELDS),
-            ExpressionAttributeValues={f":{k}": fields[k] for k in FIELDS},
-        )
+        registry_client.update(item["cameraId"], set={k: fields[k] for k in FIELDS})
         status += ", written"
     return fields, status
 
@@ -158,13 +157,13 @@ def refresh(table, camera_ids=None, write: bool = True, log=print) -> dict:
     """Refresh every registry row (or the given ones). Returns {cameraId: status}."""
     # Unregistered cameras are skipped: nothing on this Pi pulls them any more, and asking a
     # camera that may be gone only costs timeouts (camera_control.is_unregistered).
-    items = [i for i in table.scan()["Items"] if camera_control.acts_on(i)]
+    items = [i for i in registry_reads.own_rows(table=table) if camera_control.acts_on(i)]
     done = {}
     for item in sorted(items, key=lambda i: i["cameraId"]):
         if camera_ids and item["cameraId"] not in camera_ids:
             continue
         try:
-            fields, status = refresh_item(table, item, write)
+            fields, status = refresh_item(item, write)
         except Exception as e:  # noqa: BLE001 -- one bad row must not stop the others
             status = f"error ({type(e).__name__}: {e})"
             log(f"codec caps {item['cameraId']}: {status}")

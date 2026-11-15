@@ -237,25 +237,35 @@ def recording_class(mode):
     return "continuous" if (mode or "manual") == "manual" else "motion"
 
 
-def thumbnail_times(camera_ids):
-    """{cameraId: when its last thumbnail was taken} -- the time only, never the picture (D5)."""
+def thumbnail_keys(camera_id, owner):
+    """Where a camera's thumbnail may be, in order: under the adapter that serves it (each Pi uploads
+    under its own Thing, DEALER-PANEL-PLAN.md Phase 10.2e), then the older key -- a row without an owner,
+    or a camera whose adapter hasn't uploaded under its Thing yet. The older key goes at 10.2f."""
+    return ([f"thumbs/{owner}/{camera_id}.jpg"] if owner else []) + [f"thumbs/{camera_id}.jpg"]
+
+
+def thumbnail_times(rows):
+    """{cameraId: when its last thumbnail was taken} for these registry rows -- the time only, never the
+    picture (D5)."""
     if not THUMB_BUCKET:
         return {}
     s3 = boto3.client("s3", region_name=REGION)
     out = {}
-    for cid in camera_ids:
-        try:
-            head = s3.head_object(Bucket=THUMB_BUCKET, Key=f"thumbs/{cid}.jpg")
-        except Exception:  # noqa: BLE001 -- no thumbnail yet, or not readable: no time
-            continue
-        out[cid] = head["LastModified"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for r in rows:
+        for key in thumbnail_keys(r["cameraId"], r.get("adapterId")):
+            try:
+                head = s3.head_object(Bucket=THUMB_BUCKET, Key=key)
+            except Exception:  # noqa: BLE001 -- no thumbnail there, or not readable: try the next
+                continue
+            out[r["cameraId"]] = head["LastModified"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            break
     return out
 
 
 def inventory(things):
     """{thing: [camera]} for these adapters' cameras, sorted by camera ID."""
     rows = sorted((r for r in registry_cameras() if r.get("adapterId") in set(things)), key=lambda r: r["cameraId"])
-    taken = thumbnail_times([r["cameraId"] for r in rows])
+    taken = thumbnail_times(rows)
     out = {t: [] for t in things}
     for r in rows:
         out[r["adapterId"]].append({

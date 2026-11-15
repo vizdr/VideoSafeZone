@@ -120,7 +120,7 @@ def read_registry_cache() -> dict:
 
 
 def _fetch_registry() -> dict:
-    """One DynamoDB scan, with timeouts short enough to fail fast.
+    """This Pi's rows (registry_reads.own_rows), with timeouts short enough to fail fast.
 
     boto3's defaults are 60s connect / 60s read with retries. That is catastrophic here:
     an unreachable AWS is exactly the condition this process exists to handle, and the
@@ -128,11 +128,12 @@ def _fetch_registry() -> dict:
     connectivity check, never detecting the outage it was watching for. Measured, not
     theorised.
     """
+    import registry_reads
     from botocore.config import Config
     from aws_device_creds import get_session
     cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
     ddb = get_session().resource("dynamodb", config=cfg)
-    items = ddb.Table("cameras").scan()["Items"]
+    items = registry_reads.own_rows(["outageBufferSec", "unregisteredAt"], table=ddb.Table("cameras"))
     # An unregistered camera is left out, so it is disarmed here and unknown to the admin
     # GUI's status poll -- both through this one cache (camera_control.is_unregistered).
     return {i["cameraId"]: int(i.get("outageBufferSec", 0) or 0) for i in items

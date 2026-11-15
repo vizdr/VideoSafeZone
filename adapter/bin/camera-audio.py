@@ -32,9 +32,8 @@ def main() -> int:
 
     camera_id = sys.argv[1]
     try:
-        from aws_device_creds import get_session  # also loads config; inside the try on purpose
-        table = get_session().resource("dynamodb").Table("cameras")
-        item = table.get_item(Key={"cameraId": camera_id}).get("Item") or {}
+        import registry_reads  # also loads config; inside the try on purpose
+        item = registry_reads.own_row(camera_id) or {}     # this adapter's row only (Phase 10.2c)
     except Exception as e:  # noqa: BLE001 -- see module docstring on soft failure
         print("AUDIO=off")
         print(f"camera-audio.py: registry lookup failed ({type(e).__name__}: {e}); "

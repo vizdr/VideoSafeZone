@@ -9,6 +9,7 @@ D11: a new camera's ID is allocated -- one past the highest in the registry -- a
 anything is made, so two registrations can't both have it: the one that comes second finds the ID
 taken before it has touched a path, a unit or a stream, and an allocated ID is followed by the next.
 """
+import json
 import pytest
 
 import camera_registration
@@ -45,12 +46,22 @@ def test_the_list_shows_only_this_adapters_cameras(gui):
     ("codec", {"videoCodec": "h264"}), ("stream", {"stream": "main"}), ("detection/test", {"mode": "motion"}),
 ])
 @pytest.mark.parametrize("row", [FOREIGN, RELEASED], ids=["another adapter's", "released"])
-def test_a_camera_that_isnt_this_adapters_is_refused(gui, route, body, row):
+def test_a_camera_that_isnt_this_adapters_is_unknown_here(gui, route, body, row):
+    # This Pi reads only its own rows, by the adapterId-index (DEALER-PANEL-PLAN.md Phase 10.2c):
+    # another adapter's camera is unknown, as one that doesn't exist, and whose it is isn't said.
     g = gui(rows=ROWS + [row])
     status, out = g.post(f"/api/cameras/{row['cameraId']}/{route}", body)
-    assert status == 409 and "isn't this adapter's camera" in out["error"], (status, out)
+    assert status == 404 and "unknown" in out["error"], (status, out)
+    assert "adapter-99" not in str(out) and "released" not in str(out)
     assert systemctl_writes(g.system) == [] and g.mtx.writes() == []
     assert g.table.row(row["cameraId"]) == row                      # untouched
+
+
+def test_another_adapters_camera_with_no_producer_here_cant_be_stopped_either(gui):
+    g = gui(rows=ROWS + [FOREIGN])
+    assert g.post("/api/cameras/cam-07/stop")[0] == 404
+    assert g.post("/api/cameras/not-a-camera/stop")[0] == 404
+    assert systemctl_writes(g.system) == []
 
 
 def test_a_producer_still_running_here_can_be_stopped(gui):
@@ -77,11 +88,11 @@ def _registering_gui(gui, path, rows=ROWS):
 def _expect_streams(g, cid):
     kv = g.table.session.stub("kinesisvideo")
     kv.add_response("create_stream", {"StreamARN": arn(cid)}, {"StreamName": cid, "DataRetentionInHours": 24,
-                                                               "MediaType": "video/h264"})
+                                                               "MediaType": "video/h264", "Tags": {"adapterId": "test-thing"}})
     kv.add_client_error("describe_stream", "ResourceNotFoundException", http_status_code=404,
                         expected_params={"StreamName": f"{cid}-live"})
     kv.add_response("create_stream", {"StreamARN": arn(f"{cid}-live")},
-                    {"StreamName": f"{cid}-live", "DataRetentionInHours": 1, "MediaType": "video/h264"})
+                    {"StreamName": f"{cid}-live", "DataRetentionInHours": 1, "MediaType": "video/h264", "Tags": {"adapterId": "test-thing"}})
 
 
 def test_a_new_camera_gets_the_next_free_id_past_every_adapters(gui):
@@ -93,6 +104,11 @@ def test_a_new_camera_gets_the_next_free_id_past_every_adapters(gui):
     row = g.table.row("cam-08")
     assert row["adapterId"] == "test-thing" and row["mode"] == "passthrough"
     assert not {"registering", "unregisteredAt", "abandonedAt"} & set(row)       # the claim is gone
+    # Its secrets in SSM beside the row (DEALER-PANEL-PLAN.md Phase 10.2d), under this Thing's path.
+    ssm = g.table.session.ssm.params
+    assert {n.rsplit("/", 1)[1] for n in ssm if n.startswith("/vsz/adapters/test-thing/cameras/cam-08/")} >= \
+        {"onvifPassword", "rtspUrl"}
+    assert json.loads(ssm["/vsz/adapters/test-thing/cameras/cam-08/onvifPassword"]) == NEW["password"]
 
 
 def test_an_id_claimed_meanwhile_is_followed_by_the_next(gui, monkeypatch):
@@ -111,6 +127,26 @@ def test_an_id_claimed_meanwhile_is_followed_by_the_next(gui, monkeypatch):
     assert g.table.row("cam-06")["registering"] == "theirs"                     # theirs, untouched
 
 
+def test_a_claim_lost_before_the_camera_is_written_keeps_nothing(gui, monkeypatch):
+    """The completion expects this registration's claim token (through the registry route, Phase 10.2b):
+    a claim lost meanwhile -- abandoned, or taken by another -- is never written over."""
+    import codec_caps
+    g = _registering_gui(gui, "cam06")
+    g.table.session.stub("kinesisvideo").add_response(
+        "create_stream", {"StreamARN": arn("cam-06")},
+        {"StreamName": "cam-06", "DataRetentionInHours": 24, "MediaType": "video/h264", "Tags": {"adapterId": "test-thing"}})
+    probe = codec_caps.probe
+
+    def lost_meanwhile(row):                      # between the claim and the camera's row
+        g.table.row("cam-06")["registering"] = "someone else's"
+        return probe(row)
+    monkeypatch.setattr(codec_caps, "probe", lost_meanwhile)
+    status, out = g.post("/api/cameras", NEW)
+    assert status == 409 and "claim was lost meanwhile" in out["error"], out
+    row = g.table.row("cam-06")
+    assert row["registering"] == "someone else's" and "mode" not in row          # nothing written over it
+
+
 def test_a_typed_id_that_is_taken_meanwhile_touches_nothing(gui, monkeypatch):
     g = _registering_gui(gui, "cam04")
     put = g.table.put_item
@@ -127,12 +163,38 @@ def test_a_typed_id_that_is_taken_meanwhile_touches_nothing(gui, monkeypatch):
     assert g.table.row("cam-04")["registering"] == "theirs"
 
 
-def test_ids_run_from_cam_01_to_cam_9999():
-    assert camera_registration.next_camera_id(FakeTable([])) == "cam-01"
-    rows = [{"cameraId": f"cam-{n:02d}"} for n in (1, 2, 99)] + [{"cameraId": "cam-03-live"}, {"cameraId": "other"}]
-    assert camera_registration.next_camera_id(FakeTable(rows, page_size=2)) == "cam-100"   # every page counts
-    with pytest.raises(ValueError, match="cam-9999"):
-        camera_registration.next_camera_id(FakeTable([{"cameraId": "cam-9999"}]))
+def test_an_allocated_id_is_the_routes_and_this_pi_never_scans_for_one(gui, monkeypatch):
+    # The next free ID is past every adapter's (D11), which only the registry route sees (Phase 10.2c).
+    g = _registering_gui(gui, "cam08", rows=ROWS + [FOREIGN])
+    _expect_streams(g, "cam-08")
+    real_scan = g.table.scan
+    route_scans = []
+
+    def scan(**kw):                               # the route's next_free scans; the Pi's code never does
+        import traceback
+        if not any("vsz_registry" in f.filename for f in traceback.extract_stack()):
+            pytest.fail("this Pi scanned the whole table")
+        route_scans.append(kw)
+        return real_scan(**kw)
+    monkeypatch.setattr(g.table, "scan", scan)
+    monkeypatch.setattr("config.ADOPT_UNSTAMPED_ROWS", False)
+    g.table.items[:] = [{**r, "adapterId": r.get("adapterId", "test-thing")} for r in g.table.items]
+    status, body = g.post("/api/cameras", NEW)
+    assert status == 201 and body["cameraId"] == "cam-08", body
+    assert route_scans and g.table.route.calls[0][:2] == ("POST", "cameras/claim")
+    assert g.table.route.calls[0][2] == {}                                     # no ID proposed by the Pi
+
+
+def test_an_allocated_id_whose_mediamtx_path_exists_is_given_up(gui):
+    # The ID is known only once claimed, so the path is checked after the claim; a clash abandons it
+    # (the ID stays used) and nothing else is made.
+    g = _registering_gui(gui, "cam06")
+    g.mtx.conf["cam06"] = {"source": "rtsp://left-over"}
+    status, out = g.post("/api/cameras", NEW)
+    assert status == 502 and "cam06 already" in out["error"], out
+    row = g.table.row("cam-06")
+    assert row["abandonedAt"] and "registering" not in row and row["unregisteredAt"]
+    assert systemctl_writes(g.system) == [] and g.mtx.writes() == []
 
 
 def test_no_id_left_or_a_too_long_one_is_refused(gui):
@@ -143,17 +205,24 @@ def test_no_id_left_or_a_too_long_one_is_refused(gui):
     assert g.mtx.writes() == [] and systemctl_writes(g.system) == []
 
 
-def test_a_claim_is_skipped_by_every_reader_until_the_camera_is_ready():
+def test_a_claim_is_skipped_by_every_reader_until_the_camera_is_ready(registry):
     import camera_control
-    table = FakeTable([])
-    cid, token = camera_registration.claim_camera_id(table, "cam-01", allocated=True)
+    table = registry([])                               # claimed through the registry route (Phase 10.2b)
+    cid, token = camera_registration.claim_camera_id("cam-01", allocated=True)
     claim = table.row(cid)
     assert claim["registering"] == token and claim["adapterId"] == "test-thing"
     assert camera_control.is_mine(claim) and not camera_control.acts_on(claim)  # unregistered: readers skip it
-    camera_registration.abandon_claim(table, cid, "not this one")              # only its own claim
+    camera_registration.abandon_claim(cid, "not this one")                     # only its own claim
     assert "registering" in table.row(cid)
-    camera_registration.abandon_claim(table, cid, token)
+    camera_registration.abandon_claim(cid, token)
     assert table.row(cid)["abandonedAt"] and "registering" not in table.row(cid)
+
+
+def test_a_typed_id_taken_is_refused_and_an_allocated_one_follows_the_next(registry):
+    registry([{"cameraId": "cam-07", "mode": "passthrough", "adapterId": "adapter-99"}])
+    assert camera_registration.claim_camera_id("cam-07", allocated=False) == \
+        ({"error": "cam-07 is taken -- leave the camera ID out and the next free one is used"}, 409)
+    assert camera_registration.claim_camera_id("cam-07", allocated=True)[0] == "cam-08"   # past every adapter's
 
 
 # --- unregister any camera, re-register from what the row holds (the user, 2026-11-08) ---------------
@@ -201,7 +270,7 @@ def test_a_network_camera_comes_back_from_its_row_without_a_form(gui):
 
 def test_re_register_refuses_another_adapters_camera_and_leaves_a_registered_one(gui):
     g = gui(rows=ROWS + [{**FOREIGN, "unregisteredAt": "x"}])
-    assert g.post("/api/cameras/cam-07/reregister")[0] == 409
+    assert g.post("/api/cameras/cam-07/reregister")[0] == 404                 # unknown here (Phase 10.2c)
     assert g.post("/api/cameras/cam-02/reregister") == (200, {"cameraId": "cam-02", "reactivated": False, "registered": True})
     assert g.post("/api/cameras/cam-99/reregister")[0] == 404
     assert systemctl_writes(g.system) == [] and g.mtx.writes() == []

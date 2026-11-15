@@ -944,6 +944,94 @@ Without `provision.sh accounts`, cancelling a pending invite still takes the per
 directory, but their Cognito sign-in stays (the page says so), and inviting that address again is
 refused until it is deleted by hand (`aws cognito-idp admin-delete-user`).
 
+### The adapters' registry route
+
+Each adapter's writes to the camera registry will go through `/registry/<its Thing>/…`, signed with
+its own device credentials, so that no adapter can change another's cameras once the device role is
+narrowed (`DEALER-PANEL-PLAN.md` Phase 10.2b). In this order, once:
+
+```bash
+bash cloud/provision.sh registry --dry-run        # what it would add, changing nothing
+bash cloud/provision.sh registry                  # Lambda vsz-registry, /registry/{proxy+} (IAM-signed),
+                                                  # the device role's registry-route policy
+# on each adapter's Pi: the route's address, then the check
+echo 'REGISTRY_URL=https://svfvg7xh9g.execute-api.eu-central-1.amazonaws.com/prod' | sudo tee -a /etc/adapter/adapter.env
+venv-adapter/bin/python3 adapter/registry_client.py check   # three PASS lines: it answers this Pi, IAM
+                                                  # refuses another Thing's path, one harmless write
+```
+
+`provision.sh registry` checks what it can with your login (IAM turns an unsigned call away; the
+function, reached through the route, refuses a call that isn't an adapter's); that a Pi may sign
+only its own Thing's path is what `check` tries.
+
+Since 10.2b's second half every registry write on a Pi goes through the route: the timers (rematch,
+schedules) take the new code at their next run, the long-running processes at a restart —
+`systemctl --user restart kvs-agent onvif-admin`. A Pi without `REGISTRY_URL` then fails its writes
+("REGISTRY_URL is not set"), so the line above comes first on every adapter.
+
+### Each adapter's own rows
+
+Each adapter will read its camera rows through an index of the registry by owner, which its role may
+query for its own Thing only (`DEALER-PANEL-PLAN.md` Phase 10.2c). In this order, once:
+
+```bash
+bash cloud/provision.sh adapter-index --dry-run   # what it would add, changing nothing
+bash cloud/provision.sh adapter-index             # index adapterId-index on cameras, the device role's
+                                                  # own-rows policy; waits for ACTIVE (a minute or so)
+# on each adapter's Pi:
+venv-adapter/bin/python3 adapter/registry_reads.py check   # three PASS lines: the index lists this Pi's
+                                                  # rows, IAM refuses another Thing's, they match the table
+```
+
+The `cameras` table is VMS's too: the index adds a way to read it and changes none of its rows. A new
+policy can take a few seconds to reach the device role — if `check`'s first line fails with
+`AccessDeniedException` right after provisioning, run it again.
+
+Since 10.2c's second step every read on a Pi is of its own rows, through the index: the timers (path
+sync, rematch, schedules) and the producers' scripts take the new code at their next run, the
+long-running processes at a restart —
+`systemctl --user restart kvs-agent onvif-admin kvs-event-watcher kvs-outage-buffer`. Another adapter's
+camera is then unknown to the admin GUI (404) rather than refused (409).
+
+### Each adapter's camera secrets
+
+Each camera's ONVIF password and RTSP URIs are kept in SSM Parameter Store as well, under
+`/vsz/adapters/<its Thing>/`, which the device role may read and write for its own Thing only
+(`DEALER-PANEL-PLAN.md` Phase 10.2d). In this order, once:
+
+```bash
+bash cloud/provision.sh camera-secrets --dry-run  # what it would add, changing nothing
+bash cloud/provision.sh camera-secrets            # KVSAdapterRole's camera-secrets policy
+# on each adapter's Pi (a new policy can take a few seconds to apply):
+venv-adapter/bin/python3 adapter/camera_secrets.py mirror   # copies each camera's secrets now (names only shown)
+venv-adapter/bin/python3 adapter/camera_secrets.py check    # PASS: IAM refuses another Thing's; SSM = each row
+```
+
+Without `mirror`, rematch copies them within five minutes. Until then rematch logs "mirroring camera
+secrets skipped (AccessDeniedException)" each run, which is expected before the policy exists. The rows
+keep the secrets and stay what the Pi reads until the device role is narrowed (10.2f).
+
+### Each adapter's S3 keys
+
+Since `DEALER-PANEL-PLAN.md` Phase 10.2e a Pi uploads under its own Thing: thumbnails to
+`thumbs/<thing>/<cameraId>.jpg`, outage clips to `clips/<cameraId>/<thing>/…`. Nothing to provision — the
+device role already allows those keys — but the readers and the route are deployed, and the uploader
+restarted, once:
+
+```bash
+bash cloud/deploy.sh lambda list-cameras          # the page's thumbnail: under the camera's adapter, then the older key
+bash cloud/deploy.sh lambda vsz-directory-api     # the portal's thumbnail time, the same way
+bash cloud/deploy.sh lambda vsz-registry --force  # a clip row's key must be its camera's, under its Thing
+systemctl --user restart kvs-outage-uploader      # its uploads under the Thing
+```
+
+`--force` on `vsz-registry` only this once: its live code came from this tree before it was committed, so
+`deploy.sh` can't match it to HEAD (`deploy.sh` saves the live copy first; `rollback` puts it back).
+
+**The long-running units** that run Python from the clone are five — `kvs-agent`, `onvif-admin`,
+`kvs-event-watcher`, `kvs-outage-buffer`, `kvs-outage-uploader` — and take a code change only at a restart;
+the timers (rematch, schedules, thumbnails) and the producers' scripts take it at their next run.
+
 ### The web panel needs Node
 
 The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the

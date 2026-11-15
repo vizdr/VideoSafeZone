@@ -258,11 +258,10 @@ def main():
 
     host, user, pw, port = args.host, args.user, args.password, args.port
     if not (host and user and pw):
-        from aws_device_creds import get_session
-        item = (get_session().resource("dynamodb").Table("cameras")
-                .get_item(Key={"cameraId": args.camera}).get("Item"))
+        import registry_reads
+        item = registry_reads.own_row(args.camera)          # this adapter's cameras only (Phase 10.2c)
         if not item:
-            sys.exit(f"camera '{args.camera}' not in the registry, and no --host/--user/--password given")
+            sys.exit(f"camera '{args.camera}' isn't one of this adapter's, and no --host/--user/--password given")
         host, user, pw = item["onvifHost"], item["onvifUser"], item["onvifPassword"]
         port = item.get("onvifPort", 80)
 

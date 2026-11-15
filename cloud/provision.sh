@@ -36,6 +36,14 @@
 #   bash cloud/provision.sh accounts                  an account's Additional users (DEALER-PANEL-PLAN.md Phase 9):
 #                                                     the API may delete the sign-in of an invitation cancelled
 #                                                     before it was used; checked as the demo holder
+#   bash cloud/provision.sh registry                  the adapters' registry route (DEALER-PANEL-PLAN.md Phase 10.2b):
+#                                                     Lambda vsz-registry on /registry/{proxy+}, IAM-signed; each
+#                                                     adapter may call only its own Thing's path
+#   bash cloud/provision.sh adapter-index             each adapter's own rows (DEALER-PANEL-PLAN.md Phase 10.2c): the
+#                                                     cameras table's index adapterId-index, and KVSAdapterRole may
+#                                                     query it for its own Thing only
+#   bash cloud/provision.sh camera-secrets            each adapter's camera secrets in SSM (DEALER-PANEL-PLAN.md Phase
+#                                                     10.2d): KVSAdapterRole may read and write /vsz/adapters/<its Thing>/*
 #   bash cloud/provision.sh tenancy                   the tenant check's rollout, step 1 (DEALER-PANEL-PLAN.md
 #                                                     3.3): camera-row read for the clip Lambdas, TENANCY=report
 #                                                     on every function with the check, vsz-users beside
@@ -53,6 +61,8 @@
 #   - One exception to "nothing that exists is modified", said aloud when it happens: directory-db
 #     adds one inbound rule to the database's existing security group rds-lambda-2 (tcp 5432 from
 #     vsz-db-client). Adding a rule removes nothing; the other project's rules stay as they are.
+#     And adapter-index adds an index to the cameras table, which VMS shares: its rows, key and
+#     reads stay as they are; the index only adds a way to read the rows that have an adapterId.
 #
 # Needs the operator's AWS CLI, logged in to the account below (aws login --remote).
 set -euo pipefail
@@ -207,15 +217,22 @@ ensure_resource() {   # ensure_resource /me/settings -- each missing level is cr
   echo "$parent"
 }
 
-ensure_method() {     # ensure_method RESOURCE_ID PATH METHOD FUNCTION -- Cognito-authorized proxy
-  local rid=$1 path=$2 method=$3 fn=$4
+ensure_method() {     # ensure_method RESOURCE_ID PATH METHOD FUNCTION [iam] -- Cognito-authorized proxy, or
+                      # with `iam` signed with AWS credentials (the adapters' registry route, Phase 10.2b)
+  local rid=$1 path=$2 method=$3 fn=$4 auth=${5:-cognito} how
   local uri="arn:aws:apigateway:$REGION:lambda:path/2015-03-31/functions/arn:aws:lambda:$REGION:$ACCOUNT:function:$fn/invocations"
   if [ "$rid" != "(new)" ] && aws apigateway get-method --rest-api-id "$API" --resource-id "$rid" --http-method "$method" >/dev/null 2>&1; then
     say "route $method $path: exists, left as is"; return
   fi
-  if [ "$DRY" -eq 1 ]; then say "would create route $method $path -> $fn (Cognito authorizer)"; return; fi
-  create "route $method $path -> $fn (Cognito authorizer)" aws apigateway put-method --rest-api-id "$API" \
-    --resource-id "$rid" --http-method "$method" --authorization-type COGNITO_USER_POOLS --authorizer-id "$AUTHORIZER"
+  if [ "$auth" = iam ]; then how="IAM-signed"; else how="Cognito authorizer"; fi
+  if [ "$DRY" -eq 1 ]; then say "would create route $method $path -> $fn ($how)"; return; fi
+  if [ "$auth" = iam ]; then
+    create "route $method $path -> $fn ($how)" aws apigateway put-method --rest-api-id "$API" \
+      --resource-id "$rid" --http-method "$method" --authorization-type AWS_IAM
+  else
+    create "route $method $path -> $fn ($how)" aws apigateway put-method --rest-api-id "$API" \
+      --resource-id "$rid" --http-method "$method" --authorization-type COGNITO_USER_POOLS --authorizer-id "$AUTHORIZER"
+  fi
   aws apigateway put-integration --rest-api-id "$API" --resource-id "$rid" --http-method "$method" \
     --type AWS_PROXY --integration-http-method POST --uri "$uri" >/dev/null
   # Only this API, this method, this path may invoke the function -- as for every other route.
@@ -1093,6 +1110,105 @@ PY
   say "verified: the demo holder lists the account's people (and the cancelled-invitations policy is in place)"
 }
 
+# --- the adapters' registry route (DEALER-PANEL-PLAN.md D13 as amended, Phase 10.2b) -------------------
+
+provision_registry() {
+  local rid url out code i
+  aws iam get-role --role-name KVSAdapterRole >/dev/null 2>&1 || die "no role KVSAdapterRole (the adapters' role)"
+  grep -q "execute-api:$REGION:$ACCOUNT:$API/$STAGE/\*/registry/" "$IAM_DIR/kvs-adapter-registry-route-policy.json" ||
+    die "cloud/iam/kvs-adapter-registry-route-policy.json doesn't name $API_NAME ($API), stage $STAGE"
+  ensure_role vsz-registry-role vsz-registry vsz-registry-policy.json
+  ensure_function vsz-registry vsz-registry-role 256 10
+  if [ "$DRY" -eq 1 ] && ! aws lambda get-function-configuration --function-name vsz-registry >/dev/null 2>&1; then
+    say "would set vsz-registry's ADOPTING_THING=adapter-01 (it adopts rows without an owner, D12)"
+  else ensure_env vsz-registry ADOPTING_THING adapter-01; fi
+  rid=$(ensure_resource "/registry/{proxy+}")
+  ensure_method "$rid" "/registry/{proxy+}" ANY vsz-registry iam
+  ensure_inline_policy KVSAdapterRole registry-route kvs-adapter-registry-route-policy.json
+  deploy_stage registry
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  # Done means: an unsigned call is turned away by IAM, and the function is reached through the route
+  # and refuses what didn't come from the adapters' role (test-invoke carries no identity). That a Pi
+  # may sign only its own Thing's path is tried on the Pi: registry_client.py check (LAUNCH.md).
+  url="https://$API.execute-api.$REGION.amazonaws.com/$STAGE/registry/adapter-01/ping"
+  for i in 1 2 3 4 5 6 7 8; do               # a new deployment reaches the edges one by one (#92)
+    code=$(curl -s -o "$TMP/body" -w '%{http_code}' "$url")
+    [ "$code" = 403 ] && grep -q "Missing Authentication Token" "$TMP/body" && break
+    sleep 5
+  done
+  [ "$code" = 403 ] || die "GET /registry/adapter-01/ping unsigned: expected 403 from IAM, got $code"
+  rid=$(resource_id "/registry/{proxy+}")
+  out=$(aws apigateway test-invoke-method --rest-api-id "$API" --resource-id "$rid" --http-method GET \
+          --path-with-query-string /registry/adapter-01/ping --query '[status, body]' --output text)
+  grep -q "answers adapters only" <<<"$out" || die "test-invoke GET /registry/adapter-01/ping didn't reach vsz-registry: $out"
+  say "verified: /registry answers through IAM; next, on each adapter's Pi (REGISTRY_URL in adapter.env first):"
+  say "   venv-adapter/bin/python3 adapter/registry_client.py check"
+}
+
+# --- each adapter's own rows (DEALER-PANEL-PLAN.md D13 as amended, Phase 10.2c) ----------------------
+
+ADAPTER_INDEX=adapterId-index
+
+index_status() {    # index_status -> ACTIVE, CREATING... or empty when the cameras table has no such index
+  aws dynamodb describe-table --table-name cameras \
+    --query "Table.GlobalSecondaryIndexes[?IndexName=='$ADAPTER_INDEX'].IndexStatus" --output text | sed 's/None//'
+}
+
+provision_adapter_index() {
+  local status i want got thing
+  aws iam get-role --role-name KVSAdapterRole >/dev/null 2>&1 || die "no role KVSAdapterRole (the adapters' role)"
+  grep -q "table/cameras/index/$ADAPTER_INDEX" "$IAM_DIR/kvs-adapter-own-rows-policy.json" ||
+    die "cloud/iam/kvs-adapter-own-rows-policy.json doesn't name the index $ADAPTER_INDEX"
+  status=$(index_status)
+  if [ -n "$status" ]; then say "index $ADAPTER_INDEX on cameras: exists ($status), left as is"
+  else
+    # Sparse: only rows with an adapterId are in it. Every attribute projected, so a Pi's read of its
+    # own rows is one query; on demand, as the table.
+    create "index $ADAPTER_INDEX on cameras (key adapterId, every attribute; the table is VMS's too)" \
+      aws dynamodb update-table --table-name cameras \
+        --attribute-definitions AttributeName=adapterId,AttributeType=S \
+        --global-secondary-index-updates \
+        "[{\"Create\":{\"IndexName\":\"$ADAPTER_INDEX\",\"KeySchema\":[{\"AttributeName\":\"adapterId\",\"KeyType\":\"HASH\"}],\"Projection\":{\"ProjectionType\":\"ALL\"}}}]"
+  fi
+  ensure_inline_policy KVSAdapterRole own-rows kvs-adapter-own-rows-policy.json
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  for i in $(seq 60); do                     # a new index fills from the table first (a few rows: a minute or so)
+    status=$(index_status); [ "$status" = ACTIVE ] && break
+    [ "$i" -eq 1 ] && say "waiting for $ADAPTER_INDEX to become ACTIVE ($status)"
+    sleep 10
+  done
+  [ "$status" = ACTIVE ] || die "index $ADAPTER_INDEX is $status after 10 minutes -- run this again later to verify"
+  # Done means: the index holds each adapter's rows as the table does. That a Pi may query it for its
+  # own Thing only is tried on the Pi: registry_reads.py check (LAUNCH.md).
+  for thing in $(aws dynamodb scan --table-name cameras --projection-expression adapterId \
+                   --query 'Items[].adapterId.S' --output text | tr '\t' '\n' | sort -u); do
+    want=$(aws dynamodb scan --table-name cameras --filter-expression 'adapterId = :t' \
+             --expression-attribute-values "{\":t\":{\"S\":\"$thing\"}}" --query 'Items[].cameraId.S' --output text | tr '\t' '\n' | sort | xargs)
+    got=$(aws dynamodb query --table-name cameras --index-name "$ADAPTER_INDEX" --key-condition-expression 'adapterId = :t' \
+            --expression-attribute-values "{\":t\":{\"S\":\"$thing\"}}" --query 'Items[].cameraId.S' --output text | tr '\t' '\n' | sort | xargs)
+    [ "$want" = "$got" ] || die "$ADAPTER_INDEX for $thing lists '$got', the table '$want'"
+    say "  $thing: ${got:-no cameras}"
+  done
+  say "verified: $ADAPTER_INDEX lists each adapter's rows as the table does; next, on each adapter's Pi:"
+  say "   venv-adapter/bin/python3 adapter/registry_reads.py check"
+}
+
+# --- each adapter's camera secrets (DEALER-PANEL-PLAN.md D13, Phase 10.2d) ------------------------------
+
+provision_camera_secrets() {
+  aws iam get-role --role-name KVSAdapterRole >/dev/null 2>&1 || die "no role KVSAdapterRole (the adapters' role)"
+  grep -q 'parameter/vsz/adapters/${credentials-iot:ThingName}/\*' "$IAM_DIR/kvs-adapter-camera-secrets-policy.json" ||
+    die "cloud/iam/kvs-adapter-camera-secrets-policy.json doesn't scope the parameters by the Thing"
+  ensure_inline_policy KVSAdapterRole camera-secrets kvs-adapter-camera-secrets-policy.json
+  if [ "$DRY" -eq 1 ]; then say "dry run: nothing was changed"; return; fi
+  # Done means: the policy is the file. What it allows -- this Thing's path, not another's -- and the
+  # copy of each camera's secrets are tried on the Pi (with its certificate, not this login):
+  say "verified: KVSAdapterRole's camera-secrets policy is cloud/iam/kvs-adapter-camera-secrets-policy.json;"
+  say "next, on each adapter's Pi (a new policy can take a few seconds to apply):"
+  say "   venv-adapter/bin/python3 adapter/camera_secrets.py mirror   # copies each camera's secrets now"
+  say "   venv-adapter/bin/python3 adapter/camera_secrets.py check    # IAM refuses another Thing's; SSM = the rows"
+}
+
 case "${1:-}" in
   user-settings)   preflight; provision_user_settings ;;
   camera-settings) preflight; provision_camera_settings ;;
@@ -1107,5 +1223,8 @@ case "${1:-}" in
   adapters)        preflight; provision_adapters ;;
   cameras)         preflight; provision_cameras ;;
   accounts)        preflight; find_pool; provision_accounts ;;
-  *) sed -n '2,42p' "$0"; exit 1 ;;
+  registry)        preflight; provision_registry ;;
+  adapter-index)   preflight; provision_adapter_index ;;
+  camera-secrets)  preflight; provision_camera_secrets ;;
+  *) sed -n '2,50p' "$0"; exit 1 ;;
 esac

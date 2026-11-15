@@ -261,7 +261,9 @@ def registry(monkeypatch):
     """registry(rows, *modules, page_size=None) -> FakeTable: the `cameras` table as
     aws_device_creds.get_session() serves it (PYTEST.md, Phase 2). Covers every module that
     imports get_session inside a function; a module that bound its own name at import
-    (event_watcher, app.py) is passed in `modules` and patched too.
+    (event_watcher, app.py) is passed in `modules` and patched too. Writes through the registry
+    route (registry_client, DEALER-PANEL-PLAN.md Phase 10.2b) reach the real vsz-registry on this
+    same table; table.route.calls lists them.
 
     The session is a FakeBoto3, at `table.session`: queue AWS client answers on
     table.session.stub("kinesisvideo"); one left unused fails the test afterwards."""
@@ -270,11 +272,17 @@ def registry(monkeypatch):
     sessions = []
 
     def install(rows=(), *modules, page_size=None):
+        import registry_client
+        from fakes import FakeRegistryRoute
+        from loaders import load_lambda
         table = FakeTable(rows, page_size=page_size)
         table.session = FakeBoto3(cameras=table)
         sessions.append(table.session)
         for module in (aws_device_creds, *modules):
             monkeypatch.setattr(module, "get_session", lambda *a, **k: table.session)
+        # The registry route (Phase 10.2b): signed calls reach the real vsz-registry, on this same table.
+        table.route = FakeRegistryRoute(table.session, load_lambda("vsz_registry"), monkeypatch)
+        monkeypatch.setattr(registry_client, "_open", table.route)
         return table
     yield install
     for session in sessions:

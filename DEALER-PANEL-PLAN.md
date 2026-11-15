@@ -356,7 +356,10 @@ from code (fixes A3).
   global secondary index (to verify).
 - `publish-cmd` sends to `adapter/<row.adapterId>/cmd`.
 A short spike comes first: tag-conditioned `PutMedia` from kvssink, the `credentials-iot:ThingName`
-variable, and `LeadingKeys` on an index, each tried on a test stream / table.
+variable, and `LeadingKeys` on an index, each tried on a test stream / table. *Tried 2026-11-15
+(Phase 10.1): all three hold* — streams stay named by camera ID and are scoped by their `adapterId` tag,
+created only so tagged; the Pi reads by `Query` on a sparse `adapterId` index, so every row it acts on
+must be stamped first; the details for 10.2 are under Phase 10.
 
 **D14. Several customers' adapters and VMS don't share the camera table or the device role.** VMS
 reads the same `cameras` table and uses the same role alias, with no tenancy: once a second
@@ -365,6 +368,23 @@ device role would break VMS's admin GUI, which writes the table directly. So bef
 adapter goes to a customer, VMS either gets copies of its own (its own table and role alias) or
 its card is retired. Until then, a second adapter is for testing only, with test cameras. Settled
 2026-11-06 (the user agreed); which of the two is decided when Phase 10 starts.
+
+*Decided 2026-11-14 (the user, at Phase 10): VMS gets its own copies*, built in the VMS repository
+(this one never deploys a `pir-*` resource). For D13 to keep one adapter off another's resources,
+"its own" has to cover everything the two cards share today (VMS-PORT-PLAN.md D1):
+- **its own Thing and certificate** — `adapter-01` becomes this repository's alone (and
+  `adapter-identity.sh`'s guard on it can go);
+- **its own role alias and role**, whose policy reaches none of this repository's resources: not the
+  `cameras` table, not the `cam-*` streams, not `/vsz/adapters/*`, not the `thumbs/` and `clips/`
+  keys this repository writes;
+- **its own camera table**, which VMS's admin GUI and page (`pir-api`) read and write;
+- **its own KVS streams** — camera IDs collide (both have `cam-01` … `cam-04`) and stream names are
+  camera IDs, so VMS's streams need names of their own;
+- **its clips**: `clip-to-s3` is this repository's and VMS uses it for ONVIF detection clips — VMS
+  gets its own, or the shared one stays backward compatible (CLAUDE.md) until it does.
+VMS's page is already apart from this repository's sign-in (Phase 3: `kvs-demo-users` is VMS's alone
+now). Until VMS runs on its copies, 10.2 builds only what keeps VMS's card working; the narrowed role
+and the secrets leaving the rows come after (Phase 10).
 
 **D15** moved to §4c and was rewritten for activation with a Cloud ID (user, 2026-11-06). New
 adapters take ONVIF cameras first; a USB camera on a new adapter (A6) needs its own allocated ID
@@ -1624,7 +1644,313 @@ own cameras; neither Pi adds the other's paths; with `adapter-02`'s certificate,
 `adapter-01`'s camera secrets, pushing into its streams and writing its rows are all refused (tried
 from the CLI with that certificate's credentials); commands from the page reach the right Pi.
 
-### Later
+*D14 decided 2026-11-14: VMS gets its own copies* (§4b). So the order is: 10.1 now; 10.2 built in
+steps that keep VMS's card working on the shared table and role — additions only (the secrets read
+from SSM first with the row as the fallback, tags on the streams, an adapter index, the registry
+path over MQTT); the role narrowed, exported back to `cloud/iam/`, and the secrets taken out of the
+rows only once VMS runs on its own copies. Which steps exactly follows the spike's results.
+
+**What a Pi reaches today** (2026-11-14, from the code and `cloud/iam/`; all through
+`KVSAdapterRole`, shared by every adapter and by the VMS card) — and D13's aim for each:
+
+| Who on the Pi | Today | D13's aim (spike checks) |
+|---|---|---|
+| producers (kvssink), registration, live view, `stream-codec.py`, agent | KVS `DescribeStream`, `GetDataEndpoint`, `PutMedia`, `CreateStream`, `TagStream`, `UpdateStream` on every `stream/cam-*` (live streams included) | only streams tagged `adapterId=<own Thing>`; create only so tagged; no re-tagging (#7–#19) |
+| every reader of A3 (sync paths, rematch, schedules, outage buffer, event watcher, codec caps, admin GUI, agent) | `cameras` `Scan`, `GetItem` — every customer's rows | `Query` on an `adapterId` index, own rows only (#20–#24) |
+| registration, rematch, codec caps, schedules, live view, `stream-codec.py`, admin GUI | `cameras` `PutItem`, `UpdateItem` — any row | over MQTT `adapter/<thing>/registry`, an IoT rule, a Lambda that writes field by field to that Thing's rows only |
+| ONVIF passwords, credentials in `rtspUrl` / `liveRtspUrl` | in the rows, so in every adapter's `Scan` | SSM `SecureString` `/vsz/adapters/<thing>/cameras/<cameraId>` (#3–#6) |
+| thumbnails | `s3:PutObject` on `thumbs/*` | `thumbs/<thing>/*` (#25–#26) |
+| outage uploader | `s3:PutObject`, `GetObject` on `clips/*`; `clips` `PutItem` | `clips/<thing>/*`; the clip row: to decide in 10.2 |
+| event watcher | `iot:Publish` on `adapter/adapter-01/event` | `adapter/${credentials-iot:ThingName}/event` (#27–#28) |
+| agent, Add cameras (D16) | `camera-requests` `GetItem` — any request, if its random ID is known | to decide in 10.2 (a key that starts with the Thing, with `LeadingKeys`) |
+
+*10.1 built 2026-11-14, results pending* — `cloud/spike-d13.sh` (setup, run, verify, teardown, each
+with `--dry-run`) and `cloud/spike_d13.py`, with the policies `cloud/iam/vsz-spike-d13-policy.json`
+(D13's shape on test resources) and `cloud/iot/vsz-spike-d13-thing-policy.json`. Everything it makes is
+throwaway and named `vsz-spike*`: a Thing `vsz-spike-a` with its own certificate and IoT policy, a role
+and role alias, four KVS streams (two tagged for `vsz-spike-a` and an imaginary `vsz-spike-b`, two named
+after them), two SSM parameters, a DynamoDB table with an `adapterId` index, an S3 bucket. Nothing
+shared changes — not `KVSAdapterRole`, not the Thing policy, not `adapter-01`, not the `cameras` table.
+`run` uses the spike certificate alone (what an adapter with that identity could do) and makes 30
+checks, its own and the other's resource each time: credentials refused when claiming another Thing's
+name; SSM read and write by path; KVS by tag (describe, the PutMedia endpoint, create only tagged as
+one's own, no re-tagging another's stream) and, as the fallback the KVS docs show, by stream name;
+PutMedia through kvssink with a test picture; `LeadingKeys` on the index (own rows, another's, a scan,
+a read by the table's key); S3 by key prefix; IoT publish by topic; and credentials without the Thing
+name header, under which the variable is unset. `verify` counts the fragments each test stream received,
+with the owner's login. Results (`results.json`, kept by teardown) are to be recorded here, and D13
+adjusted to them.
+
+*10.1 results, 2026-11-15 — all three facts hold* (setup by the user; `run` and `verify` after the first
+run's tooling faults were fixed, FoundAndFixed.md #95): **30 of 30 checks as expected**, and KVS's own
+count — `vsz-spike-tag-a` 30 fragments, `vsz-spike-a.name` 30, `vsz-spike-tag-b` 0, `vsz-spike-b.name` 0:
+- **`${credentials-iot:ThingName}`** works in a role policy, in resource ARNs (SSM paths, S3 keys, IoT
+  topics, stream names) and in condition values (`aws:ResourceTag`, `dynamodb:LeadingKeys`). Credentials
+  claiming another Thing's name are refused (HTTP 403); without the header they are issued but the
+  variable is unset, so everything scoped by it is refused — it fails closed.
+- **KVS by tag:** `DescribeStream`, `GetDataEndpoint` and **PutMedia through kvssink** follow
+  `aws:ResourceTag/adapterId`; `CreateStream` passes only with `aws:RequestTag/adapterId` = one's own Thing
+  and no other tag key, and creating with the tag needed no separate `TagStream` grant; re-tagging another
+  adapter's stream is refused when `TagStream` requires both the request and the resource tag to be one's
+  own. Streams named after the Thing work too, but aren't needed: camera IDs stay the stream names.
+- **`dynamodb:LeadingKeys` on a global secondary index:** a `Query` on `adapterId-index` returns one's own
+  rows and is refused for another adapter's; a `Scan` and a `GetItem` by the table's key are refused.
+- A role alias just made answers 404 for a few minutes (gone within 4) before its credentials are handed
+  out (#95).
+
+*D13 adjusted* (§4b), for 10.2: streams keep camera-ID names and are scoped by their `adapterId` tag —
+every `CreateStream` on a Pi (registration, live view, the agent) passes `Tags={"adapterId": <thing>}`
+and nothing else, and this repository's existing streams are tagged before the role narrows (while the
+role still allows `TagStream`, or by the owner); the Pi reads its rows only by `Query` on an `adapterId`
+index — **a sparse index**, so every row a Pi acts on must carry `adapterId` first, and
+`adopt_unstamped`, which scans, has to have finished (or move to the cloud side) before the role narrows;
+reads by key (`GetItem`) become index queries; secrets, S3 keys and the event topic take the Thing-name
+variable as tried. If 10.2 makes a new role alias rather than narrowing `KVSAdapterRole` in place, it
+waits for the alias to reach the credentials endpoint.
+
+*D13 amended 2026-11-15 (the user, at 10.2): the Pi's registry writes go over a signed HTTPS route, not
+MQTT.* Several writes need an answer — claiming a camera ID, rematch's conditional move, registration —
+and MQTT gives the writing process none; only the agent has an MQTT session, so every other process
+would have had to write through it. Instead the Pi calls `/registry/<thing>/…` on API Gateway, signed
+with its own device credentials (still outbound only); IAM lets each Pi call only its own path
+(`execute-api:Invoke` on `…/registry/${credentials-iot:ThingName}/*`, the variable the spike proved), and
+a Lambda applies the write to that Thing's rows and answers at once, conditions and claimed IDs included.
+
+**10.2, in steps** (each complete, tested and deployable on its own; all but the last keep VMS's card
+working on the shared table and role):
+- **10.2a Stream tags** — every stream a Pi creates carries `adapterId=<its Thing>`, and each Pi tags
+  its older streams. Nothing reads the tag until the role narrows.
+- **10.2b The registry route** — API Gateway `/registry/{proxy+}` with IAM authorization, a Lambda that
+  writes field by field to the calling Thing's rows (claims, conditional updates, the clip rows), the
+  device role allowed its own path; the Pi's writers move to it.
+- **10.2c The adapter index** — a sparse `adapterId` index on `cameras`, the role allowed `Query` on it
+  with `LeadingKeys`; the Pi's readers read their rows by query, and its reads by key become queries.
+  What needs every adapter's rows — the next free camera ID, another adapter's device in a scan — moves
+  behind the registry route.
+- **10.2d Camera secrets in SSM** — `/vsz/adapters/<thing>/cameras/<cameraId>`, written at registration
+  and by rematch's moves beside the row, read first.
+- **10.2e S3 keys under the Thing** — thumbnails and outage clips under `<thing>/`, readers following.
+- **10.2f Narrowing** (once VMS runs on its own copies) — the role reduced to the above and exported
+  back (#41), the event topic by the variable, the secrets out of the rows, VMS's leftovers.
+
+*10.2a built 2026-11-15, and live:* `camera_control.stream_tags()` — `{"adapterId": <this Thing>}`, the
+only tag — passed to every `CreateStream` on a Pi (registration's recorded stream, live view's and the
+agent's live stream); `rematch_cameras.tag_own_streams` tags the recorded and live streams of every
+camera the Pi serves (`is_mine`: unregistered ones too, since Re-register brings them back; not another
+adapter's, not a released one, not a row that isn't a camera), remembers each in
+`vms-adapter/tagged-streams.json` and asks again after a day — VMS's card shares the stream names until
+it moves and could re-make one; a stream not made yet is skipped (it will be made tagged), a refusal is
+asked again next run. rematch runs from the clone every 5 minutes, so it went live at once: at 09:42 it
+tagged all eight of `adapter-01`'s streams (`cam-01` … `cam-04` and their `-live`), checked with
+`list-tags-for-stream`. No IAM change: the role already allows `CreateStream` and `TagStream` on
+`cam-*`. Tests: `tests/adapter/test_rematch_cameras.py` (+5) and every `create_stream` stub now expecting
+the tag; broken on purpose once each, red: each of the three creations untagged, another adapter's
+streams tagged, no day between asks, a refusal remembered, a dry run tagging. Writing the test showed a
+stream never tagged counted as "tagged at time 0" — harmless with a real clock, fixed before it ran. To
+apply the creation tags: `systemctl --user restart kvs-agent onvif-admin` (long-running processes).
+
+*10.2b, first half, built 2026-11-15 — the route, not yet provisioned:* **Lambda `vsz-registry`**
+(`cloud/lambda/vsz_registry.py`) on `/registry/{proxy+}`, IAM-authorized: `GET <thing>/ping`;
+`POST <thing>/cameras/claim` (the next free ID past every adapter's, or the one given, D11 — the global
+view a Pi won't have after 10.2c); `POST <thing>/cameras/<id>` (SET and REMOVE under `expect` / `exists` /
+`missing` conditions, always also "this Thing's row" — so completing a registration and abandoning a
+claim are updates that expect its token); `POST <thing>/cameras/<id>/adopt` (the adopting adapter only,
+never a released row or one with no mode, #93); `POST <thing>/clips` (the outage backfill's row, for one's
+own camera, never over another); `POST <thing>/devices` (which identities are another adapter's cameras,
+for the scan's mark). It answers only calls signed by `KVSAdapterRole` (in case the route were left open),
+writes only the path's Thing's rows — another adapter's is "no camera", a missing one is never made —
+and never a row's key, its owner (`adapterId`, `releasedFrom`) or a claim token; for the adopting adapter
+(`ADOPTING_THING=adapter-01`) a row without an owner counts too, as a second conditional write rather
+than one condition with an OR. It prints nothing (rows still hold passwords until 10.2d). **The device
+role** gets `execute-api:Invoke` on `svfvg7xh9g/prod/*/registry/${credentials-iot:ThingName}/*` alone
+(`cloud/iam/kvs-adapter-registry-route-policy.json`, inline `registry-route`). **The Pi's client**
+(`adapter/registry_client.py`): each call signed for execute-api with the device credentials, to
+`REGISTRY_URL` (a new `adapter.env` key, read only when a call is made — a Pi without it runs on); and
+`registry_client.py check` — the route answers this Pi, IAM refuses another Thing's path, and one
+harmless write (`registryCheckedAt` on one of this Pi's cameras). **Provisioning**: `provision.sh
+registry` (the role, the function with `ADOPTING_THING`, the route — `ensure_method` learnt an IAM-signed
+variant — the device role's policy, the stage; checked: an unsigned call gets IAM's 403 and test-invoke
+reaches the function, which refuses a call with no identity); its dry run against the account was
+clean. Tests: `tests/cloud/test_vsz_registry.py` (39), `tests/adapter/test_registry_client.py` (7); broken
+on purpose once each, red (17): any caller answered, another adapter's row written, a missing row made,
+a released row written, any adapter writing unstamped rows, ownership settable, conditions ignored, the
+next ID past one adapter's rows only, a given taken ID replaced, a row with no mode adopted, any adapter
+adopting, a clip for another's camera, a clip over another, own devices marked another's; on the Pi,
+signed for another service, always this Pi's path, the check content with any refusal. No writer on the
+Pi uses the route yet — that is 10.2b's second half.
+*Provisioned and verified 2026-11-15* (the user): `provision.sh registry` made the role, the function, the
+route and the device role's `registry-route` policy, deployed the stage and passed its own check; with
+`REGISTRY_URL` in `adapter.env`, `registry_client.py check` on `adapter-01` gave three PASS lines — the
+route answered `adapter-01` (adopting); **IAM refused `adapter-99`'s path** ("no identity-based policy
+allows the execute-api:Invoke action" — so `${credentials-iot:ThingName}` holds for execute-api too, the
+one service the spike hadn't tried); and the harmless write landed (`cam-01`'s `registryCheckedAt`, read
+back from the table).
+
+*10.2b, second half, built 2026-11-15 — every registry write on the Pi goes through the route.* The
+client's typed calls — `update` (set / remove under `expect` / `exists` / `missing`), `claim`, `adopt`,
+`add_clip`, `elsewhere` — each raise `ConditionFailed` (409), `NotMine` (404) or `RegistryError` (no status
+when the route can't be reached), so each caller handles exactly the refusals it expected; Decimals from
+DynamoDB reads go as numbers and come back exact. Moved: the schedule runner's mode (only while the camera
+is in use); live view's `liveRtspUrl`; the codec capabilities; `stream-codec.py`'s record (a row of another
+adapter, or none, is "no registry row" — the route never makes one, #93); rematch's conditional move
+(`expect` the address read) and adoption (the route's `adopt`); the outage uploader's clip row (one there
+already: done, never overwritten); registration — the claim (the route allocates past every adapter's
+IDs), the abandon and the completion (both expect the claim token), re-registration (an unstamped row
+adopted first, the owner never written as a field), the ceiling, detection, unregister and the USB
+camera's re-register; and the admin GUI's nine (name, mode, detection tests, audio, outage buffer, codec,
+the stream switch and its rollback). The helpers that took a `table` only to write lost it
+(`live_view.apply`, `codec_caps.refresh_item`, `record_ceiling`, `registration_ceiling`,
+`record_detection`, `apply_live_view`, `claim_camera_id`, `abandon_claim`). Not yet: the reads — the
+registration's next-ID scan and the agent's "another adapter's" mark (`elsewhere` is ready) — which are
+10.2c's. **Tests** reach the real `vsz-registry` through the `registry` fixture: `FakeRegistryRoute`
+(`tests/fakes.py`) hands each signed request to the function on the test's own table, refusing another
+Thing's path as IAM does, so a module's tests check the whole path; changed: `test_registry_client` (+5),
+`test_schedule_runner` (+1, and offline is now the route unreachable), `test_live_view`, `test_codec_caps`,
+`test_rematch_cameras` (the conditions sent, not raw expression strings), `test_outage` (+2: the uploader's
+clip row had no test before), `test_admin_adapters` (+2), `test_admin_codec_stream`. Broken on purpose
+once each, red (14): unregister skipping the registry, the completion or the abandon without the claim
+token, re-registration without adopting, an allocated ID taken with no next, an existing clip taken as a
+failure, `stream-codec.py` re-raising "no row", schedules writing a camera unregistered meanwhile,
+rematch not expecting the address, the codec caps / live view / the admin GUI's name, audio and stream
+rollback not written. Two first stayed green — the completion's token and the schedule's unregistered
+check had no test — and got one each. Built across two sessions after an SSH drop (the Pi lost name
+resolution at 10:24); the second took over at a clean point with the first's account of every file.
+rematch and the schedule runner run from the clone, so their writes went through the route at once; the
+agent and the admin GUI take it at their restart.
+
+*10.2c, step 1, built 2026-11-15 — the index and the reads, wired to nothing yet.* Done in two steps
+because rematch, the schedules and the path sync run from the clone: a reader moved before the index
+exists would fail at its next timer run. **The index**: `provision.sh adapter-index` adds
+`adapterId-index` to `cameras` (key `adapterId`, every attribute, on demand as the table) — VMS shares the
+table, and the index changes none of its rows, key or reads, only adds a way to read the rows that have an
+owner — and gives `KVSAdapterRole` `dynamodb:Query` on that index alone, for `LeadingKeys` =
+`${credentials-iot:ThingName}` (`cloud/iam/kvs-adapter-own-rows-policy.json`, inline `own-rows`; the spike
+tried exactly this on a GSI). It waits for the index to be ACTIVE and checks, with the operator's login,
+that it lists each adapter's rows as the table does. **The reads** (`adapter/registry_reads.py`):
+`own_rows(fields)` — the index query for this Thing, plus, on the adopting Pi, `unstamped_rows()`: the
+index is sparse, so a row without an owner (adapter-01's until rematch stamps it, D12) is found by a scan,
+and a refused scan reads as none (after 10.2f nothing is left to adopt); `own_row(id)` — another adapter's
+camera is unknown, as one that doesn't exist; and `registry_reads.py check` on a Pi — the index lists this
+Pi's rows, **IAM refuses another Thing's** (only `AccessDeniedException` counts), and `own_rows()` is what
+`camera_control.is_mine` keeps of the whole table (skipped once the role can't scan). `FakeTable` learnt
+the index (sparse, paged). Tests: `tests/adapter/test_registry_reads.py` (20) — the core one, `own_rows`
+equal to `is_mine` over the table, adopting or not, one page or many. Broken on purpose once each, red (8):
+a Pi that doesn't adopt scanning, released rows adopted, every scan error read as none, the second page
+dropped, the projection without `cameraId`, a skip counted as a failure, any refusal taken for IAM's, the
+check comparing with `acts_on`. The refusal check first stayed green — a non-IAM error passed — and got a
+test (the check before the index exists). Its dry run against the account was clean. Built across two
+sessions again after an SSH drop; the second took over at a clean point with the first's account.
+*Provisioned and verified 2026-11-15* (the user): `provision.sh adapter-index` made the index (ACTIVE) and
+`own-rows`; `registry_reads.py check` on `adapter-01` gave three PASS lines — the index lists `cam-01` …
+`cam-04`, **IAM refused `adapter-99`'s rows** (`AccessDeniedException`), and the index agrees with the
+table.
+
+*10.2c, step 2, built 2026-11-15 — every read on the Pi is of its own rows.* `registry_reads.own_rows` /
+`own_row` replace every scan and read by key of `cameras` on the Pi: the path sync, the schedule runner,
+the outage supervisor, the event watcher, `codec_caps.refresh`, rematch (tagging by `own_rows`, adoption by
+`unstamped_rows`), `stream-codec.py`, `camera-audio.py`, `observe_events.py`, the route check's camera, the
+agent and the admin GUI (every route), and registration. `own_row` reads one row from the index, and on the
+adopting Pi falls back to a read by key — a row without an owner, or one of its own the index hasn't caught
+up with yet (a GSI is eventually consistent); re-registration hands `codec_caps` the row as written rather
+than reading it back, for the same reason. Moved behind the route: **the next free camera ID** — the Pi no
+longer computes one (`next_camera_id` is gone): an allocated registration claims first and the route picks
+past every adapter's IDs, then checks the MediaMTX path, giving the claim up (abandoned) on a clash; a typed
+ID keeps its order (path, then claim). And **which discovered devices are another adapter's cameras**: the
+agent asks `POST <thing>/devices` once per scan, only for the devices not found among its own rows, and
+learns yes or no. **Another adapter's camera is now unknown here**, as one that doesn't exist: 404 "unknown
+camera" from the admin GUI (was 409 naming the owner — `foreign_error` is gone), ignored by the agent, and
+a typed ID that is another adapter's is refused at the claim as "taken" without saying whose. Stop stays
+possible on a camera that isn't this Pi's any more: the admin GUI and the agent stop a producer this Pi has
+(and the agent a live view whose deadline file is here). The agent now refuses a `camera` that isn't a
+camera ID before anything else — it names units, paths and the live view's deadline file, and the registry
+row no longer guards it. `stop_released_producers` lists this Pi's producers from its own units (`cam-01`,
+`cam-02`, the channel files) and stops each whose camera isn't among its rows — one whose row is gone too.
+**Found writing the tests**: the readers moved first read rows without `adapterId`, so every row looked
+unstamped — kept on `adapter-01` by adoption, dropped on any other adapter (FoundAndFixed.md #96); fixed:
+`own_rows` always reads the fields `acts_on` decides by. Tests (pytest 1547 → 1591): `test_registry_reads`
+(`own_row`'s key read, #96), `test_foreign_rows` (every reader on a Pi that doesn't adopt, scan forbidden),
+`test_agent` (a `camera` that isn't an ID, Stop and Live-stop of what isn't this Pi's, the scan's question to
+the route, released producers from this Pi's units), `test_admin_adapters` (another adapter's camera unknown
+on every route; claim first; a path clash gives the claim up), `test_admin_registration`,
+`test_rematch_cameras`, `test_stream_codec`, `test_camera_audio`, `test_vsz_registry` (the next free ID's
+pages, moved from the Pi). Broken on purpose once each, 35 of 36 red: among them the agent taking any `camera` string, stopping what doesn't run
+here, reading by key, stopping its own producers, asking the route about its own devices, not marking
+another's; registration not giving up a clashing claim, proposing an ID, reading another adapter's row;
+the admin GUI listing or reading by scan or key, stopping what has no producer; each reader back on a scan.
+One survived as equivalent (adoption reading `own_rows`, which on the adopting Pi includes the unstamped
+rows); one first survived — `stream-codec.py`'s record reading by key, which the route refuses anyway — and
+got a test. Checked live, reads only: the index readers, the admin list and status, discovery (three
+cameras, all this Pi's), `elsewhere` on the live route, `camera-audio.py`, the route check's camera.
+The timers (path sync, rematch, schedules) and the producers' scripts run from the clone and took it at
+once; the agent, the admin GUI, the event watcher and the outage supervisor take it at a restart.
+
+*10.2d built 2026-11-15 — camera secrets in SSM, beside the rows; not yet provisioned.* **Where**: one
+SecureString per field — `onvifPassword`, `rtspUrl`, `liveRtspUrl` (the URIs carry the camera's login) —
+at `/vsz/adapters/<thing>/cameras/<cameraId>/<field>`, so a write of one field never races another and
+removing one is deleting its parameter; values are JSON, since SSM refuses an empty value and `cam-04`'s
+password is empty; the default key (`aws/ssm`), which needs no KMS grant (as in the spike). **The device
+role** gets `ssm:GetParameters`, `PutParameter`, `DeleteParameter` on `parameter/vsz/adapters/${credentials-iot:ThingName}/*`
+alone (`cloud/iam/kvs-adapter-camera-secrets-policy.json`, inline `camera-secrets`; `provision.sh
+camera-secrets`, its dry run clean). **The row stays what readers use until 10.2f** — a change from
+"read first" above: VMS's card shares the table until it moves and may change a row (a password, a
+move), and an SSM copy read first would then shadow the newer row; reading SSM first would buy nothing
+meanwhile, since the rows still hold the secrets. So (`adapter/camera_secrets.py`): every registry write
+on the Pi already goes through `registry_client.update()`, which now writes a secret field to SSM after
+the row (`keep_beside`; a refusal or an outage never fails the write, and is logged by field name); rematch
+mirrors every row that holds secrets into SSM each run (`mirror`: the older cameras' backfill, and a
+change VMS's card made — what differs is written, what the row no longer has deleted; a camera is asked
+about again only when its row's secrets change or a day has passed, kept as a salted digest in a 0600
+record, never the values); and every reader goes through `registry_reads`, which fills a row from SSM
+only when the row holds none (`fill`) — no SSM call now, every passthrough row after 10.2f, when the
+secrets are taken out of the rows and nothing else in the code changes. `own_rows(secrets=False)` reads
+the table as it is, for the mirror and the check. `camera_secrets.py check` on a Pi: IAM refuses another
+Thing's secrets, and each camera's SSM copy is its row's (or, for a row without secrets, SSM has them);
+`camera_secrets.py mirror` copies now. No value is ever printed. **Tests** (pytest 1591 → 1612): `tests/adapter/test_camera_secrets.py`
+(21) on a stateful fake SSM (`FakeSSM`, refusing another Thing's path as IAM does), and the admin GUI's
+registration storing the new camera's secrets; three `codec_caps` tests moved onto the `registry` fixture
+(the guard caught them reaching for real credentials once a row could be filled). Broken on purpose once
+each, red (24): among them the write hook gone, a refusal failing the write, non-secret fields stored,
+values not JSON, a missing parameter's delete raising, a row that holds its secrets filled from SSM (a
+stale copy winning) or one without them not filled, every read asking SSM, the projection missing what
+`fill` decides by, the mirror re-asking every run or never, deleting nothing, writing in a dry run, its
+record readable by others or holding the values, a row without secrets mirrored, the check passing
+anything; one first survived — the mirror and the check read filled rows, comparing SSM with itself —
+and led to `secrets=False`. Live: rematch runs it from the clone and, with no policy yet, logs "mirroring
+camera secrets skipped (AccessDeniedException)" and goes on; the readers make no SSM call (every
+passthrough row holds its password).
+*Provisioned and verified 2026-11-15* (the user): `provision.sh camera-secrets` (the policy, as the file),
+`camera_secrets.py mirror` — nine SecureStrings, `cam-02` … `cam-04` × three fields, at 14:47 — and the
+restart (14:48); `camera_secrets.py check` gave four PASS lines: **IAM refused `adapter-99`'s secrets**
+(`AccessDeniedException`), and each camera's SSM copy is its row's.
+
+*10.2e built 2026-11-15 — the Pi's S3 keys under its Thing.* Two writers on the Pi put objects into the
+evidence bucket. **Thumbnails** go to `thumbs/<thing>/<cameraId>.jpg` (were `thumbs/<cameraId>.jpg`);
+their two readers, `list-cameras` (the page's link) and `vsz-directory-api` (the portal's time), have the
+row and look under its `adapterId` first, then at the older key — a row without an owner, or a camera
+whose adapter hasn't uploaded under its Thing yet (`thumbnail_keys`, identical in both); the older key
+and its objects go at 10.2f. **Outage clips** go to `clips/<cameraId>/<thing>/<YYYY/MM/DD>/…-outage.mp4`:
+the camera stays second, where every clip reader takes it from (`play-clip`, `set-clip-tier`,
+`delete-clip`: `clips/<cameraId>/…`), so none of them changes, and the bucket's lifecycle rule (prefix
+`clips/`) still covers them; `vsz-registry` now takes a clip row only with its own camera's key under its
+own Thing — or, until 10.2f, the older `clips/<cameraId>/<YYYY>/…` of an uploader not yet restarted.
+Clips the Lambdas write (`clip-to-s3`, `record-clip`) are the Lambdas' own and stay as they are (VMS uses
+`clip-to-s3`). **No IAM change**: the device role's `thumbs/*` and `clips/*` already allow the new keys;
+10.2f narrows them to `thumbs/${credentials-iot:ThingName}/*` and `clips/*/${credentials-iot:ThingName}/*`.
+Tests (pytest 1612 → 1621): the uploads' keys (`test_thumbnails`, `test_outage`, `test_registry_client`),
+the route's key check (7 cases), each reader asking under the adapter first and the older key after
+(`test_list_cameras`, `test_directory_api` — which had passed unchanged only because a mismatched request
+fell into the readers' catch-all, now pinned key by key). Broken on purpose once each, red (9): the older
+key first or none, in both readers; the route taking another camera's key, any Thing's, or no older key;
+each upload back on its old key. **Found on the way**: `kvs-outage-uploader` is a long-running unit too,
+and the restart lists of 10.2b and 10.2c missed it — it has run the code of 2026-11-14 since (writing its
+clip rows directly, which the role still allows; at 10.2f it would have lost them). The long-running units
+that run Python from the clone are five: `kvs-agent`, `onvif-admin`, `kvs-event-watcher`,
+`kvs-outage-buffer`, `kvs-outage-uploader` (LAUNCH.md says so now). Live: the thumbnails timer runs from the
+clone, so new thumbnails go under the Thing at its next run; until `list-cameras` and `vsz-directory-api`
+are deployed the page shows each camera's older thumbnail, frozen. `vsz-registry`'s deploy needs `--force`:
+its live code is this tree's of 10.2b, never committed (checked: the live copy differs from the tree only by
+the clip-key check).
+
 
 Fleet provisioning by claim, behind the same Enter Cloud ID screen (D15); USB cameras on new
 adapters (A6); SSO with Microsoft and Apple, on the sign-in page and as the Account page's "Convert
@@ -1685,5 +2011,22 @@ of its own if the shared instance's availability becomes the limit.
 - [x] Phase 8: deployed (`deploy.sh lambda vsz-db-admin`, `db-migrate` (003), `lambda vsz-directory`, `lambda vsz-directory-api`, `deploy.sh page`); the user reports billing working (2026-11-14)
 - [x] Phase 9: Account page and additional users — built and tested (2026-11-14)
 - [ ] Phase 9: deployed (`deploy.sh lambda vsz-directory`, `lambda vsz-directory-api`, `provision.sh accounts`, `deploy.sh page`) and its *Verify* recorded
-- [ ] Phase 10: A second adapter at another customer — spike, device isolation
+- [x] D14 decided: VMS gets its own copies, built in the VMS repository (the user, 2026-11-14)
+- [x] Phase 10.1: the spike built — `cloud/spike-d13.sh`, `cloud/spike_d13.py` (2026-11-14)
+- [x] Phase 10.1: the spike run (setup by the user; run, verify) — 30 of 30, all three facts hold; recorded, D13 adjusted; FoundAndFixed.md #95 in its tooling (2026-11-15)
+- [x] Phase 10.1: the spike's teardown (the user, 2026-11-15) — every `vsz-spike*` resource gone (checked); the results kept in `~/.local/state/videosafezone/spike-d13-results.json`
+- [ ] VMS on its own copies — Thing, role alias and role, camera table, streams, clips (the VMS repository)
+- [x] Phase 10.2a: stream tags — built and live; all eight of `adapter-01`'s streams tagged (2026-11-15)
+- [x] Phase 10.2b, first half: the registry route — built, provisioned and verified on `adapter-01` (2026-11-15)
+- [x] Phase 10.2b, second half: every registry write on the Pi through the route — built and tested (2026-11-15)
+- [x] Phase 10.2b: `systemctl --user restart kvs-agent onvif-admin` (the user, 10:42) — both up, the agent reconnected (its retained config read); every process on `adapter-01` now writes through the route
+- [x] Phase 10.2c, step 1: the index's provisioning and `registry_reads.py` — built and tested, wired to nothing yet (2026-11-15)
+- [x] Phase 10.2c: `provision.sh adapter-index` (the user), then `registry_reads.py check` on `adapter-01` — three PASS: the index lists cam-01 … cam-04, IAM refuses adapter-99's rows, the index agrees with the table; index ACTIVE and `own-rows` as the file (2026-11-15)
+- [x] Phase 10.2c, step 2: every reader on the Pi by query; the next free ID and another adapter's devices through the route; another adapter's camera unknown (404) instead of 409 — built and tested; FoundAndFixed.md #96 (2026-11-15)
+- [x] Phase 10.2c: `systemctl --user restart kvs-agent onvif-admin kvs-event-watcher kvs-outage-buffer` (the user, 14:27) — all four up, no restarts; the codec check read all four cameras by the index, the event watcher found none in a detection mode (right: all manual), no timer error since
+- [x] Phase 10.2d: camera secrets in SSM beside the rows — built and tested (2026-11-15)
+- [x] Phase 10.2d: `provision.sh camera-secrets` (the user), then `camera_secrets.py mirror` and `check` on `adapter-01` — four PASS; restart 14:48 (2026-11-15)
+- [x] Phase 10.2e: the Pi's S3 keys under its Thing (thumbnails, outage clips), readers following — built and tested (2026-11-15)
+- [x] Phase 10.2e: `deploy.sh lambda list-cameras`, `lambda vsz-directory-api`, `lambda vsz-registry --force` and `systemctl --user restart kvs-outage-uploader` (the user, 15:16) — all three live as this tree; checked: `list-cameras` (invoked as `adapter-01`'s customer) links all four thumbnails under `thumbs/adapter-01/` and each link loads (206, image/jpeg); the live route refuses a clip key under another Thing and one of another camera (400, nothing written); the uploader up on the new code. Not tried live: the portal's thumbnail time (`vsz-directory-api`, the same `thumbnail_keys`), and an outage backfill (needs an outage) (2026-11-15)
+- [ ] Phase 10.2f: the narrowed role, once VMS runs on its own copies
 - [ ] §9 measurements recorded here

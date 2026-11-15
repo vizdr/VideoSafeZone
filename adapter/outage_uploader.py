@@ -12,7 +12,8 @@ stay on the stick, and the next pass retries them oldest-first.
 Buffered clips land in the SAME place as evidence clips -- `clips/<cameraId>/...` with a
 row in the `clips` table -- so list/play/tier/delete and the S3 lifecycle rule all work
 on them unchanged. The key shape is not cosmetic: delete_clip.py derives the camera from
-`key.split("/")[1]`.
+`key.split("/")[1]`. Next comes this adapter's Thing -- `clips/<cameraId>/<thing>/...` --
+the part of the key the narrowed device role allows (DEALER-PANEL-PLAN.md Phase 10.2e).
 """
 import json
 import os
@@ -180,9 +181,11 @@ def upload_and_register(session, camera_id: str, merged: Path,
     """Upload, confirm, then register. Returns True only if all three succeeded."""
     from boto3.s3.transfer import TransferConfig
     from botocore.config import Config
-    from botocore.exceptions import ClientError
+    import registry_client
 
-    key = (f"clips/{camera_id}/{start.strftime('%Y/%m/%d')}/"
+    # The camera first -- every clip reader takes it from there (clips/<cameraId>/...) -- then this
+    # adapter's Thing, what the narrowed role allows (DEALER-PANEL-PLAN.md Phase 10.2e).
+    key = (f"clips/{camera_id}/{config.THING_NAME}/{start.strftime('%Y/%m/%d')}/"
            f"{start.strftime('%H%M%S')}-outage.mp4")
     cfg = Config(connect_timeout=10, read_timeout=60, retries={"max_attempts": 3})
     s3 = session.client("s3", region_name=REGION,
@@ -205,27 +208,23 @@ def upload_and_register(session, camera_id: str, merged: Path,
         log(f"    upload failed ({type(e).__name__}: {str(e)[:120]}) -- keeping local copy")
         return False
 
+    # Through the registry route (DEALER-PANEL-PLAN.md Phase 10.2b), which writes a clip row only for one
+    # of this adapter's cameras, and never over another: clip_to_s3.py and record_clip.py both put_item
+    # unconditionally; a key collision with a real evidence clip must fail loudly rather than overwrite it.
     try:
-        table = session.resource("dynamodb", region_name=REGION).Table("clips")
-        table.put_item(
-            Item={
-                "cameraId": camera_id,
-                "startTs": start.isoformat(),
-                "s3Key": key,
-                "labels": labels,
-                "durationSec": int(round(duration)),
-                # shown after the duration in the cloud client's clip list
-                **({"videoCodec": codec} if codec else {}),
-            },
-            # clip_to_s3.py and record_clip.py both put_item unconditionally; do not copy
-            # that here. A key collision with a real evidence clip must fail loudly rather
-            # than overwrite it.
-            ConditionExpression="attribute_not_exists(startTs)",
-        )
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            log(f"    a clip already exists at {start.isoformat()} -- not overwriting")
-            return True          # object is in S3; do not retry forever
+        registry_client.add_clip({
+            "cameraId": camera_id,
+            "startTs": start.isoformat(),
+            "s3Key": key,
+            "labels": labels,
+            "durationSec": int(round(duration)),
+            # shown after the duration in the cloud client's clip list
+            **({"videoCodec": codec} if codec else {}),
+        }, session=session)
+    except registry_client.ConditionFailed:
+        log(f"    a clip already exists at {start.isoformat()} -- not overwriting")
+        return True          # object is in S3; do not retry forever
+    except registry_client.RegistryError as e:
         log(f"    registry write failed ({e}) -- keeping local copy")
         return False
     return True

@@ -54,11 +54,13 @@ def redact(url):
 
 
 def fetch_registry():
-    """The registry's cameras, reduced to what path setup needs. Raises when unreachable."""
+    """This Pi's cameras in the registry (registry_reads.own_rows: its own rows only, D12), reduced to
+    what path setup needs. Raises when unreachable."""
+    import registry_reads
     from botocore.config import Config
     from aws_device_creds import get_session   # also loads /etc/adapter/adapter.env
     cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
-    items = get_session().resource("dynamodb", config=cfg).Table("cameras").scan()["Items"]
+    items = registry_reads.own_rows(table=get_session().resource("dynamodb", config=cfg).Table("cameras"))
     keep = ("mode", "rtspUrl", "liveRtspUrl",                 # liveRtspUrl: live_view.py
             "onvifHost", "onvifPort", "onvifEndpointRef")     # the last three: rematch_cameras.py
     # An unregistered camera gets no path, and stays out of the cache, so an offline start

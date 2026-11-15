@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config
 
+import registry_reads  # noqa: E402
 from aws_device_creds import get_session
 from camera_control import acts_on
 
@@ -103,8 +104,9 @@ class ClipGate:
 
 
 def load_cameras():
-    """Registry rows for cameras whose recordingMode is a detection mode, unless unregistered."""
-    items = get_session(REGION).resource("dynamodb").Table("cameras").scan()["Items"]
+    """This Pi's registry rows (registry_reads.own_rows) for cameras whose recordingMode is a detection
+    mode, unless unregistered."""
+    items = registry_reads.own_rows(table=get_session(REGION).resource("dynamodb").Table("cameras"))
     return {
         i["cameraId"]: i for i in items
         if i.get("recordingMode") in MODE_TOPICS and i.get("onvifHost") and acts_on(i)

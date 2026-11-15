@@ -23,7 +23,8 @@ passthrough camera:
   * ref not found otherwise -> nothing. The camera may just be off; absence proves nothing.
 Before that, on adapter-01 only (ADOPT_UNSTAMPED_ROWS=yes), rows without an adapterId whose
 MediaMTX path this Pi serves get this Thing's name stamped (adopt_unstamped, DEALER-PANEL-PLAN.md
-D4, D12). Unregistered cameras are not in the list at all (sync_mediamtx_paths.load_cameras leaves
+D4, D12); then every Pi tags the KVS streams of its own cameras adapterId=<its Thing> where it hasn't
+yet (tag_own_streams, D13, Phase 10.2a). Unregistered cameras are not in the list at all (sync_mediamtx_paths.load_cameras leaves
 them out), so their deleted paths are never recreated. It refuses to guess: a ref on two rows, or a new address another camera already has, is
 logged and skipped.
 
@@ -35,8 +36,10 @@ old address, so the next run retries the registry write.
 Usage:  rematch_cameras.py [--dry-run] [--timeout SECONDS]
 """
 import argparse
+import json
 import os
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
@@ -64,22 +67,13 @@ def move_url(url, old_host, new_host):
 
 def registry_update(camera_id, fields, expect_host, require_no_ref=False, expect_ref=None):
     """Conditional write: only if the row still shows the address we read, so a Re-register
-    in the GUI between our read and our write is never overwritten."""
-    from aws_device_creds import get_session   # also loads /etc/adapter/adapter.env
-    fields = {**fields, "updatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    names = {f"#{k}": k for k in fields}
-    values = {f":{k}": v for k, v in fields.items()} | {":expect": expect_host}
-    condition = "onvifHost = :expect"
-    if require_no_ref:
-        condition += " AND attribute_not_exists(onvifEndpointRef)"
-    if expect_ref:
-        condition += " AND onvifEndpointRef = :expect_ref"
-        values[":expect_ref"] = expect_ref
-    get_session().resource("dynamodb").Table("cameras").update_item(
-        Key={"cameraId": camera_id},
-        UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in fields),
-        ConditionExpression=condition,
-        ExpressionAttributeNames=names, ExpressionAttributeValues=values)
+    in the GUI between our read and our write is never overwritten. Through the registry route
+    (DEALER-PANEL-PLAN.md Phase 10.2b), which writes only this adapter's rows."""
+    import registry_client
+    registry_client.update(
+        camera_id, set={**fields, "updatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+        expect={"onvifHost": expect_host, **({"onvifEndpointRef": expect_ref} if expect_ref else {})},
+        missing=["onvifEndpointRef"] if require_no_ref else None)
 
 
 def adopt_unstamped(dry_run=False):
@@ -95,19 +89,13 @@ def adopt_unstamped(dry_run=False):
         return []
     import camera_control
     import mediamtx_api
-    from aws_device_creds import get_session
-    table = get_session().resource("dynamodb").Table("cameras")
-    # "mode" is a DynamoDB reserved word: named through ExpressionAttributeNames.
-    rows, kwargs = [], {"ProjectionExpression": "cameraId, adapterId, unregisteredAt, releasedFrom, #m",
-                        "ExpressionAttributeNames": {"#m": "mode"}}
-    while True:
-        page = table.scan(**kwargs)
-        rows += page.get("Items", [])
-        if "LastEvaluatedKey" not in page:
-            break
-        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    import registry_client
+    import registry_reads
+    # The rows without an owner: a scan, the one the adopting Pi keeps until the role is narrowed
+    # (DEALER-PANEL-PLAN.md Phase 10.2c, 10.2f) -- refused then, and read as none.
+    rows = registry_reads.unstamped_rows(["mode"])
     stamped = []
-    for row in sorted(rows, key=lambda r: r["cameraId"]):
+    for row in rows:
         if row.get("adapterId") or row.get("releasedFrom") or camera_control.is_unregistered(row):
             continue
         if row.get("mode") not in ("transcode", "passthrough"):
@@ -120,19 +108,64 @@ def adopt_unstamped(dry_run=False):
             served = False
         if not served:
             continue
-        if not dry_run:
-            try:
-                table.update_item(Key={"cameraId": row["cameraId"]}, UpdateExpression="SET adapterId = :a",
-                                  ConditionExpression="attribute_not_exists(adapterId)",
-                                  ExpressionAttributeValues={":a": config.THING_NAME})
-            except Exception as e:  # noqa: BLE001
-                if getattr(e, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-                    raise
-                log(f"{row['cameraId']}: stamped by someone else meanwhile -- left as is")
-                continue
+        if not dry_run and not registry_client.adopt(row["cameraId"]):   # the route stamps, conditionally
+            log(f"{row['cameraId']}: stamped by someone else meanwhile -- left as is")
+            continue
         log(f"{row['cameraId']}: {'would stamp' if dry_run else 'stamped'} adapterId {config.THING_NAME}")
         stamped.append(row["cameraId"])
     return stamped
+
+
+RETAG_AFTER = 24 * 3600     # VMS's card shares the stream names until it moves (D14), and may re-make one
+
+
+def tag_own_streams(dry_run=False, now=None):
+    """Every KVS stream of this Pi's cameras -- recorded and live -- carries adapterId=<this Thing>
+    (DEALER-PANEL-PLAN.md D13, Phase 10.2a). New streams get it when they are made
+    (camera_control.stream_tags); this tags the older ones, an unregistered camera's included, since
+    Re-register brings it back. Each stream is remembered here and asked again after a day, so a run
+    costs nothing in between. It must be complete before the device role is narrowed to tagged
+    streams. Returns the streams tagged (or that would be, in a dry run)."""
+    import camera_control
+    import config
+    from botocore.exceptions import ClientError
+    from aws_device_creds import get_session
+    import registry_reads
+    session = get_session()
+    rows = registry_reads.own_rows(["mode"], session=session)      # this Pi's rows, by the index (10.2c)
+    record = paths.STATE_DIR / "tagged-streams.json"
+    try:
+        done = json.loads(record.read_text())
+    except (OSError, ValueError):
+        done = {}
+    now = time.time() if now is None else now
+    kv, tagged, changed = session.client("kinesisvideo"), [], False
+    for row in rows:
+        if row.get("mode") not in ("transcode", "passthrough") or not camera_control.is_mine(row):
+            continue                 # another adapter's, a released one, or not a camera (#93)
+        for name in (row["cameraId"], camera_control.live_stream_name(row["cameraId"])):
+            if name in done and now - done[name] < RETAG_AFTER:
+                continue
+            if dry_run:
+                tagged.append(name)
+                continue
+            try:
+                kv.tag_stream(StreamName=name, Tags=camera_control.stream_tags())
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code")
+                if code != "ResourceNotFoundException":    # none yet: it is made tagged when it is
+                    log(f"{name}: not tagged ({code}) -- next run tries again")
+                    continue
+            else:
+                tagged.append(name)
+                log(f"{name}: tagged adapterId={config.THING_NAME}")
+            done[name], changed = now, True
+    if changed:
+        paths.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = record.with_suffix(".tmp")
+        tmp.write_text(json.dumps(done, indent=1, sort_keys=True))
+        os.replace(tmp, record)
+    return tagged
 
 
 def rematch(cameras, found, dry_run=False):
@@ -227,6 +260,18 @@ def main():
         adopt_unstamped(args.dry_run)
     except Exception as e:  # noqa: BLE001 -- AWS or MediaMTX unreachable: the next run tries again
         log(f"adopting unstamped rows skipped ({type(e).__name__}: {e})")
+    try:
+        tag_own_streams(args.dry_run)
+    except Exception as e:  # noqa: BLE001 -- AWS unreachable: the next run tries again
+        log(f"tagging streams skipped ({type(e).__name__}: {e})")
+    try:
+        # The rows' camera secrets copied into SSM (DEALER-PANEL-PLAN.md Phase 10.2d): the older
+        # cameras', and a change VMS's card made to a row; each camera asked about once a day.
+        import camera_secrets
+        camera_secrets.mirror(dry_run=args.dry_run, log=log)
+    except Exception as e:  # noqa: BLE001 -- AWS unreachable or SSM refused: the next run tries again
+        code = getattr(e, "response", {}).get("Error", {}).get("Code")
+        log(f"mirroring camera secrets skipped ({code or f'{type(e).__name__}: {e}'})")
 
     cameras = paths.load_cameras(args.dry_run)       # registry, or the local cache when offline
     if cameras is None:

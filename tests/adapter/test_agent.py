@@ -157,6 +157,43 @@ def test_a_released_cameras_producer_can_still_be_stopped(world):
     assert sudo(w.system) == [["sudo", "systemctl", "stop", "kvs-cam@cam07.service"]]
 
 
+@pytest.mark.parametrize("camera", ["../../etc/x", "cam-1", "cam-02/../x", 7, None])
+@pytest.mark.parametrize("action", ["stop", "live-stop", "live"])
+def test_a_camera_that_isnt_a_camera_id_is_ignored(world, camera, action):
+    # It names units, MediaMTX paths and the live view's deadline file: nothing is read or written.
+    w = world()
+    send(action=action, camera=camera)
+    assert sudo(w.system) == [] and w.conn.published == []
+    assert not os.path.exists(agent.LIVE_DIR) or os.listdir(agent.LIVE_DIR) == []
+
+
+def test_another_adapters_camera_with_nothing_here_is_not_stopped_either(world):
+    # Its row is none of this Pi's (the index answers only its own, DEALER-PANEL-PLAN.md Phase 10.2c),
+    # and nothing of it runs here: no command, no state published for a camera this Pi doesn't know.
+    w = world([*ROWS, {"cameraId": "cam-07", "mode": "passthrough", "adapterId": "adapter-02"}])
+    send(action="stop", camera="cam-07")
+    send(action="live-stop", camera="cam-07")
+    assert sudo(w.system) == [] and w.conn.published == []
+
+
+def test_a_released_cameras_live_view_running_here_can_still_be_stopped(world):
+    w = world([*ROWS, {"cameraId": "cam-07", "mode": "passthrough", "releasedFrom": "test-thing"}])
+    os.makedirs(agent.LIVE_DIR, exist_ok=True)
+    open(os.path.join(agent.LIVE_DIR, "cam07"), "w").close()             # set_live's deadline file
+    send(action="live-stop", camera="cam-07")
+    assert sudo(w.system) == [["sudo", "systemctl", "stop", "kvs-live@cam07.service"]]
+
+
+def test_commands_read_this_pis_row_by_the_index_never_a_scan(world, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    w = world([{**r, "adapterId": "test-thing"} for r in ROWS])
+    monkeypatch.setattr(w.table, "scan", lambda **kw: pytest.fail("scanned the whole table"))
+    monkeypatch.setattr(w.table, "get_item", lambda **kw: pytest.fail("read the row by its key"))
+    send(action="start", camera="cam-03")
+    assert sudo(w.system) == [["sudo", "systemctl", "start", "kvs-cam@cam03.service"]]
+
+
 # --- Live view ---------------------------------------------------------------------------------
 
 def _deadline(camera_path):
@@ -182,7 +219,7 @@ def test_the_first_live_view_creates_its_kvs_stream(world):
     kv = w.kv.stub("kinesisvideo")
     kv.add_client_error("describe_stream", "ResourceNotFoundException", http_status_code=404)
     kv.add_response("create_stream", {"StreamARN": "arn:aws:kinesisvideo:eu-central-1:0:stream/cam-02-live/1"},
-                    {"StreamName": "cam-02-live", "DataRetentionInHours": 1, "MediaType": "video/h264"})
+                    {"StreamName": "cam-02-live", "DataRetentionInHours": 1, "MediaType": "video/h264", "Tags": {"adapterId": "test-thing"}})
     send(action="live", camera="cam-02")
     assert w.conn.states()[0]["live"] is True
 
@@ -434,6 +471,34 @@ def test_discovery_publishes_each_device_marked_against_the_registry(web):
     assert (by_ref[REF["d0"]]["state"], by_ref[REF["d0"]]["name"]) == (None, "New one")
 
 
+def test_only_the_devices_not_found_here_are_asked_about_and_only_yes_or_no_comes_back(web):
+    # DEALER-PANEL-PLAN.md Phase 10.2c: another adapter's rows aren't this Pi's to read; the registry
+    # route, which sees every adapter's, says which identities are another adapter's cameras.
+    w = web(found=[Found(REF["a2"], "192.0.2.12"), Found(REF["c9"], "192.0.2.19"), Found(REF["d0"], "192.0.2.20")])
+    agent.on_message(CMD, json.dumps({"action": "discover", "requestId": "1234abcd"}).encode())
+    assert w.table.route.calls == [("POST", "devices", {"endpointRefs": [REF["c9"], REF["d0"]]})]
+    assert {d["endpointRef"]: d["state"] for d in w.sent(DISCOVERY)[0]["devices"]} == \
+        {REF["a2"]: "added", REF["c9"]: "elsewhere", REF["d0"]: None}
+
+
+def test_a_scan_that_finds_only_this_pis_cameras_asks_the_route_nothing(web):
+    w = web(found=[Found(REF["a2"], "192.0.2.12")])
+    agent.on_message(CMD, json.dumps({"action": "discover", "requestId": "1234abcd"}).encode())
+    assert w.table.route.calls == [] and w.sent(DISCOVERY)[0]["devices"][0]["state"] == "added"
+
+
+def test_the_route_unreachable_fails_the_scan_for_the_waiting_page(web, monkeypatch):
+    import registry_client
+
+    def unreachable(request, timeout=None):
+        raise OSError("offline")
+    w = web(found=[Found(REF["d0"], "192.0.2.20")])
+    monkeypatch.setattr(registry_client, "_open", unreachable)
+    agent.on_message(CMD, json.dumps({"action": "discover", "requestId": "1234abcd"}).encode())
+    [out] = w.sent(DISCOVERY)
+    assert out["devices"] == [] and "RegistryError" in out["error"]
+
+
 def test_a_failed_scan_is_reported_to_the_waiting_page(web, monkeypatch):
     w = web()
     monkeypatch.setattr(onvif_discovery, "scan", lambda timeout=4: (_ for _ in ()).throw(OSError("no multicast")))
@@ -565,6 +630,32 @@ def test_once_the_adapter_isnt_activated_released_cameras_stop_pushing(world, mo
     assert stops == [["sudo", "systemctl", "stop", "kvs-cam@cam07.service"],
                      ["sudo", "systemctl", "stop", camera_control.live_unit_name("cam-07")]]   # cam-01..03 are this Pi's
     assert "cam-07 isn't this adapter's any more" in capsys.readouterr().out
+
+
+def test_released_producers_are_found_on_this_pi_not_in_the_table(world, monkeypatch, capsys):
+    # The table isn't read whole (Phase 10.2c): this Pi's producers are listed from its units, and each
+    # whose camera isn't among its rows by the index is stopped -- one whose row is gone altogether too.
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    w = world(rows=[{**ROWS[0], "adapterId": "test-thing"}, {**ROWS[2], "adapterId": "test-thing"}],
+              producers=("cam-01", "cam-03", "cam-08"))                    # cam-08: no row at all
+    monkeypatch.setattr(w.table, "scan", lambda **kw: pytest.fail("scanned the whole table"))
+    agent.stop_released_producers()
+    stops = [c for c in w.system.calls if c[:3] == ["sudo", "systemctl", "stop"]]
+    assert stops == [["sudo", "systemctl", "stop", "kvs-cam@cam08.service"],
+                     ["sudo", "systemctl", "stop", camera_control.live_unit_name("cam-08")]]
+
+
+def test_released_producers_stay_up_when_the_registry_cant_be_read(world, monkeypatch, capsys):
+    import registry_reads
+    w = world(producers=("cam-01", "cam-07"))
+
+    def unreachable(*a, **k):
+        raise OSError("offline")
+    monkeypatch.setattr(registry_reads, "own_rows", unreachable)
+    agent.stop_released_producers()
+    assert [c for c in w.system.calls if "stop" in c] == []
+    assert "couldn't read the registry" in capsys.readouterr().out
 
 
 def test_re_register_from_the_page_is_for_this_adapters_unregistered_cameras(web, monkeypatch):

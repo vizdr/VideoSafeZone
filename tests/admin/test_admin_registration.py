@@ -33,12 +33,12 @@ def _expect_kvs(g, main_type="video/h265", live=True, main_exists=False):
                         {"StreamName": "cam-04"})
     else:
         kv.add_response("create_stream", {"StreamARN": arn("cam-04")},
-                        {"StreamName": "cam-04", "DataRetentionInHours": 24, "MediaType": main_type})
+                        {"StreamName": "cam-04", "DataRetentionInHours": 24, "MediaType": main_type, "Tags": {"adapterId": "test-thing"}})
     if live:
         kv.add_client_error("describe_stream", "ResourceNotFoundException", http_status_code=404,
                             expected_params={"StreamName": "cam-04-live"})
         kv.add_response("create_stream", {"StreamARN": arn("cam-04-live")},
-                        {"StreamName": "cam-04-live", "DataRetentionInHours": 1, "MediaType": "video/h264"})
+                        {"StreamName": "cam-04-live", "DataRetentionInHours": 1, "MediaType": "video/h264", "Tags": {"adapterId": "test-thing"}})
 
 
 def _new_camera_gui(gui, *, wire="H265", flowing=True, camera=None, **kw):
@@ -400,6 +400,8 @@ def test_reregistration_stamps_a_row_that_predates_adapterid(gui):
 def test_another_adapters_camera_cannot_be_reregistered_here(gui):
     g = gui(rows=[{**CAM03, "adapterId": "adapter-0002"}], mtx=FakeMediaMTX(), camera=media2("192.0.2.13"))
     status, body = g.post("/api/cameras", REREG)
-    assert (status, body) == (409, {"error": "'cam-03' belongs to another adapter (adapter-0002)"})
+    # Unknown here (DEALER-PANEL-PLAN.md Phase 10.2c): it goes to the claim, which the route refuses --
+    # the ID is taken, and whose it is isn't said.
+    assert (status, body) == (409, {"error": "cam-03 is taken -- leave the camera ID out and the next free one is used"})
     assert g.mtx.writes() == [] and g.table.row("cam-03")["adapterId"] == "adapter-0002"
 

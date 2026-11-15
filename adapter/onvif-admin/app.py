@@ -40,6 +40,8 @@ import live_view
 import mediamtx_api
 import onvif_discovery
 import onvif_media2
+import registry_client
+import registry_reads
 from aws_device_creds import get_session
 from outage_buffer import read_registry_cache
 
@@ -65,11 +67,11 @@ def _unregistered_error(camera_id):
     return jsonify({"error": f"'{camera_id}' is unregistered: Re-register it first"}), 409
 
 
-def _foreign_error(item):
-    """Another adapter's camera, or one released from this one (DEALER-PANEL-PLAN.md D12, D15): not
-    this Pi's to change. Stop stays possible: its producer may still run here."""
-    payload, status = camera_registration.foreign_error(item)
-    return jsonify(payload), status
+def _own_row(camera_id, table=None):
+    """This Pi's registry row for the camera, or None (registry_reads.own_row, by the adapterId-index,
+    DEALER-PANEL-PLAN.md Phase 10.2c): another adapter's camera, or one released from this one (D12,
+    D15), is unknown here, as one that doesn't exist -- not this Pi's to change, nor to know about."""
+    return registry_reads.own_row(camera_id, table=table if table is not None else cameras_table())
 
 
 @app.get("/")
@@ -104,9 +106,10 @@ def scan():
 
 @app.get("/api/cameras")
 def list_cameras():
-    # This Pi's cameras only (D12): another adapter's are on another LAN, and the page would offer
-    # Start, codec and IR for cameras this Pi can't reach. Unregistered ones stay: Re-register.
-    items = [i for i in cameras_table().scan()["Items"] if camera_control.is_mine(i)]
+    # This Pi's cameras only (D12), by the adapterId-index (Phase 10.2c): another adapter's are on
+    # another LAN, and the page would offer Start, codec and IR for cameras this Pi can't reach.
+    # Unregistered ones stay: Re-register.
+    items = registry_reads.own_rows(table=cameras_table())
     # One ~1 s sample for all paths: MediaMTX's `ready` is not proof that video arrives
     # (FoundAndFixed.md #50), its byte counter growing is.
     flowing = mediamtx_api.flowing_paths()
@@ -175,12 +178,12 @@ _display_name = camera_registration.check_display_name
 
 
 def _record_ceiling(camera_id, item, stream, fps=None):
-    return camera_registration.record_ceiling(cameras_table(), camera_id, item, stream, fps)
+    return camera_registration.record_ceiling(camera_id, item, stream, fps)
 
 
 def _apply_live_view(camera_id, item, found=None):
     return camera_registration.apply_live_view(
-        cameras_table(), lambda: get_session(REGION).client("kinesisvideo"), camera_id, item, found)
+        lambda: get_session(REGION).client("kinesisvideo"), camera_id, item, found)
 
 @app.post("/api/cameras/<camera_id>/name")
 def set_display_name(camera_id):
@@ -199,14 +202,12 @@ def set_display_name(camera_id):
         return jsonify({"error": err}), 400
     if name == names[camera_id]:
         return jsonify({"cameraId": camera_id, "displayName": name, "unchanged": True})
+    # Every write here goes through the registry route, which writes only this adapter's rows
+    # (DEALER-PANEL-PLAN.md Phase 10.2b); another adapter's camera is refused above already (D12).
     if name:
-        table.update_item(Key={"cameraId": camera_id},
-                          UpdateExpression="SET displayName = :n, updatedAt = :t",
-                          ExpressionAttributeValues={":n": name, ":t": _now()})
+        registry_client.update(camera_id, set={"displayName": name, "updatedAt": _now()})
     else:
-        table.update_item(Key={"cameraId": camera_id},
-                          UpdateExpression="SET updatedAt = :t REMOVE displayName",
-                          ExpressionAttributeValues={":t": _now()})
+        registry_client.update(camera_id, set={"updatedAt": _now()}, remove=["displayName"])
     return jsonify({"cameraId": camera_id, "displayName": name})
 
 
@@ -240,7 +241,7 @@ def stream_status(camera_id):
     if known:
         if camera_id not in known:
             return jsonify({"error": "unknown camera"}), 404
-    elif "Item" not in cameras_table().get_item(Key={"cameraId": camera_id}):
+    elif _own_row(camera_id) is None:
         return jsonify({"error": "unknown camera"}), 404
     # A camera with no producer on this Pi (registered from the VMS card) is not "inactive":
     # say what it is, so Start isn't offered for a unit that doesn't exist (#37).
@@ -263,7 +264,7 @@ def get_analytics(camera_id):
     the vendor ISAPI path 404s. So these values can only be changed in the camera's own
     web UI; surfacing them here at least explains *why* detection behaves as it does.
     """
-    item = cameras_table().get_item(Key={"cameraId": camera_id}).get("Item")
+    item = _own_row(camera_id)
     if not item or not item.get("onvifHost"):
         return jsonify({"error": "unknown or non-ONVIF camera"}), 404
 
@@ -330,11 +331,9 @@ def set_recording_mode(camera_id):
         return jsonify({"error": f"recordingMode must be one of {sorted(VALID)}"}), 400
 
     table = cameras_table()
-    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    item = _own_row(camera_id, table)
     if not item:
         return jsonify({"error": "unknown camera"}), 404
-    if item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
     if mode != "manual" and not item.get("onvifHost"):
@@ -346,11 +345,7 @@ def set_recording_mode(camera_id):
         return jsonify({"error": f"this camera doesn't publish the events for '{mode}' "
                                  f"(it supports: {', '.join(supported) or 'no detection mode'})"}), 409
 
-    table.update_item(
-        Key={"cameraId": camera_id},
-        UpdateExpression="SET recordingMode = :m",
-        ExpressionAttributeValues={":m": mode},
-    )
+    registry_client.update(camera_id, set={"recordingMode": mode})
     return jsonify({"cameraId": camera_id, "recordingMode": mode})
 
 
@@ -361,7 +356,7 @@ def _read_detection(host, port, user, password):
 
 def _record_detection(camera_id, dmap, item=None, web_url=None):
     """The camera's detection modes into the registry (camera_registration.record_detection)."""
-    return camera_registration.record_detection(cameras_table(), camera_id, dmap, item=item, web_url=web_url)
+    return camera_registration.record_detection(camera_id, dmap, item=item, web_url=web_url)
 
 
 @app.get("/api/cameras/<camera_id>/detection")
@@ -415,8 +410,6 @@ def start_trigger_test(camera_id):
         return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
     if not item:
         return jsonify({"error": "unknown camera"}), 404
-    if item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
     if not item.get("onvifHost"):
@@ -536,10 +529,8 @@ def _record_trigger_test(camera_id, state):
     if not results:
         return
     try:
-        table = cameras_table()
-        current = (table.get_item(Key={"cameraId": camera_id}).get("Item") or {}).get("detectionTests") or {}
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET detectionTests = :d",
-                          ExpressionAttributeValues={":d": {**current, **results}})
+        current = (_own_row(camera_id) or {}).get("detectionTests") or {}
+        registry_client.update(camera_id, set={"detectionTests": {**current, **results}})
     except Exception:  # noqa: BLE001
         pass
 
@@ -557,21 +548,15 @@ def set_audio(camera_id):
         return jsonify({"error": "audioEnabled must be true or false"}), 400
 
     table = cameras_table()
-    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    item = _own_row(camera_id, table)
     if not item:
         return jsonify({"error": "unknown camera"}), 404
-    if item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
     if enabled and not item.get("audioCapable"):
         return jsonify({"error": "camera has no usable audio source"}), 400
 
-    table.update_item(
-        Key={"cameraId": camera_id},
-        UpdateExpression="SET audioEnabled = :a",
-        ExpressionAttributeValues={":a": enabled},
-    )
+    registry_client.update(camera_id, set={"audioEnabled": enabled})
     return jsonify({"cameraId": camera_id, "audioEnabled": enabled, "appliesOn": "next start"})
 
 
@@ -591,19 +576,13 @@ def set_outage_buffer(camera_id):
         return jsonify({"error": f"outageBufferSec must be one of {sorted(VALID)}"}), 400
 
     table = cameras_table()
-    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    item = _own_row(camera_id, table)
     if not item:
         return jsonify({"error": "unknown camera"}), 404
-    if item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
 
-    table.update_item(
-        Key={"cameraId": camera_id},
-        UpdateExpression="SET outageBufferSec = :s",
-        ExpressionAttributeValues={":s": secs},
-    )
+    registry_client.update(camera_id, set={"outageBufferSec": secs})
     return jsonify({"cameraId": camera_id, "outageBufferSec": secs, "appliesOn": "within 60s"})
 
 
@@ -631,8 +610,7 @@ def _camera_item_quick(camera_id):
     from a poll (FoundAndFixed.md #56)."""
     from botocore.config import Config
     quick = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
-    table = get_session(REGION).resource("dynamodb", config=quick).Table("cameras")
-    return table.get_item(Key={"cameraId": camera_id}).get("Item")
+    return _own_row(camera_id, get_session(REGION).resource("dynamodb", config=quick).Table("cameras"))
 
 
 def _codec_options(opts):
@@ -708,14 +686,8 @@ def _record_codec(camera_id, codec, opts, encoder_token):
     """
     caps = {c: ("camera" if e in opts else "none") for c, e in onvif_media2.ENCODING.items()}
     try:
-        from botocore.config import Config
-        quick = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
-        get_session(REGION).resource("dynamodb", config=quick).Table("cameras").update_item(
-            Key={"cameraId": camera_id},
-            UpdateExpression=("SET videoCodec = :c, videoCodecCaps = :caps, "
-                              "videoEncoderToken = :t, videoCodecProbe = :p"),
-            ExpressionAttributeValues={":c": codec, ":caps": caps, ":t": encoder_token,
-                                       ":p": "media2"})
+        registry_client.update(camera_id, set={"videoCodec": codec, "videoCodecCaps": caps,
+                                               "videoEncoderToken": encoder_token, "videoCodecProbe": "media2"})
         return {"recorded": True}
     except Exception as e:  # noqa: BLE001
         return {"recorded": False, "reason": f"{type(e).__name__}: {e}"}
@@ -749,8 +721,6 @@ def set_codec(camera_id):
         return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
     if not item:
         return jsonify({"error": "unknown camera"}), 404
-    if item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
     reason = codec_caps.unavailable_reason(item, target) if not item.get("onvifHost") else None
@@ -939,8 +909,6 @@ def set_stream_choice(camera_id):
         return jsonify({"error": "unknown camera"}), 404
     if not item.get("onvifHost"):
         return jsonify({"error": "the USB camera is encoded on the Pi at a fixed 15 fps"}), 400
-    if item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
 
@@ -962,15 +930,11 @@ def set_stream_choice(camera_id):
                 return jsonify({"error": f"the camera has no '{want_stream}' stream"}), 400
             new_uri = onvif_media2.with_credentials(new["streamUri"], item["rtspUrl"])
             ready_before = (mediamtx_api.get_path_state(path) or {}).get("readyTime")
-            table = cameras_table()
-            table.update_item(Key={"cameraId": camera_id},
-                              UpdateExpression="SET rtspUrl = :u, updatedAt = :t",
-                              ExpressionAttributeValues={":u": new_uri, ":t": _now()})
+            registry_client.update(camera_id, set={"rtspUrl": new_uri, "updatedAt": _now()})
             try:
                 mediamtx_api.patch_path(path, {"source": new_uri, "rtspTransport": "tcp"})
             except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
-                table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET rtspUrl = :u",
-                                  ExpressionAttributeValues={":u": item["rtspUrl"]})
+                registry_client.update(camera_id, set={"rtspUrl": item["rtspUrl"]})
                 return jsonify({"error": f"MediaMTX path update failed: {e}"}), 502
             _refresh_path_cache()
             wire = _wait_for_new_session(path, ready_before)
@@ -1010,11 +974,9 @@ def set_stream_choice(camera_id):
 @app.post("/api/cameras/<camera_id>/ir")
 def set_ir(camera_id):
     mode = (request.get_json(force=True, silent=True) or {}).get("mode")
-    item = cameras_table().get_item(Key={"cameraId": camera_id}).get("Item")
+    item = _own_row(camera_id)
     if not item:
         return jsonify({"error": "unknown camera"}), 404
-    if item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
     if not item.get("hasIrControl"):
@@ -1034,11 +996,12 @@ def set_ir(camera_id):
 def stream_action(camera_id, action):
     if action not in ("start", "stop"):
         return jsonify({"error": "action must be 'start' or 'stop'"}), 400
-    item = cameras_table().get_item(Key={"cameraId": camera_id}).get("Item")
-    if not item:
+    item = _own_row(camera_id)
+    # Stop stays possible on a camera that isn't this Pi's any more (released, D15): its producer may
+    # still run here (D12).
+    if not item and not (action == "stop" and CAMERA_ID_RE.match(camera_id)
+                         and camera_control.has_producer(camera_id)):
         return jsonify({"error": "unknown camera"}), 404
-    if action == "start" and item and not camera_control.is_mine(item):
-        return _foreign_error(item)
     if action == "start" and camera_control.is_unregistered(item):
         return _unregistered_error(camera_id)
     if action == "start" and not camera_control.has_producer(camera_id):

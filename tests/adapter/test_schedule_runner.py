@@ -152,11 +152,16 @@ def test_offline_the_cached_schedules_still_run(world, monkeypatch, capsys):
 def test_a_mode_change_while_offline_is_logged_not_set(world, monkeypatch, capsys):
     table, _ = world([cam("cam-02", [{"days": ["mon"], "at": "18:00", "action": "mode:motion"}])])
     sr.run(at(*MON, 16, 59))
-    def broken(*a, **k):
-        raise ConnectionError("no route to AWS")
-    monkeypatch.setattr(table, "update_item", broken)
+    import urllib.error
+    import registry_client
+
+    def offline(request):
+        raise urllib.error.URLError("no route to AWS")
+    monkeypatch.setattr(registry_client, "_open", offline)
     sr.run(at(*MON, 17, 0, 30))
-    assert "mode:motion due 2026-11-02T17:00:00Z -- not set (ConnectionError" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "mode:motion due 2026-11-02T17:00:00Z -- not set (RegistryError: the registry route can't be reached" in out
+    assert table.row("cam-02").get("recordingMode") != "motion"
 
 
 def test_an_unknown_zone_is_reported_and_the_clock_going_back_runs_nothing_twice(world, capsys):
@@ -182,3 +187,12 @@ def test_a_clock_far_ahead_at_the_last_run_doesnt_stall_the_schedules(world, cap
     tick(at(*MON, 16, 59), at(*MON, 17, 1))
     assert started(run) == ["kvs-cam02.service"]
     assert "ahead of the clock: starting over from now" in capsys.readouterr().out
+
+
+def test_a_camera_unregistered_since_the_schedules_were_read_gets_no_mode(world):
+    """The mode is written only while the camera is in use: the registry route's condition, not a guess."""
+    import registry_client
+    table, _ = world([cam("cam-02", [], recordingMode="manual", unregisteredAt="2026-11-02T16:00:00Z")])
+    with pytest.raises(registry_client.ConditionFailed):
+        sr.set_mode("cam-02", "motion")
+    assert table.row("cam-02")["recordingMode"] == "manual"

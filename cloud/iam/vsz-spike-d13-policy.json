@@ -1,0 +1,65 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OwnSecretsByThingName",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:PutParameter"],
+      "Resource": "arn:aws:ssm:eu-central-1:596633517506:parameter/vsz-spike/adapters/${credentials-iot:ThingName}/*"
+    },
+    {
+      "Sid": "OwnStreamsByTag",
+      "Effect": "Allow",
+      "Action": ["kinesisvideo:DescribeStream", "kinesisvideo:GetDataEndpoint", "kinesisvideo:PutMedia"],
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/vsz-spike-tag-*/*",
+      "Condition": {"StringEquals": {"aws:ResourceTag/adapterId": "${credentials-iot:ThingName}"}}
+    },
+    {
+      "Sid": "NewStreamsOnlyTaggedAsOwn",
+      "Effect": "Allow",
+      "Action": "kinesisvideo:CreateStream",
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/vsz-spike-tag-*/*",
+      "Condition": {
+        "StringEquals": {"aws:RequestTag/adapterId": "${credentials-iot:ThingName}"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["adapterId"]}
+      }
+    },
+    {
+      "Sid": "TagOnlyOwnStreamsAsOwn",
+      "Effect": "Allow",
+      "Action": "kinesisvideo:TagStream",
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/vsz-spike-tag-*/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/adapterId": "${credentials-iot:ThingName}",
+          "aws:ResourceTag/adapterId": "${credentials-iot:ThingName}"
+        }
+      }
+    },
+    {
+      "Sid": "OwnStreamsByName",
+      "Effect": "Allow",
+      "Action": ["kinesisvideo:DescribeStream", "kinesisvideo:GetDataEndpoint", "kinesisvideo:PutMedia"],
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/${credentials-iot:ThingName}.*/*"
+    },
+    {
+      "Sid": "OwnRowsThroughTheAdapterIndex",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/vsz-spike-cameras/index/adapterId-index",
+      "Condition": {"ForAllValues:StringEquals": {"dynamodb:LeadingKeys": ["${credentials-iot:ThingName}"]}}
+    },
+    {
+      "Sid": "OwnPrefixInS3",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::vsz-spike-596633517506/thumbs/${credentials-iot:ThingName}/*"
+    },
+    {
+      "Sid": "OwnTopics",
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-central-1:596633517506:topic/vsz-spike/${credentials-iot:ThingName}/*"
+    }
+  ]
+}

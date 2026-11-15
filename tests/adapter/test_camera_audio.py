@@ -40,6 +40,16 @@ def test_unknown_camera_is_video_only(registry, monkeypatch, capsys):
     assert _run(monkeypatch, capsys, "cam-09")[1]["AUDIO"] == "off"
 
 
+@pytest.mark.parametrize("owner, audio", [("test-thing", "on"), ("adapter-02", "off")])
+def test_only_this_adapters_row_is_read(registry, monkeypatch, capsys, owner, audio):
+    # DEALER-PANEL-PLAN.md Phase 10.2c: another adapter's row is none of this Pi's.
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    table = registry([{"cameraId": "cam-02", "adapterId": owner, "audioCapable": True, "audioEnabled": True}])
+    monkeypatch.setattr(table, "scan", lambda **kw: pytest.fail("scanned the whole table"))
+    assert _run(monkeypatch, capsys, "cam-02")[1]["AUDIO"] == audio
+
+
 def test_registry_unreachable_is_video_only_not_a_failure(monkeypatch, capsys):
     def unreachable(*a, **k):
         raise OSError("offline")

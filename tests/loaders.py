@@ -46,3 +46,8 @@ def load_script(name: str):
 def load_admin():
     """adapter/onvif-admin/app.py, the local admin GUI (Flask)."""
     return _load(ROOT / "adapter" / "onvif-admin" / "app.py", "admin_app")
+
+
+def load_cloud_tool(name: str):
+    """cloud/<name>.py, an operator's tool such as the D13 spike's device side, e.g. load_cloud_tool("spike_d13")."""
+    return _load(ROOT / "cloud" / f"{name}.py", f"cloud_tool_{name}")

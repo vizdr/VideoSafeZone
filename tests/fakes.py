@@ -16,9 +16,12 @@ something plausible.
     encoder_xml    a Media2 video encoder configuration (lxml element)
     invoke         calls an API Lambda's handler and checks its CORS header
 """
+import io
 import json
 import re
 from copy import deepcopy
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
 
 import boto3
 import requests
@@ -65,6 +68,10 @@ class FakeTable:
     """A DynamoDB Table. `page_size` splits scans and queries into pages, as DynamoDB's 1 MB limit
     does, so code that forgets LastEvaluatedKey sees only the first page. Every write is appended
     to `writes` as (operation, arguments)."""
+
+    # Global secondary indexes: name -> partition key. The `cameras` table's adapterId-index is sparse --
+    # a row without the attribute isn't in it (DEALER-PANEL-PLAN.md Phase 10.2c).
+    INDEXES = {"adapterId-index": "adapterId"}
 
     def __init__(self, items=(), hash_key="cameraId", range_key=None, page_size=None):
         self.hash_key, self.range_key = hash_key, range_key
@@ -114,11 +121,17 @@ class FakeTable:
         return resp
 
     def query(self, KeyConditionExpression, ScanIndexForward=True, Limit=None,
-              ExclusiveStartKey=None, ProjectionExpression=None, **kw):
+              ExclusiveStartKey=None, ProjectionExpression=None, IndexName=None, ExpressionAttributeNames=None, **kw):
         if kw:
             raise NotImplementedError(f"FakeTable.query: {sorted(kw)}")
         expr = KeyConditionExpression.get_expression()
         key, value = expr["values"]
+        if IndexName is not None:
+            if IndexName not in self.INDEXES or expr["operator"] != "=" or key.name != self.INDEXES[IndexName]:
+                raise NotImplementedError(f"FakeTable.query on {IndexName}: {expr}")
+            rows = [i for i in self.items if key.name in i and i[key.name] == value]
+            return self._project(self._page(rows, ExclusiveStartKey, Limit), ProjectionExpression,
+                                 ExpressionAttributeNames)
         if expr["operator"] != "=" or key.name != self.hash_key:
             raise NotImplementedError(f"FakeTable.query: {expr}")
         rows = sorted((i for i in self.items if i.get(self.hash_key) == value),
@@ -195,6 +208,50 @@ class _FakeDynamoDB:
         return self._tables[name]
 
 
+class FakeSSM:
+    """The device's SSM client: a SecureString store that refuses, as IAM does, any name outside
+    /vsz/adapters/<this Thing>/ (DEALER-PANEL-PLAN.md Phase 10.2d; the Thing is config.THING_NAME at
+    call time). .params holds {name: stored value}; .calls lists (operation, name)."""
+
+    def __init__(self):
+        self.params, self.calls = {}, []
+
+    def _allowed(self, name, op):
+        import config
+        if not name.startswith(f"/vsz/adapters/{config.THING_NAME}/"):
+            raise ClientError({"Error": {"Code": "AccessDeniedException",
+                                         "Message": f"not authorized to perform: ssm:{op} on {name}"}}, op)
+
+    def put_parameter(self, Name, Value, Type, Overwrite=False, **kw):
+        if kw:
+            raise NotImplementedError(f"FakeSSM.put_parameter: {sorted(kw)}")
+        assert Type == "SecureString", Type
+        if not Value:
+            raise ClientError({"Error": {"Code": "ValidationException", "Message": "Value: length >= 1"}}, "PutParameter")
+        self._allowed(Name, "PutParameter")
+        if Name in self.params and not Overwrite:
+            raise ClientError({"Error": {"Code": "ParameterAlreadyExists", "Message": Name}}, "PutParameter")
+        self.params[Name] = Value
+        self.calls.append(("put", Name))
+        return {"Version": 1, "Tier": "Standard"}
+
+    def get_parameters(self, Names, WithDecryption=False):
+        assert WithDecryption and 1 <= len(Names) <= 10, (WithDecryption, Names)
+        for name in Names:
+            self._allowed(name, "GetParameters")
+        self.calls += [("get", n) for n in Names]
+        return {"Parameters": [{"Name": n, "Type": "SecureString", "Value": self.params[n]} for n in Names if n in self.params],
+                "InvalidParameters": [n for n in Names if n not in self.params]}
+
+    def delete_parameter(self, Name):
+        self._allowed(Name, "DeleteParameter")
+        if Name not in self.params:
+            raise ClientError({"Error": {"Code": "ParameterNotFound", "Message": Name}}, "DeleteParameter")
+        del self.params[Name]
+        self.calls.append(("delete", Name))
+        return {}
+
+
 class FakeBoto3:
     """The `boto3` a Lambda module sees. Tables are FakeTables; a client is a real botocore client
     with a Stubber activated on it, so each call is checked against the service model and answered
@@ -205,6 +262,7 @@ class FakeBoto3:
         self.tables = tables
         self._clients, self._stubs, self._built_with = {}, {}, {}
         self.client_kwargs = {}           # service -> kwargs of the Lambda's last client() call
+        self.ssm = FakeSSM()              # the device's camera secrets (Phase 10.2d): a store, not a Stubber
 
     def _build(self, service, kw):
         client = boto3.client(service, **{"region_name": REGION, **kw})
@@ -224,6 +282,8 @@ class FakeBoto3:
         """The stubbed client, built with the Lambda's own arguments (endpoint_url, region), so
         what depends on them -- a presigned URL's host -- is the Lambda's doing, not the fake's."""
         self.client_kwargs[service] = kw
+        if service == "ssm":
+            return self.ssm
         if self._built_with.get(service) != kw:
             self._build(service, kw)
         return self._clients[service]
@@ -231,6 +291,11 @@ class FakeBoto3:
     def resource(self, service, **kw):
         assert service == "dynamodb", service
         return _FakeDynamoDB(self.tables)
+
+    def get_credentials(self):
+        """What a device session signs with: fake keys (registry_client signs each call to the route)."""
+        from botocore.credentials import Credentials
+        return Credentials("ASIAFAKEDEVICEKEY", "fake-device-secret", "fake-device-token")
 
     def verify(self):
         for stub in self._stubs.values():
@@ -455,3 +520,54 @@ class FakeMedia2:
         if self.on_set:
             self.on_set(cfg)
 
+
+
+# --- the registry route (DEALER-PANEL-PLAN.md Phase 10.2b) -----------------------------------------------
+
+class _RouteAnswer(io.BytesIO):
+    def __init__(self, body, status):
+        super().__init__(body)
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class FakeRegistryRoute:
+    """The registry route as registry_client._open reaches it: each request -- which must be signed for
+    execute-api -- goes to the real vsz-registry handler, whose tables are the test's own, so a write
+    through the route lands in the same FakeTable a test reads. IAM's half is played as IAM does it: a
+    path naming another Thing than this Pi's is refused (403) before the function. The adopting adapter
+    is this Pi when config.ADOPT_UNSTAMPED_ROWS says so, read at each call, as tests change it.
+    .calls lists (method, path under /registry/<thing>/, body)."""
+
+    DEVICE = "arn:aws:sts::000000000000:assumed-role/KVSAdapterRole/fakecertificateid"
+
+    def __init__(self, session, lam, monkeypatch):
+        import config
+        self.session, self.lam, self.config, self.calls = session, lam, config, []
+        monkeypatch.setattr(lam, "boto3", session)
+        monkeypatch.setattr(lam, "THING", re.compile(rf"^{re.escape(config.THING_NAME)}$"))
+        monkeypatch.setattr(lam, "ADOPTING_THING", lam.ADOPTING_THING)        # restored after the test
+
+    def __call__(self, request):
+        auth = request.get_header("Authorization") or ""
+        assert "/execute-api/aws4_request" in auth, f"not signed for execute-api: {auth!r}"
+        path = urlsplit(request.full_url).path
+        assert "/registry/" in path, f"not the registry route: {request.full_url}"
+        proxy = path.split("/registry/", 1)[1]
+        body = json.loads(request.data) if request.data else None
+        self.calls.append((request.get_method(), proxy.split("/", 1)[1] if "/" in proxy else "", body))
+        if proxy.split("/")[0] != self.config.THING_NAME:
+            raise HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(b'{"Message": "not authorized"}'))
+        self.lam.ADOPTING_THING = self.config.THING_NAME if self.config.ADOPT_UNSTAMPED_ROWS else ""
+        event = {"httpMethod": request.get_method(), "pathParameters": {"proxy": proxy},
+                 "requestContext": {"identity": {"userArn": self.DEVICE}},
+                 **({"body": request.data.decode()} if request.data else {})}
+        resp = self.lam.lambda_handler(event, None)
+        if resp["statusCode"] >= 400:
+            raise HTTPError(request.full_url, resp["statusCode"], "", {}, io.BytesIO(resp["body"].encode()))
+        return _RouteAnswer(resp["body"].encode(), resp["statusCode"])

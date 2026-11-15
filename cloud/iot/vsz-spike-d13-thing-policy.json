@@ -1,0 +1,10 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iot:AssumeRoleWithCertificate",
+      "Resource": "arn:aws:iot:eu-central-1:596633517506:rolealias/VszSpikeD13RoleAlias"
+    }
+  ]
+}

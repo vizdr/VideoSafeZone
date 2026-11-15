@@ -51,7 +51,7 @@ def test_ff69_the_wire_corrects_a_stale_registry_once(gui):
     row = g.table.row("cam-03")
     assert (row["videoCodec"], row["videoEncoderToken"], row["videoCodecProbe"]) == ("h265", "E0", "media2")
     g.get("/api/cameras/cam-03/codec")
-    assert len(g.table.writes) == 1
+    assert len(g.table.route.calls) == 1                  # corrected once, through the registry route
 
 
 def test_codec_of_an_unreachable_camera(gui):

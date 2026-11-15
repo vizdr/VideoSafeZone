@@ -4,7 +4,8 @@
 kvs-thumbnails.timer runs this. For each registered camera whose MediaMTX path has video actually
 flowing (its byte counter growing, never `ready` alone -- FoundAndFixed.md #50), one frame is
 decoded locally from MediaMTX -- from the sub stream when the camera has one, the smaller picture
--- scaled to at most 640 px wide and uploaded to the evidence bucket as thumbs/<cameraId>.jpg.
+-- scaled to at most 640 px wide and uploaded to the evidence bucket as thumbs/<this Thing>/<cameraId>.jpg
+(under the adapter's own Thing, DEALER-PANEL-PLAN.md Phase 10.2e: what the narrowed role allows).
 list-cameras hands the page a short-lived link to it. No camera is asked anything, and nothing
 outside the Pi sees MediaMTX; a camera without video keeps its last thumbnail.
 
@@ -66,7 +67,7 @@ def upload(camera_id: str, data: bytes) -> None:
     from aws_device_creds import get_session
     quick = Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 1})
     get_session().client("s3", config=quick).put_object(
-        Bucket=config.EVIDENCE_BUCKET, Key=f"thumbs/{camera_id}.jpg", Body=data,
+        Bucket=config.EVIDENCE_BUCKET, Key=f"thumbs/{config.THING_NAME}/{camera_id}.jpg", Body=data,
         ContentType="image/jpeg", CacheControl="no-cache")
 
 

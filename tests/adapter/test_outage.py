@@ -173,3 +173,38 @@ def test_ffprobe_failure_reads_as_unreadable(fake_run, tmp_path):
 def test_ffprobe_without_streams_reads_as_unreadable(fake_run, tmp_path):
     fake_run(ou, {("ffprobe",): '{"streams": [], "format": {}}'})
     assert ou.ffprobe(tmp_path / "x.mp4") is None
+
+
+# --- registering a backfilled clip, through the registry route (DEALER-PANEL-PLAN.md Phase 10.2b) -------
+
+def test_a_backfilled_clip_is_registered_through_the_route_and_never_over_another(registry, tmp_path, capsys):
+    from fakes import FakeTable
+    table = registry([{"cameraId": "cam-02", "mode": "passthrough", "adapterId": "test-thing"}])
+    table.session.tables["clips"] = clips = FakeTable([], range_key="startTs")
+    merged = tmp_path / "merged.mp4"
+    merged.write_bytes(b"\0" * 1000)
+    start = datetime(2026, 11, 15, 9, 0, 5, tzinfo=timezone.utc)
+    key = "clips/cam-02/test-thing/2026/11/15/090005-outage.mp4"      # under this adapter's Thing (10.2e)
+    s3 = table.session.stub("s3")
+    for _ in range(2):
+        s3.add_response("put_object", {})                      # the managed upload of a small file
+        s3.add_response("head_object", {"ContentLength": 1000}, {"Bucket": "test-evidence-bucket", "Key": key})
+    assert ou.upload_and_register(table.session, "cam-02", merged, start, 60.4, ["outage"], "h264") is True
+    row = clips.row("cam-02", start.isoformat())
+    assert (row["s3Key"], row["durationSec"], row["videoCodec"]) == (key, 60, "h264")
+    assert [c[1] for c in table.route.calls] == ["clips"]
+    assert ou.upload_and_register(table.session, "cam-02", merged, start, 99, ["outage"]) is True   # in S3: done
+    assert clips.row("cam-02", start.isoformat())["durationSec"] == 60                            # not overwritten
+    assert "a clip already exists at 2026-11-15T09:00:05+00:00 -- not overwriting" in capsys.readouterr().out
+
+
+def test_a_clip_row_the_route_refuses_keeps_the_local_copy(registry, tmp_path, capsys):
+    table = registry([{"cameraId": "cam-02", "mode": "passthrough", "adapterId": "adapter-07"}])   # not this Pi's
+    merged = tmp_path / "merged.mp4"
+    merged.write_bytes(b"\0" * 10)
+    s3 = table.session.stub("s3")
+    s3.add_response("put_object", {})
+    s3.add_response("head_object", {"ContentLength": 10})
+    start = datetime(2026, 11, 15, 9, 0, tzinfo=timezone.utc)
+    assert ou.upload_and_register(table.session, "cam-02", merged, start, 10, ["outage"]) is False
+    assert "registry write failed (404: no camera cam-02 on test-thing) -- keeping local copy" in capsys.readouterr().out

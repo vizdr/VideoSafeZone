@@ -75,19 +75,15 @@ def write_json(path: Path, data) -> None:
 # --- the schedules ------------------------------------------------------------------------------
 
 def fetch_schedules() -> dict:
-    """{cameraId: schedule} for every registered camera that has one: one scan, on timeouts short
-    enough that an unreachable AWS costs seconds, not the minute (outage_buffer._fetch_registry)."""
+    """{cameraId: schedule} for every camera of this Pi's that has one (registry_reads.own_rows), on
+    timeouts short enough that an unreachable AWS costs seconds, not the minute
+    (outage_buffer._fetch_registry)."""
+    import registry_reads
     from botocore.config import Config
     from aws_device_creds import get_session
     cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
     table = get_session().resource("dynamodb", config=cfg).Table("cameras")
-    items, kw = [], {}
-    while True:
-        page = table.scan(**kw)
-        items += page["Items"]
-        if "LastEvaluatedKey" not in page:
-            break
-        kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    items = registry_reads.own_rows(["schedule", "unregisteredAt"], table=table)
     return {i["cameraId"]: i["schedule"] for i in items
             if i.get("schedule") and camera_control.acts_on(i)}
 
@@ -127,17 +123,13 @@ def occurrences(entry: dict, tz: ZoneInfo, after: dt.datetime, until: dt.datetim
 # --- acting ---------------------------------------------------------------------------------------
 
 def set_mode(camera_id: str, mode: str) -> None:
-    from botocore.config import Config
-    from aws_device_creds import get_session
+    import registry_client
     if mode not in VALID_MODES:
         raise ValueError(f"unknown mode {mode!r}")
-    cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
-    # Field by field (the registry is shared with VMS), and never on a camera unregistered since
-    # the schedules were last read.
-    get_session().resource("dynamodb", config=cfg).Table("cameras").update_item(
-        Key={"cameraId": camera_id}, UpdateExpression="SET recordingMode = :m",
-        ConditionExpression="attribute_exists(cameraId) AND attribute_not_exists(unregisteredAt)",
-        ExpressionAttributeValues={":m": mode})
+    # Field by field (the registry is shared with VMS), and never on a camera unregistered since the
+    # schedules were last read -- through the registry route, which writes only this adapter's rows
+    # (DEALER-PANEL-PLAN.md Phase 10.2b).
+    registry_client.update(camera_id, set={"recordingMode": mode}, missing=["unregisteredAt"])
 
 
 def act(camera_id: str, entry: dict, when: dt.datetime) -> None:

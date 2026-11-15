@@ -103,49 +103,48 @@ def test_ff69_default_follows_the_wire_not_the_cameras_claim(on_wire, monkeypatc
 
 # --- Phase 2: refreshing the registry rows --------------------------------------------------------
 
-from fakes import FakeTable   # noqa: E402
 
 KNOWN = {"videoCodecCaps": CAMERA, "videoCodecDefault": "h264", "videoEncoderToken": "E0",
          "videoCodecProbe": "media2"}
 
 
-def test_refresh_writes_only_what_changed(monkeypatch):
-    table = FakeTable([{"cameraId": "cam-02", **KNOWN}, {"cameraId": "cam-03"}])
+def test_refresh_writes_only_what_changed(registry, monkeypatch):
+    table = registry([{"cameraId": "cam-02", **KNOWN}, {"cameraId": "cam-03"}])
     monkeypatch.setattr(cc, "probe", lambda item: dict(KNOWN))
     done = cc.refresh(table, log=lambda msg: None)
     assert done == {"cam-02": "ok", "cam-03": "ok, written"}
-    assert [w[1]["Key"] for w in table.writes] == [{"cameraId": "cam-03"}]
+    assert [c[1] for c in table.route.calls] == ["cameras/cam-03"]          # one write, through the route
     assert table.row("cam-03")["videoCodecCaps"] == CAMERA
 
 
-def test_an_unreachable_camera_keeps_the_caps_it_has(monkeypatch):
+def test_an_unreachable_camera_keeps_the_caps_it_has(registry, monkeypatch):
     # cam-02 drops off the network for minutes on its own; overwriting a good answer with a
     # fallback on every blip would make the GUI flap.
-    table = FakeTable([{"cameraId": "cam-02", **KNOWN}])
+    table = registry([{"cameraId": "cam-02", **KNOWN}])
 
     def unreachable(item):
         raise onvif_media2.OnvifError("192.0.2.12 unreachable (ConnectTimeout)")
     monkeypatch.setattr(cc, "probe", unreachable)
-    fields, status = cc.refresh_item(table, table.row("cam-02"))
+    fields, status = cc.refresh_item(table.row("cam-02"))
     assert fields == KNOWN and status.startswith("kept existing")
     assert table.writes == []
 
 
-def test_an_unreachable_new_camera_gets_the_fallback(monkeypatch, on_wire):
+def test_an_unreachable_new_camera_gets_the_fallback(registry, monkeypatch, on_wire):
     on_wire(None)
-    table = FakeTable([{"cameraId": "cam-04"}])
+    table = registry([{"cameraId": "cam-04"}])
 
     def unreachable(item):
         raise OSError("no route to host")
     monkeypatch.setattr(cc, "probe", unreachable)
-    fields, status = cc.refresh_item(table, table.row("cam-04"))
+    fields, status = cc.refresh_item(table.row("cam-04"))
     assert status.startswith("fallback") and fields["videoCodecCaps"] == {"h264": "camera",
                                                                           "h265": "none"}
     assert table.row("cam-04")["videoCodecProbe"].startswith("fallback")
 
 
-def test_one_bad_row_does_not_stop_the_others(monkeypatch):
-    table = FakeTable([{"cameraId": "cam-02"}, {"cameraId": "cam-03"}])
+def test_one_bad_row_does_not_stop_the_others(registry, monkeypatch):
+    table = registry([{"cameraId": "cam-02"}, {"cameraId": "cam-03"}])
 
     def probe(item):
         if item["cameraId"] == "cam-02":
@@ -156,14 +155,14 @@ def test_one_bad_row_does_not_stop_the_others(monkeypatch):
     assert done["cam-02"].startswith("error") and done["cam-03"] == "ok, written"
 
 
-def test_refresh_only_the_cameras_asked_for(monkeypatch):
-    table = FakeTable([{"cameraId": "cam-02"}, {"cameraId": "cam-03"}])
+def test_refresh_only_the_cameras_asked_for(registry, monkeypatch):
+    table = registry([{"cameraId": "cam-02"}, {"cameraId": "cam-03"}])
     monkeypatch.setattr(cc, "probe", lambda item: dict(KNOWN))
     assert list(cc.refresh(table, {"cam-03"}, log=lambda msg: None)) == ["cam-03"]
 
 
-def test_dry_run_writes_nothing(monkeypatch):
-    table = FakeTable([{"cameraId": "cam-03"}])
+def test_dry_run_writes_nothing(registry, monkeypatch):
+    table = registry([{"cameraId": "cam-03"}])
     monkeypatch.setattr(cc, "probe", lambda item: dict(KNOWN))
     cc.refresh(table, write=False, log=lambda msg: None)
     assert table.writes == []

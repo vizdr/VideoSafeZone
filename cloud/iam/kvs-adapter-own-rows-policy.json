@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ItsOwnRowsThroughTheAdapterIndex",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/cameras/index/adapterId-index",
+      "Condition": {"ForAllValues:StringEquals": {"dynamodb:LeadingKeys": ["${credentials-iot:ThingName}"]}}
+    }
+  ]
+}

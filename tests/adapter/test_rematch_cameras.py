@@ -33,8 +33,8 @@ def test_learns_the_identity_of_a_row_without_one(registry):
     changed, moved = rc.rematch(cams, {EPR2: ("192.0.2.12", 80)})
     assert (changed, moved) == (True, [])
     assert table.row("cam-02")["onvifEndpointRef"] == EPR2
-    assert table.writes[0][1]["ConditionExpression"] == \
-        "onvifHost = :expect AND attribute_not_exists(onvifEndpointRef)"
+    [(_, path, body)] = table.route.calls                              # through the registry route (10.2b)
+    assert (path, body["expect"], body["missing"]) == ("cameras/cam-02", {"onvifHost": "192.0.2.12"}, ["onvifEndpointRef"])
 
 
 def test_follows_a_camera_to_its_new_address(registry):
@@ -162,7 +162,8 @@ def test_rows_this_pi_serves_get_its_thing_name(registry, adopting, monkeypatch)
     assert table.row("cam-01")["adapterId"] == table.row("cam-02")["adapterId"] == "test-thing"
     assert table.row("cam-03")["adapterId"] == "adapter-07"           # someone else's stays theirs
     assert "adapterId" not in table.row("cam-04") and "adapterId" not in table.row("cam-05")
-    assert {w[1]["ConditionExpression"] for w in table.writes} == {"attribute_not_exists(adapterId)"}
+    assert [c[1] for c in table.route.calls] == ["cameras/cam-01/adopt", "cameras/cam-02/adopt"]   # the route stamps
+    assert all("attribute_not_exists(adapterId)" in w[1]["ConditionExpression"] for w in table.writes)
 
 
 def test_without_the_switch_no_row_is_claimed(registry, monkeypatch):
@@ -210,7 +211,8 @@ def test_ff94_an_identity_that_changed_is_learned_at_the_cameras_own_address(reg
     cams = [_cam("cam-04", "192.0.2.14", EPR2)]
     assert rc.rematch(cams, {NEW: ("192.0.2.14", 80)}) == (True, [])
     assert table.row("cam-04")["onvifEndpointRef"] == NEW and cams[0]["onvifEndpointRef"] == NEW
-    assert table.writes[0][1]["ConditionExpression"] == "onvifHost = :expect AND onvifEndpointRef = :expect_ref"
+    [(_, _, body)] = table.route.calls
+    assert body["expect"] == {"onvifHost": "192.0.2.14", "onvifEndpointRef": EPR2}
     # ... so it is followed when its address changes too
     changed, moved = rc.rematch(cams, {NEW: ("192.0.2.44", 80)})
     assert [c["cameraId"] for c in moved] == ["cam-04"] and table.row("cam-04")["onvifHost"] == "192.0.2.44"
@@ -235,3 +237,87 @@ def test_ff94_a_camera_still_announcing_its_identity_moves_and_keeps_it(registry
                                 {EPR2: ("192.0.2.40", 80), NEW: ("192.0.2.14", 80)})
     assert [c["cameraId"] for c in moved] == ["cam-04"]
     assert (table.row("cam-04")["onvifHost"], table.row("cam-04")["onvifEndpointRef"]) == ("192.0.2.40", EPR2)
+
+
+# --- tagging this Pi's KVS streams (DEALER-PANEL-PLAN.md D13, Phase 10.2a) ---------------------------
+
+TAGS = {"adapterId": "test-thing"}
+
+
+def _expect_tags(table, *names, missing=()):
+    kv = table.session.stub("kinesisvideo")
+    for name in names:
+        if name in missing:
+            kv.add_client_error("tag_stream", "ResourceNotFoundException", http_status_code=404,
+                                expected_params={"StreamName": name, "Tags": TAGS})
+        else:
+            kv.add_response("tag_stream", {}, {"StreamName": name, "Tags": TAGS})
+
+
+def test_every_stream_of_this_pis_cameras_is_tagged_with_its_thing(registry, adopting):
+    table = registry([
+        {"cameraId": "cam-01", "mode": "transcode"},                            # USB, unstamped: adopted here
+        _cam("cam-02", "192.0.2.12", adapterId="test-thing"),
+        _cam("cam-04", "192.0.2.14", adapterId="test-thing", unregisteredAt="2026-11-01T00:00:00Z"),
+        _cam("cam-03", "192.0.2.13", adapterId="adapter-07"),                    # another adapter's
+        _cam("cam-05", "192.0.2.15", releasedFrom="test-thing"),                 # released
+        {"cameraId": "cam01", "videoCodecActive": "h264"},                       # not a camera (#93)
+    ], page_size=2)
+    _expect_tags(table, "cam-01", "cam-01-live", "cam-02", "cam-02-live", "cam-04", "cam-04-live",
+                 missing={"cam-01-live", "cam-04-live"})
+    assert rc.tag_own_streams(now=1000) == ["cam-01", "cam-02", "cam-02-live", "cam-04"]
+    import json
+    record = json.loads((sync_mediamtx_paths.STATE_DIR / "tagged-streams.json").read_text())
+    assert set(record) == {"cam-01", "cam-01-live", "cam-02", "cam-02-live", "cam-04", "cam-04-live"}  # none missing asked again
+
+
+def test_a_tagged_stream_is_asked_again_only_after_a_day(registry):
+    table = registry([_cam("cam-02", "192.0.2.12", adapterId="test-thing")])
+    _expect_tags(table, "cam-02", "cam-02-live")
+    rc.tag_own_streams(now=1000)
+    assert rc.tag_own_streams(now=1000 + rc.RETAG_AFTER - 1) == []           # nothing queued: a call would fail
+    _expect_tags(table, "cam-02", "cam-02-live")
+    assert rc.tag_own_streams(now=1000 + rc.RETAG_AFTER) == ["cam-02", "cam-02-live"]
+
+
+def test_a_refused_tag_is_asked_again_next_run(registry):
+    table = registry([_cam("cam-02", "192.0.2.12", adapterId="test-thing")])
+    kv = table.session.stub("kinesisvideo")
+    kv.add_client_error("tag_stream", "AccessDeniedException", http_status_code=403)
+    kv.add_response("tag_stream", {}, {"StreamName": "cam-02-live", "Tags": TAGS})
+    assert rc.tag_own_streams(now=1000) == ["cam-02-live"]
+    _expect_tags(table, "cam-02")
+    assert rc.tag_own_streams(now=1001) == ["cam-02"]
+
+
+def test_a_dry_run_tags_nothing_and_remembers_nothing(registry):
+    registry([_cam("cam-02", "192.0.2.12", adapterId="test-thing")])
+    assert rc.tag_own_streams(dry_run=True, now=1000) == ["cam-02", "cam-02-live"]
+    assert not (sync_mediamtx_paths.STATE_DIR / "tagged-streams.json").exists()
+
+
+def test_tagging_reads_this_pis_rows_by_the_index_never_a_scan(registry, monkeypatch):
+    # DEALER-PANEL-PLAN.md Phase 10.2c: a Pi that doesn't adopt never scans the table.
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    table = registry([_cam("cam-02", "192.0.2.12", adapterId="test-thing"), {"cameraId": "cam-01", "mode": "transcode"}])
+    monkeypatch.setattr(table, "scan", lambda **kw: pytest.fail("scanned the whole table"))
+    _expect_tags(table, "cam-02", "cam-02-live")
+    assert rc.tag_own_streams(now=1000) == ["cam-02", "cam-02-live"]
+
+
+def test_adoption_once_the_role_cant_scan_adopts_nothing(registry, adopting, monkeypatch):
+    # After the narrowing (10.2f) the adopting Pi's scan is refused: nothing is left to adopt by then.
+    from botocore.exceptions import ClientError
+    table = _five(registry)
+
+    def scan(**kw):
+        raise ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "Scan")
+    monkeypatch.setattr(table, "scan", scan)
+    monkeypatch.setattr(mediamtx_api, "requests", FakeMediaMTX(conf={"cam02": {"source": "rtsp://x"}}))
+    assert rc.adopt_unstamped() == [] and table.route.calls == []
+
+
+def test_new_streams_are_made_tagged_with_this_adapters_thing():
+    import camera_control
+    assert camera_control.stream_tags() == {"adapterId": "test-thing"}

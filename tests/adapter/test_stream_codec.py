@@ -49,6 +49,18 @@ def test_the_recording_pulls_the_sub_stream_only_when_chosen_and_there(registry,
     assert sc.recorded_path("cam-03") == expect
 
 
+@pytest.mark.parametrize("owner, expect", [("test-thing", ("cam03_live", True)), ("adapter-02", ("cam03", False))])
+def test_only_this_adapters_row_is_read(registry, mtx, monkeypatch, owner, expect):
+    # By the adapterId-index, never a scan (DEALER-PANEL-PLAN.md Phase 10.2c): another adapter's row
+    # with the same ID is none of this Pi's, and its choices aren't read.
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    table = registry([row(recordQuality={"stream": "sub"}, adapterId=owner)])
+    monkeypatch.setattr(table, "scan", lambda **kw: pytest.fail("scanned the whole table"))
+    mtx(True)
+    assert sc.recorded_path("cam-03") == expect
+
+
 def test_an_unreachable_registry_records_the_cameras_own_stream(monkeypatch, mtx, capsys):
     import aws_device_creds
     def no_aws(*a, **k):
@@ -67,6 +79,20 @@ def test_what_was_pulled_is_recorded_and_a_change_of_picture_is_stamped(registry
     assert r["recordQualityActive"] == {"stream": "sub", "size": "800x448"}
     assert r["videoCodecActive"] == "h264"                        # same codec...
     assert r["videoCodecActiveSince"].endswith("Z")               # ...but another picture: split there
+
+
+def test_what_is_recorded_is_read_from_this_adapters_row_by_the_index(registry, monkeypatch):
+    # DEALER-PANEL-PLAN.md Phase 10.2c: neither a scan nor a read by key -- the narrowed role allows
+    # only the adapterId-index's query for this Thing.
+    import config
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    table = registry([row(adapterId="test-thing", videoCodecActive="h264")])
+    monkeypatch.setattr(table, "scan", lambda **kw: pytest.fail("scanned the whole table"))
+    monkeypatch.setattr(table, "get_item", lambda **kw: pytest.fail("read the row by its key"))
+    sc.record_registry(table, "cam-03", "h265", sub=False, size="2560x1440")
+    sc.record_live_registry(table, "cam-03", "h264")
+    r = table.row("cam-03")
+    assert (r["videoCodecActive"], r["liveVideoCodecActive"]) == ("h265", "h264") and r["videoCodecActiveSince"]
 
 
 def test_a_same_picture_restart_writes_nothing(registry):

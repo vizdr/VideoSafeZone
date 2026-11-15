@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 import requests
-from botocore.exceptions import ClientError
 
 import activation
 import camera_control
@@ -32,6 +31,8 @@ import live_view
 import mediamtx_api
 import onvif_discovery
 import onvif_media2
+import registry_client
+import registry_reads
 
 CAMERA_ID_RE = re.compile(r"^cam-\d{2,4}$")      # D11: cam-01 ... cam-9999
 # A camera's display name ("Kitchen", "Hall-1", "Küche"): what people read in both GUIs (ported
@@ -59,24 +60,6 @@ class Env:
 
 def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def next_camera_id(table):
-    """The next free camera ID (D11): one past the highest in the registry -- every adapter's rows
-    and unregistered ones count, as their streams and recordings keep their IDs. The row is written
-    only if the ID is still free when the camera is ready (register), so two registrations racing
-    for one ID can't both have it."""
-    taken, kw = [0], {"ProjectionExpression": "cameraId"}
-    while True:
-        page = table.scan(**kw)
-        taken += [int(m.group(1)) for i in page["Items"] if (m := re.fullmatch(r"cam-(\d{2,4})", i["cameraId"]))]
-        if "LastEvaluatedKey" not in page:
-            break
-        kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-    n = max(taken) + 1
-    if n > 9999:
-        raise ValueError("no camera ID left (cam-9999 is the last)")
-    return f"cam-{n:02d}"
 
 
 def register(body, env):
@@ -115,12 +98,11 @@ def register(body, env):
         return {"error": f"fps must be one of {list(onvif_media2.FPS_CHOICES)}"}, 400
 
     table = env.table
-    if allocated:
-        try:
-            camera_id = next_camera_id(table)
-        except ValueError as e:
-            return {"error": str(e)}, 409
-    existing = None if allocated else table.get_item(Key={"cameraId": camera_id}).get("Item")
+    # This Pi's row of a typed ID, by the adapterId-index (DEALER-PANEL-PLAN.md Phase 10.2c). Another
+    # adapter's camera isn't found here: it goes to the claim, which refuses an ID that is taken -- whose
+    # it is stays theirs. A new camera without an ID gets one at the claim, from the registry route,
+    # which alone sees every adapter's IDs (D11).
+    existing = None if allocated else registry_reads.own_row(camera_id, table=table)
     # A new camera only on an activated adapter (DEALER-PANEL-PLAN.md D16): on one that isn't, no
     # customer's token would reach it. Re-registering a camera that is already here stays possible.
     if not existing and (refusal := activation.registration_refusal()):
@@ -143,11 +125,9 @@ def register(body, env):
         # still safe to refresh -- editing a path's config doesn't care which unit feeds it.
         if existing.get("mode") != "passthrough" or not existing.get("onvifHost"):
             return {"error": f"'{camera_id}' exists but isn't a re-registerable ONVIF camera"}, 409
-        # Another adapter's camera isn't this Pi's to re-register: that would hand it, and its
-        # customer's recordings, to this Pi's customer (DEALER-PANEL-PLAN.md D11).
+        # This Pi's own row (own_row): another adapter's camera never gets here, so it can't be handed,
+        # with its customer's recordings, to this Pi's customer (D11). Unstamped: adopted below.
         owner = existing.get("adapterId")
-        if owner and owner != config.THING_NAME:
-            return {"error": f"'{camera_id}' belongs to another adapter ({owner})"}, 409
         # Re-registering an unregistered camera also brings it back: its path is added again
         # (Unregister deleted it) and the mark is removed. Its producer stays stopped until
         # someone presses Start, as every producer does after a reboot (FoundAndFixed.md #81).
@@ -185,26 +165,18 @@ def register(body, env):
 
         # REMOVE is a no-op on a row without the mark, so every re-registration can carry it.
         # adapterId: which Thing serves the camera -- what the camera API's tenant check compares
-        # with the caller's token (DEALER-PANEL-PLAN.md D4); stamped here if the row predates it.
-        sets = ("hasIrControl = :ir, onvifHost = :h, onvifPort = :p, onvifUser = :u, "
-                "onvifPassword = :pw, rtspUrl = :uri, adapterId = :aid, updatedAt = :t")
-        values = {":ir": has_ir_control, ":h": host, ":p": port, ":u": user, ":pw": password,
-                  ":uri": stream_uri, ":aid": config.THING_NAME, ":t": now()}
-        if endpoint_ref:
-            sets += ", onvifEndpointRef = :ref"
-            values[":ref"] = endpoint_ref
-        if audio_capable is not None:
-            sets += ", audioCapable = :ac"
-            values[":ac"] = audio_capable
-        removes = "unregisteredAt"
-        if name_given and display_name:
-            sets += ", displayName = :dn"
-            values[":dn"] = display_name
-        elif name_given:
-            removes += ", displayName"
-        table.update_item(Key={"cameraId": camera_id},
-                          UpdateExpression=f"SET {sets} REMOVE {removes}",
-                          ExpressionAttributeValues=values)
+        # with the caller's token (DEALER-PANEL-PLAN.md D4); a row that predates it is stamped first,
+        # by the registry route's adopt (only the adopting adapter may). Then the fields, through the
+        # route, which writes only this adapter's rows (Phase 10.2b).
+        if not owner:
+            registry_client.adopt(camera_id)
+        sets = {"hasIrControl": has_ir_control, "onvifHost": host, "onvifPort": port, "onvifUser": user,
+                "onvifPassword": password, "rtspUrl": stream_uri, "updatedAt": now(),
+                **({"onvifEndpointRef": endpoint_ref} if endpoint_ref else {}),
+                **({"audioCapable": audio_capable} if audio_capable is not None else {}),
+                **({"displayName": display_name} if name_given and display_name else {})}
+        removes = ["unregisteredAt"] + (["displayName"] if name_given and not display_name else [])
+        registry_client.update(camera_id, set=sets, remove=removes)
 
         # The producer. A camera registered from the VMS card has none on this one: provision
         # it, not started (D1). Never enabled: no producer starts at boot (#81).
@@ -217,15 +189,16 @@ def register(body, env):
         # Re-ask the codec capabilities: the stream URI may now point at another profile,
         # or the row at another device. If the camera can't be asked right now the
         # existing answer is kept (codec_caps.refresh_item).
-        _, caps_status = codec_caps.refresh_item(
-            table, table.get_item(Key={"cameraId": camera_id})["Item"])
+        # The row as just written -- not read back: the index may not have caught up yet.
+        written = {k: v for k, v in {**existing, **sets}.items() if k not in removes}
+        _, caps_status = codec_caps.refresh_item(written)
         detection = registration_detection(env, camera_id, host, port, user, password)
         # The stream may have changed, and an unregistered camera's live path went with
         # Unregister: set the live view up again from what the camera says now.
         reregistered = {**existing, "onvifHost": host, "onvifPort": port,
                         "onvifUser": user, "onvifPassword": password, "rtspUrl": stream_uri}
-        live = apply_live_view(table, env.kinesisvideo, camera_id, reregistered)
-        registration_ceiling(table, camera_id, reregistered)
+        live = apply_live_view(env.kinesisvideo, camera_id, reregistered)
+        registration_ceiling(camera_id, reregistered)
         refresh_path_cache()
         return {"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"],
                         "updated": True, "reactivated": reactivate, "producer": producer,
@@ -249,18 +222,19 @@ def register(body, env):
     # here, before it has touched a path, a unit or a stream; claimed at the end instead, the loser
     # would already have rewritten the winner's channel file, started its unit into the winner's
     # KVS stream, and stopped it again on the way out.
-    # A path MediaMTX has already (left by another camera, or by hand) refuses before the claim, so
-    # the commonest failure leaves no claim behind.
-    try:
-        if mediamtx_api.get_path_conf(mediamtx_path) is not None:
-            return {"error": f"MediaMTX has a path {mediamtx_path} already: nothing was registered"}, 502
-    except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
-        return {"error": f"MediaMTX can't be asked: {e}"}, 502
-    claimed, token_or_status = claim_camera_id(table, camera_id, allocated)
+    # A path MediaMTX has already (left by another camera, or by hand) refuses before the claim for a
+    # typed ID, so the commonest failure leaves no claim behind; an allocated ID is known only once
+    # claimed, and a clash then gives the claim up (abandoned: the ID stays used).
+    if not allocated and (refusal := path_refusal(mediamtx_path)):
+        return refusal
+    claimed, token_or_status = claim_camera_id(camera_id, allocated)
     if isinstance(claimed, dict):
         return claimed, token_or_status                   # (error, status)
     camera_id, token = claimed, token_or_status
     mediamtx_path = camera_control.mediamtx_path_name(camera_id)
+    if allocated and (refusal := path_refusal(mediamtx_path)):
+        abandon_claim(camera_id, token)
+        return refusal
     try:
         return _create(env, body_fields={
             "camera_id": camera_id, "token": token, "host": host, "port": port, "user": user,
@@ -268,41 +242,41 @@ def register(body, env):
             "endpoint_ref": endpoint_ref, "audio_capable": audio_capable, "display_name": display_name,
             "fps_result": fps_result, "mediamtx_path": mediamtx_path})
     except Exception:
-        abandon_claim(table, camera_id, token)
+        abandon_claim(camera_id, token)
         raise
 
 
-def claim_camera_id(table, camera_id, allocated, tries=5):
+def path_refusal(mediamtx_path):
+    """(error, 502) when MediaMTX has the path already or can't be asked, else None."""
+    try:
+        if mediamtx_api.get_path_conf(mediamtx_path) is not None:
+            return {"error": f"MediaMTX has a path {mediamtx_path} already: nothing was registered"}, 502
+    except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
+        return {"error": f"MediaMTX can't be asked: {e}"}, 502
+    return None
+
+
+def claim_camera_id(camera_id, allocated):
     """(camera ID, claim token), or (error, status). The claim is a row of this registration's own,
     marked unregistered so that every reader skips it (CLAUDE.md, Unregister) until register writes
-    the camera over it. An allocated ID taken meanwhile is followed by the next free one."""
-    token = secrets.token_hex(8)
-    for _ in range(tries):
-        try:
-            table.put_item(Item={"cameraId": camera_id, "adapterId": config.THING_NAME, "unregisteredAt": now(),
-                                 "registering": token},
-                           ConditionExpression="attribute_not_exists(cameraId)")
-            return camera_id, token
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-                raise
-        if not allocated:
-            return {"error": f"{camera_id} is taken -- leave the camera ID out and the next free one is used"}, 409
-        try:
-            camera_id = next_camera_id(table)
-        except ValueError as e:
-            return {"error": str(e)}, 409
-    return {"error": "couldn't claim a camera ID: registrations keep taking them -- try again"}, 409
-
-
-def abandon_claim(table, camera_id, token):
-    """A registration that failed after its claim leaves the row unregistered -- skipped by every
-    reader -- and marked abandoned; the ID stays used. The device role may update rows but not
-    delete them, and widening the role (shared with the VMS card) for this isn't worth it."""
+    the camera over it -- made by the registry route (DEALER-PANEL-PLAN.md Phase 10.2b), which alone
+    sees every adapter's IDs (10.2c): an allocated ID is the next free one past all of them (D11); a
+    typed one taken -- by anyone -- is refused, without saying whose it is."""
     try:
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET abandonedAt = :t REMOVE registering",
-                          ConditionExpression="registering = :tok", ExpressionAttributeValues={":t": now(), ":tok": token})
-    except ClientError:
+        return registry_client.claim(None if allocated else camera_id)
+    except registry_client.RegistryError as e:
+        if e.status == 409 and not allocated:
+            return {"error": f"{camera_id} is taken -- leave the camera ID out and the next free one is used"}, 409
+        return {"error": f"couldn't claim a camera ID ({e.message or e})"}, 409 if e.status == 409 else 502
+
+
+def abandon_claim(camera_id, token):
+    """A registration that failed after its claim leaves the row unregistered -- skipped by every
+    reader -- and marked abandoned; the ID stays used. Only while the claim is still this one's."""
+    try:
+        registry_client.update(camera_id, set={"abandonedAt": now()}, remove=["registering"],
+                               expect={"registering": token})
+    except registry_client.RegistryError:
         pass
 
 
@@ -318,7 +292,7 @@ def _create(env, body_fields):
     try:
         mediamtx_api.add_path(mediamtx_path, {"source": stream_uri, "rtspTransport": "tcp"})
     except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
-        abandon_claim(table, camera_id, token)
+        abandon_claim(camera_id, token)
         return {"error": f"MediaMTX path add failed: {e}"}, 502
 
     # 2. Local systemd wiring: env file for the kvs-cam@.service template, then
@@ -330,7 +304,7 @@ def _create(env, body_fields):
         # DELETE, not POST: MediaMTX answers POST on this route with a 404, so the rollback
         # silently did nothing and left an orphan path behind (FoundAndFixed.md #36).
         mediamtx_api.delete_path(mediamtx_path)
-        abandon_claim(table, camera_id, token)
+        abandon_claim(camera_id, token)
         return {"error": f"provisioning failed: {provision.stderr.strip()}"}, 500
 
     # 3. Which codecs the camera can deliver and which is the default (codec_caps.py) --
@@ -353,6 +327,7 @@ def _create(env, body_fields):
         stream_arn = kv.create_stream(
             StreamName=camera_id, DataRetentionInHours=24,
             MediaType=f"video/{codec_fields['videoCodecDefault'] or 'h264'}",
+            Tags=camera_control.stream_tags(),                 # whose it is (D13)
         )["StreamARN"]
     except kv.exceptions.ResourceInUseException:
         stream_arn = kv.describe_stream(StreamName=camera_id)["StreamInfo"]["StreamARN"]
@@ -371,13 +346,13 @@ def _create(env, body_fields):
         "createdAt": now(),
         **({"displayName": f["display_name"]} if f["display_name"] else {}),
     }
-    # Written over this registration's own claim -- the whole row, so the claim's marks go. Only
-    # while the claim is still this one's: nothing else may write this ID meanwhile.
+    # Written over this registration's own claim -- every field of the camera, and the claim's marks
+    # removed -- through the registry route. Only while the claim is still this one's: nothing else
+    # may write this ID meanwhile. The claim already says whose the row is (adapterId).
     try:
-        table.put_item(Item=row, ConditionExpression="registering = :tok", ExpressionAttributeValues={":tok": token})
-    except ClientError as e:
-        if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-            raise
+        registry_client.update(camera_id, set={k: v for k, v in row.items() if k not in ("cameraId", "adapterId")},
+                               remove=["registering", "unregisteredAt"], expect={"registering": token})
+    except registry_client.ConditionFailed:
         camera_control.set_stream(camera_id, False)
         try:
             mediamtx_api.delete_path(mediamtx_path)
@@ -386,8 +361,8 @@ def _create(env, body_fields):
         return {"error": f"{camera_id}'s claim was lost meanwhile: nothing was kept -- register again"}, 409
 
     detection = registration_detection(env, camera_id, host, port, user, password)
-    live = apply_live_view(table, env.kinesisvideo, camera_id, row)    # registered on the main stream: live view on sub
-    registration_ceiling(table, camera_id, row)
+    live = apply_live_view(env.kinesisvideo, camera_id, row)    # registered on the main stream: live view on sub
+    registration_ceiling(camera_id, row)
     refresh_path_cache()
     return {"cameraId": camera_id, "kvsStreamArn": stream_arn, "updated": False,
             "fps": f["fps_result"], "detectionModes": detection, "liveView": live}, 201
@@ -442,7 +417,7 @@ def ceiling_fields(stream, fps=None):
             "recordFps": rate if rate in onvif_media2.FPS_CHOICES else None}
 
 
-def record_ceiling(table, camera_id, item, stream, fps=None):
+def record_ceiling(camera_id, item, stream, fps=None):
     """Write the ceiling when it differs from the row, field by field, and clear a cloud choice
     that is no longer below it: the only lower step is the sub stream, so a camera that no longer
     records main loses a "sub" choice (WEB-PANEL-PLAN.md D5). Best effort -- the stream already
@@ -454,30 +429,26 @@ def record_ceiling(table, camera_id, item, stream, fps=None):
         removes.append("recordQuality")
     if not sets and not removes:
         return {"ceiling": want, "written": False}
-    parts = (["SET " + ", ".join(f"{k} = :{k}" for k in sets)] if sets else []) + \
-            (["REMOVE " + ", ".join(removes)] if removes else [])
     try:
-        table.update_item(
-            Key={"cameraId": camera_id}, UpdateExpression=" ".join(parts),
-            **({"ExpressionAttributeValues": {f":{k}": v for k, v in sets.items()}} if sets else {}))
+        registry_client.update(camera_id, set=sets, remove=removes)        # through the route (10.2b)
         return {"ceiling": want, "written": True,
                 **({"clearedCloudChoice": True} if "recordQuality" in removes else {})}
     except Exception as e:  # noqa: BLE001
         return {"ceiling": want, "written": False, "reason": f"{type(e).__name__}: {e}"}
 
 
-def registration_ceiling(table, camera_id, item):
+def registration_ceiling(camera_id, item):
     """At registration the recorded stream is the URI the form chose: record its ceiling from the
     camera's own stream list. Never fails the registration."""
     try:
         found = onvif_media2.streams(onvif_media2.for_camera(item))
         stream = next((x for x in found if onvif_media2.same_stream(x["streamUri"], item.get("rtspUrl"))), None)
-        return record_ceiling(table, camera_id, item, stream) if stream else {"written": False}
+        return record_ceiling(camera_id, item, stream) if stream else {"written": False}
     except Exception as e:  # noqa: BLE001
         return {"written": False, "reason": f"{type(e).__name__}: {e}"}
 
 
-def apply_live_view(table, kinesisvideo, camera_id, item, found=None):
+def apply_live_view(kinesisvideo, camera_id, item, found=None):
     """Point the camera's live view at its sub stream, or back at the recorded stream
     (live_view.py), from the camera's own stream list. Never fails the action that called it --
     a registration or a stream switch has already worked; the outcome, or why the live view
@@ -486,7 +457,7 @@ def apply_live_view(table, kinesisvideo, camera_id, item, found=None):
         if found is None:
             found = onvif_media2.streams(onvif_media2.for_camera(item))
         uri = live_view.live_uri(found, item.get("rtspUrl"))
-        return live_view.apply(camera_id, item, uri, table, kinesisvideo())
+        return live_view.apply(camera_id, item, uri, kinesisvideo())
     except Exception as e:  # noqa: BLE001
         return {"error": f"live view not set up ({type(e).__name__}: {e}) -- "
                          f"re-register the camera to retry"}
@@ -504,16 +475,10 @@ def refresh_path_cache():
 
 
 def all_names(table):
-    """{cameraId: displayName} of this Pi's rows (D12), unregistered ones included: they come back
-    with Re-register, and must not come back sharing a name. Another adapter's cameras are left out:
-    their names are another customer's, and a clash must not show their camera IDs here."""
-    names, kw = {}, {"ProjectionExpression": "cameraId, displayName, adapterId, releasedFrom"}
-    while True:
-        page = table.scan(**kw)
-        names.update({i["cameraId"]: i.get("displayName") for i in page["Items"] if camera_control.is_mine(i)})
-        if "LastEvaluatedKey" not in page:
-            return names
-        kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    """{cameraId: displayName} of this Pi's rows (D12; by the adapterId-index, Phase 10.2c),
+    unregistered ones included: they come back with Re-register, and must not come back sharing a
+    name. Another adapter's cameras aren't read: their names are another customer's."""
+    return {i["cameraId"]: i.get("displayName") for i in registry_reads.own_rows(["displayName"], table=table)}
 
 
 def check_display_name(raw, camera_id, names):
@@ -590,7 +555,7 @@ def read_detection(host, port, user, password):
     return dmap, topics, onvif_discovery.web_url(host, ports)
 
 
-def record_detection(table, camera_id, dmap, item=None, web_url=None):
+def record_detection(camera_id, dmap, item=None, web_url=None):
     """Write detectionModes (the modes), detectionTopics (mode -> topic and on/off field) and
     webUrl (the camera's own settings page, where it has one) to the registry, field-level and
     only when they changed. The same fields and meanings VMS writes; recordingMode keeps its
@@ -601,22 +566,12 @@ def record_detection(table, camera_id, dmap, item=None, web_url=None):
     if item is not None and item.get("detectionModes") == modes and \
             item.get("detectionTopics") == topics and (web_url is None or item.get("webUrl") == web_url):
         return modes
-    sets, values = "detectionModes = :m, detectionTopics = :t", {":m": modes, ":t": topics}
-    if web_url:
-        sets += ", webUrl = :w"
-        values[":w"] = web_url
     try:
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression=f"SET {sets}",
-                          ExpressionAttributeValues=values)
+        registry_client.update(camera_id, set={"detectionModes": modes, "detectionTopics": topics,
+                                               **({"webUrl": web_url} if web_url else {})})
     except Exception:  # noqa: BLE001
         pass
     return modes
-
-
-def foreign_error(item):
-    """Another adapter's camera, or one released from this one (D12, D15): not this Pi's to change."""
-    owner = item.get("adapterId") or (f"released from {item['releasedFrom']}" if item.get("releasedFrom") else "none")
-    return {"error": f"'{item['cameraId']}' isn't this adapter's camera ({owner})"}, 409
 
 
 def usb_mark(camera_id, unregistered):
@@ -645,7 +600,7 @@ def unregister(table, camera_id, run=subprocess.run):
     couldn't learn of it anyway. Returns (the answer, its HTTP status). Unregistering here hides
     the camera in VMS's GUIs as well (D4).
     """
-    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    item = registry_reads.own_row(camera_id, table=table)     # another adapter's: unknown here (10.2c)
     if not item:
         return {"error": "unknown camera"}, 404
     usb = item.get("mode") == "transcode"
@@ -653,17 +608,11 @@ def unregister(table, camera_id, run=subprocess.run):
         return {"error": f"'{camera_id}' is a USB camera this Pi has no capture unit for"}, 409
     if not usb and (item.get("mode") != "passthrough" or not item.get("onvifHost")):
         return {"error": f"'{camera_id}' isn't a camera this Pi can unregister (no ONVIF address)"}, 409
-    if not camera_control.is_mine(item):
-        return foreign_error(item)
     if camera_control.is_unregistered(item):
         return {"cameraId": camera_id, "unregisteredAt": item["unregisteredAt"]}, 200
 
     stamp = now()
-    table.update_item(
-        Key={"cameraId": camera_id},
-        UpdateExpression="SET unregisteredAt = :t, updatedAt = :t",
-        ExpressionAttributeValues={":t": stamp},
-    )
+    registry_client.update(camera_id, set={"unregisteredAt": stamp, "updatedAt": stamp})   # through the route (10.2b)
     camera_control.set_stream(camera_id, False)
     camera_control.set_boot_start(camera_id, False)
     run(["sudo", "systemctl", "stop", camera_control.live_unit_name(camera_id)], check=False, capture_output=True)
@@ -690,20 +639,16 @@ def reregister(env, camera_id, run=subprocess.run):
     detection, live view; the camera must answer with its stored login); the USB camera, which
     discovery can't find, gets its capture back. Either way the producer stays stopped until
     someone presses Start, as after a reboot (FoundAndFixed.md #81). Returns (the answer, status)."""
-    table = env.table
-    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    item = registry_reads.own_row(camera_id, table=env.table)  # another adapter's: unknown here (10.2c)
     if not item:
         return {"error": "unknown camera"}, 404
-    if not camera_control.is_mine(item):
-        return foreign_error(item)
     if not camera_control.is_unregistered(item):
         return {"cameraId": camera_id, "reactivated": False, "registered": True}, 200
     if item.get("mode") == "transcode":
         unit = USB_CAPTURE_UNITS.get(camera_id)
         if not unit:
             return {"error": f"'{camera_id}' is a USB camera this Pi has no capture unit for"}, 409
-        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET updatedAt = :t REMOVE unregisteredAt",
-                          ExpressionAttributeValues={":t": now()})
+        registry_client.update(camera_id, set={"updatedAt": now()}, remove=["unregisteredAt"])
         usb_mark(camera_id, False)
         started = run(["systemctl", "--user", "start", unit], check=False, capture_output=True)
         refresh_path_cache()
@@ -776,19 +721,8 @@ def match_device(rows, endpoint_ref, host, port):
     return min(ranked, key=lambda pair: pair[0])[1] if ranked else None
 
 
-def all_rows(table, projection=None):
-    """Every registry row (every page of the scan), with only the projected fields if given."""
-    rows, kw = [], ({"ProjectionExpression": projection} if projection else {})
-    while True:
-        page = table.scan(**kw)
-        rows += page["Items"]
-        if "LastEvaluatedKey" not in page:
-            break
-        kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-    return rows
-
-
 def mine_for_device(table, endpoint_ref, host, port):
-    """match_device over the whole registry. Adding a camera this Pi has unregistered brings it
-    back as it was (Re-register); adding one it has in use is refused."""
-    return match_device(all_rows(table), endpoint_ref, host, port)
+    """match_device over this Pi's rows (by the adapterId-index, Phase 10.2c). Adding a camera this Pi
+    has unregistered brings it back as it was (Re-register); adding one it has in use is refused."""
+    return match_device(registry_reads.own_rows(["onvifEndpointRef", "onvifHost", "onvifPort", "mode"], table=table),
+                        endpoint_ref, host, port)
