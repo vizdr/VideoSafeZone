@@ -23,32 +23,100 @@ it changes anything, so a second run changes nothing) and ends with PASS/FAIL pr
 scripts carry the step-by-step reasons as comments; this part says what each step does and
 why, and keeps the A1–A10 numbers that other documents cite.
 
-### The short way
+### Before you start
 
-1. Flash Raspberry Pi OS (64-bit, Debian 13 "trixie") with your user, Wi-Fi and SSH. Boot it.
-2. Clone the repo and run everything:
+- **The board:** a Raspberry Pi 4B — what everything here is tuned for (the SDK build's CPU pinning,
+  the hardware H.264 encoder) — with its power supply. A microSD card of **32 GB or more**: the
+  system, a 3 GB swapfile and, without the cache, the SDK build (this card uses about 17 GB).
+- **The USB stick** (A10), ext4 with the label `vms-buffer`. Optional, but it is what makes a fresh
+  card quick: it holds the SDK build cache and the identity backup, and it records outages. Plug it
+  in **before** running the setup.
+- **Cameras:** the USB webcam (cam-01) plugged in, and the ONVIF cameras on the same LAN as the Pi.
+- **On a PC:** Raspberry Pi Imager, and an SSH client.
+- **AWS:** this account's resources exist already (A7). A sign-in to the AWS console is needed only
+  for `aws login`: the first certificate on an account, deploys (Part H), and the cloud checks.
+- **This card is `adapter-01`** (a replacement for the first Pi's card) unless you are setting up
+  another adapter: then see "A new adapter, not adapter-01" below first.
 
-   ```bash
-   git clone https://github.com/vizdr/VideoSafeZone.git ~/Projects/VideoSafeZone
-   bash ~/Projects/VideoSafeZone/setup/setup-all.sh     # as yourself, not with sudo: it asks once
-   ```
+### Setting up a freshly flashed card, step by step
 
-3. **Only the first time on an AWS account** (no identity backup on the stick yet), it stops at
-   the device certificate and says so. Then, from `~/Projects/VideoSafeZone`:
+**1. Flash** with Raspberry Pi Imager: device *Raspberry Pi 4*, OS *Raspberry Pi OS (64-bit)* — Debian
+13 "trixie" (tested with the desktop image; Lite should work, but needs `git` installed by hand, step 3).
+In Imager's customisation (*Edit settings*, or the customisation pages of newer versions) set: a
+hostname (`raspberrypi`), your user name and password (any name — every path follows the clone), the
+Wi-Fi network **and its country** (without the country Wi-Fi stays off), your time zone, and SSH
+enabled (*Services* / *Remote access*). Write the card, put it in the Pi,
+plug in the stick, power on.
 
-   ```bash
-   aws login --remote                       # prints a URL: sign in from any browser
-   bash setup/setup-identity.sh create      # a new certificate for Thing adapter-01
-   bash setup/setup-identity.sh backup      # kept on the stick: every later card restores it
-   bash setup/setup-all.sh                  # carries on where it stopped
-   ```
+**2. First boot:** give it two or three minutes — it resizes the filesystem and may reboot once. Then
+from the PC: `ssh <user>@raspberrypi.local` (or find its address in the router). Every command below
+runs on the Pi, as yourself — never with `sudo` in front; the scripts ask for the password once when
+they need root.
 
-4. `bash setup/setup-check.sh` — every line `ok`.
+**3. Clone the repository and run the setup** (the repository is public — no GitHub login):
 
-With the SDK cache on the stick a fresh card is ready in about 10–15 minutes, mostly apt and
-pip. Without it, the KVS SDK builds in the background for 1.5–2.5 hours. The stack runs
-meanwhile, and only Start needs the plugin; `bash setup/setup-sdk.sh wait` blocks until the
-build is done, and the finished build caches itself on the stick.
+```bash
+git --version || sudo apt install -y git           # Lite images may lack git
+git clone https://github.com/vizdr/VideoSafeZone.git ~/Projects/VideoSafeZone
+bash ~/Projects/VideoSafeZone/setup/setup-all.sh    # asks for your password once; 10-15 min with the stick's cache
+```
+
+It runs the five scripts in the table below in order and stops at the first failure, saying which
+proof failed; every script is safe to run again, and a re-run carries on where it stopped. An
+optional `sudo apt full-upgrade` is best done *before* this: a newer GStreamer makes the SDK cache
+miss and the SDK rebuild (1.5–2.5 h, in the background). If SSH drops meanwhile, wait up to 10 minutes
+before doing anything (A1); the scripts keep running.
+
+**4. The device certificate** (A7). With the identity backup on the stick, `setup-all.sh` restores it
+and doesn't stop. Without one, it stops at the certificate and says so. Then either bring the
+previous card's `certs/` folder over (scp, or the stick) —
+
+```bash
+bash setup/setup-identity.sh restore /path/to/old/certs   # no AWS login needed
+```
+
+— or, if no copy exists, make a new one (`~/Projects/VideoSafeZone` is the working folder from here on):
+
+```bash
+aws login --remote                       # prints a URL: sign in from any browser
+bash setup/setup-identity.sh create      # a new certificate for Thing adapter-01
+bash cloud/adapter-identity.sh retire-others   # once the old card is gone for good: its certificate retired
+```
+
+Either way, then keep a copy for the next card, and carry on:
+
+```bash
+bash setup/setup-identity.sh backup      # certs/ to the stick: the next fresh card restores it
+bash setup/setup-all.sh                  # carries on where it stopped
+```
+
+**5. Check:** `bash setup/setup-check.sh` — every line `ok` (a line that isn't names the script that
+provides it). `setup-all.sh` ends with Part B's launch and its proofs: video flowing into MediaMTX,
+the agent online, the admin GUI answering.
+
+**6. Then:** the cameras already in the registry come back by themselves — MediaMTX's paths from the
+registry, a producer for each, not started (Part B). Look at them in the admin GUI,
+`http://<the Pi's address>:8080` (`hostname -I` prints the address), and in the web page (Part D).
+Start a camera in either GUI when you want cloud video — and stop it again (Part F: producers cost
+money while they run). A new ONVIF camera: Part E.
+
+### A new adapter, not adapter-01
+
+A second Pi serving another customer is its own adapter (`DEALER-PANEL-PLAN.md` D15): its Thing is
+made in the System console (Adapters → New adapters), and its identity by the owner, on the
+owner's machine — `bash cloud/adapter-identity.sh create adapter-02` writes a folder to copy to the
+new Pi. On the new card, before step 3's `setup-all.sh`, set its Thing:
+
+```bash
+sudo install -D -m 644 ~/Projects/VideoSafeZone/config/adapter.env.example /etc/adapter/adapter.env
+sudo sed -i 's/^THING_NAME=.*/THING_NAME=adapter-02/' /etc/adapter/adapter.env
+```
+
+then at step 4 `bash setup/setup-identity.sh restore <the folder>`, and activate it with its Cloud ID
+from the web page (Part H, "Adapters: Cloud IDs and activation"). Its cameras are added from the web
+page or the admin GUI once it is activated; `ADOPT_UNSTAMPED_ROWS` stays `no`.
+
+### The scripts
 
 | Script | Does | Root | Takes |
 |---|---|---|---|
@@ -61,8 +129,9 @@ build is done, and the finished build caches itself on the stick.
 | `setup/setup-check.sh` | read-only: what is missing, and which script provides it | — | seconds |
 
 **What stays manual, on purpose:** logging in to AWS; the first certificate on an account, and
-retiring old ones (never automatic — the VMS card shares the Thing); formatting a new stick
-(it would erase it); an EEPROM update and its reboot (`setup-system.sh` only reports one).
+retiring old ones (`cloud/adapter-identity.sh retire-others`, run when you know the old card is gone —
+it keeps the certificate this Pi presents); formatting a new stick (it would erase it); an EEPROM
+update and its reboot (`setup-system.sh` only reports one).
 
 **A moved clone** (another folder, user or Pi): run `setup-system.sh` and `setup-user.sh` again
 — unit files and the sudo rule hold literal paths (FoundAndFixed.md #25, #30) — then
@@ -202,11 +271,12 @@ certificates on the Thing; restoring needs no AWS login at all. The price: whoev
 stick holds the adapter's identity — it can push to KVS and read the camera registry. The stick
 lives in the Pi, next to the SD card that holds the same key; just don't hand it to anyone.
 
-**Retiring old certificates** is never automatic: the VMS card's certificate is attached to the
-same Thing and must stay ACTIVE. `create` lists the others with their dates; retire one you
-know is gone with `aws iot update-certificate --certificate-id <id> --new-status INACTIVE`.
-Never run `kvs-agent` on two Pis at once: both connect as MQTT client `adapter-01`, and IoT
-Core drops the older session each time the other connects.
+**Retiring old certificates** is never automatic. Since 2026-11-15 the VMS card has its own Thing
+(`pir-adapter-01`), so every other certificate on `adapter-01` belongs to a card that is gone:
+`bash cloud/adapter-identity.sh retire-others`, run on this Pi, deactivates and detaches them all and
+keeps the one this Pi presents (its `--dry-run` lists both). Never run `kvs-agent` on two Pis with the
+same Thing at once: both connect as MQTT client `adapter-01`, and IoT Core drops the older session each
+time the other connects.
 
 **The proofs**, in order of importance: (b) the credentials endpoint vends credentials — the
 certificate is active, attached to the Thing and allowed to assume the role; (c) the MQTT
@@ -462,7 +532,10 @@ which is IPv4-only and silently ineffective here (#18). `awsblock.sh` needs `ipt
 
 **URL:** https://dugyd3kkt36pw.cloudfront.net  (CloudFront + TLS, §8.5.1)
 
-**Login:** username `demo-viewer`, password `DemoViewer2026!`
+**Sign in** with an account of the user pool `vsz-users` (Part H, "Sign-in for accounts and roles"):
+your own, made by `provision.sh directory-seed YOU@MAIL` (system administrator), or one of the demo
+accounts, whose passwords are in `~/.local/state/videosafezone/demo-accounts.txt` on the machine that
+seeded them. The old `demo-viewer` login belongs to `kvs-demo-users`, VMS's pool, and doesn't sign in here.
 
 The old plain-HTTP S3 website URL
 (`http://vms-demo-client-596633517506.s3-website.eu-central-1.amazonaws.com`) still
@@ -713,8 +786,9 @@ grep -l pending-upload /mnt/vms-buffer/outage/*/state.json   # must print nothin
 sudo systemctl stop 'kvs-cam*' 'kvs-live@*'                    # no producer left running
 ```
 
-After the swap: a camera registered from the other card has no producer here until it is
-re-registered (E8). If a camera refuses event subscriptions ("Invalid Hostname" on cam-03),
+After the swap: since 2026-11-15 VMS keeps its own camera table (`pir-cameras`, D14), so a camera
+registered on the VMS card isn't in this registry at all — register it here too (Part E). The stick's
+captures are the one thing both stacks still read, hence the check above. If a camera refuses event subscriptions ("Invalid Hostname" on cam-03),
 the other card's watcher may have used up its subscription slots (FoundAndFixed.md #65): send
 `Unsubscribe` to `/onvif/event_service/0…9`, or power-cycle the camera.
 
@@ -801,7 +875,7 @@ it stands:
 
 ```bash
 # on the Pi, once: rows from before adapterId get adapter-01 (rematch_cameras, every 5 min)
-echo ADOPT_UNSTAMPED_ROWS=yes | sudo tee -a /etc/adapter/adapter.env
+echo ADOPT_UNSTAMPED_ROWS=yes | sudo tee -a /etc/adapter/adapter.env   # no since 10.2f (The narrowed role)
 systemctl --user restart onvif-admin              # the admin GUI writes adapterId at registration
 bash cloud/provision.sh tenancy                   # TENANCY=report, the new pool beside the old
 bash cloud/deploy.sh lambdas                      # the check: logs, refuses nothing
@@ -1034,72 +1108,72 @@ the timers (rematch, schedules, thumbnails) and the producers' scripts take it a
 
 ### The narrowed role
 
-`DEALER-PANEL-PLAN.md` Phase 10.2f: the device role reduced to each adapter's own resources. It waits
-until VMS's card runs on copies of its own (D14) — today it shares the role — but one part goes now.
+**Applied 2026-11-15** (`DEALER-PANEL-PLAN.md` Phase 10.2f, once VMS ran on copies of its own, D14):
+`KVSAdapterRole` reaches only each adapter's own resources — its streams by tag, its rows by the
+`adapterId-index`, its camera secrets in SSM, its registry route, its uploads under its Thing, its
+event topic — and `adapter-01`'s two older certificates are retired. Nothing to run for it any more;
+what is here is for checking it, for a new adapter, and for undoing it.
 
-**Now** — the agent reads the web page's camera requests through the registry route, and the older keys
-go. In this order: the route first, the agent after it (an agent restarted earlier can't read a request):
-
-```bash
-bash cloud/provision.sh registry                  # adds vsz-registry-role's camera-requests policy
-bash cloud/deploy.sh lambda vsz-registry          # the request route; clip keys only under the Thing
-bash cloud/deploy.sh lambda list-cameras          # thumbnails only under the camera's adapter
-bash cloud/deploy.sh lambda vsz-directory-api
-systemctl --user restart kvs-agent
-# the thumbnails' older keys, no longer read (look, then delete):
-aws s3 rm s3://vms-demo-evidence-596633517506/thumbs/ --recursive --exclude "*" --include "cam*.jpg" --dryrun
-aws s3 rm s3://vms-demo-evidence-596633517506/thumbs/ --recursive --exclude "*" --include "cam*.jpg"
-```
-
-**Later, once VMS runs on its own copies:**
+**Check it, on a Pi** — every line PASS (the index's comparison with the table says SKIP: the role no
+longer scans):
 
 ```bash
-bash cloud/provision.sh narrow --dry-run          # PASS/FAIL per condition; changes nothing (any time)
-bash cloud/provision.sh narrow --vms-moved        # only with every condition met: saves the live
-                                                  # policies, puts the narrowed ones, drops the wide,
-                                                  # sets vsz-registry's ROW_SECRETS=drop
-# on each adapter's Pi:
-sudo sed -i 's/^ADOPT_UNSTAMPED_ROWS=yes/ADOPT_UNSTAMPED_ROWS=no/' /etc/adapter/adapter.env   # its scan is refused now
-systemctl --user restart kvs-agent onvif-admin kvs-event-watcher kvs-outage-buffer kvs-outage-uploader
-venv-adapter/bin/python3 adapter/device_access.py check   # what it needs allowed, the wide access gone
-venv-adapter/bin/python3 adapter/camera_secrets.py strip  # the rows rid of their secrets (SSM checked first)
-venv-adapter/bin/python3 adapter/camera_secrets.py check
+venv-adapter/bin/python3 adapter/device_access.py check   # what it needs allowed, the wide access refused
+venv-adapter/bin/python3 adapter/camera_secrets.py check  # each camera's secrets in SSM only
 ```
 
-Then `adapter-01`'s older certificates go — one of them is in the VMS card's `certs/adapter-01/` — run on
-`adapter-01`'s Pi, which keeps the one it presents:
+**A new adapter's Pi** needs nothing extra: `ADOPT_UNSTAMPED_ROWS=no` (the template's value) and its
+identity from `cloud/adapter-identity.sh`. Its cameras' secrets go to SSM as they are registered.
+
+**Undo it** — puts back the role and `vsz-registry`'s `ROW_SECRETS` as they were saved before the change.
+The camera rows stay without their secrets (they are in SSM, and readers take them from there either way):
 
 ```bash
-bash cloud/adapter-identity.sh retire-others --dry-run   # which it would retire, which it keeps
-bash cloud/adapter-identity.sh retire-others             # deactivated, detached from the Thing and its policy
+ls ~/.local/state/videosafezone/kvs-adapter-role-*.json  # the saved copy: 20261115T213425
+bash cloud/provision.sh narrow-rollback ~/.local/state/videosafezone/kvs-adapter-role-20261115T213425.json --dry-run
 ```
 
-`provision.sh narrow-rollback ~/.local/state/videosafezone/kvs-adapter-role-<time>.json` puts back the role
-and `ROW_SECRETS` as they were. Afterwards remove the dropped policies' files from `cloud/iam/`
-(`kvs-producer-policy.json`, `outage-backfill-policy.json`, `thumbnails-policy.json`,
-`kvs-adapter-camera-requests-policy.json`), so the folder is what is deployed (FoundAndFixed.md #41).
+How it was applied, for the record: the request route and the older keys first (`provision.sh registry`,
+three Lambda deploys, the agent restarted, the older thumbnails deleted); then `provision.sh narrow
+--vms-moved`, `adapter-identity.sh retire-others`, and on the Pi `ADOPT_UNSTAMPED_ROWS=no`, the five
+long-running units restarted, `device_access.py check`, `camera_secrets.py strip`, `camera_secrets.py check`.
 
 ### The web panel needs Node
 
-The web panel (`client-app/`, `WEB-PANEL-PLAN.md`) is built with Node 24 LTS, which only the
-machine that builds and deploys it needs — nothing on the adapter runs it, so `setup/` doesn't
-install it. Into `~/.local`, no sudo, checksum-verified:
+Only the machine that **builds and deploys the web panel** (`client-app/`, `WEB-PANEL-PLAN.md`) needs
+Node, version 24 or later — for `deploy.sh page` / `app` and the panel's own tests. Nothing on the
+adapter runs it, so `setup/` doesn't install it.
+
+**1. Check whether it is there already:**
+
+```bash
+node --version             # v24.x (this Pi: v24.22.2) -- nothing to install, go on to step 3
+```
+
+**2. Only if that printed nothing, or a version below 24** — Node 24 into `~/.local`, no sudo, checked
+against nodejs.org's checksums:
 
 ```bash
 V=v24.22.2; F=node-$V-linux-arm64.tar.xz; T=$(mktemp -d); cd "$T"
 curl -fsSO https://nodejs.org/dist/$V/$F && curl -fsSO https://nodejs.org/dist/$V/SHASUMS256.txt
 grep " $F\$" SHASUMS256.txt | sha256sum -c - && mkdir -p ~/.local/lib/nodejs ~/.local/bin && tar -xJf $F -C ~/.local/lib/nodejs
-for b in node npm npx; do ln -sfn ~/.local/lib/nodejs/node-$V-linux-arm64/bin/$b ~/.local/bin/$b; done; cd -
+for b in node npm npx; do ln -sfn ~/.local/lib/nodejs/node-$V-linux-arm64/bin/$b ~/.local/bin/$b; done; cd - >/dev/null; rm -rf "$T"
+hash -r; node --version    # v24.22.2
 ```
 
-`deploy.sh page` and `deploy.sh app` then build a fresh copy from `client-app/package-lock.json`
-in a temporary directory. `page` publishes it at the site's root,
-`https://dugyd3kkt36pw.cloudfront.net/`; `app` publishes the same build at `/app/index.html`, a
-preview to look at before `page`. The first `page` deploy was the cutover from the old
-single-file page (`client/index.html`, 2026-11-01, WEB-PANEL-PLAN.md Phase 3): the script recognised
-a committed version of that page at the root and replaced it, after backing it up;
-`rollback page` would still bring it back from that backup. Day-to-day commands are in
-`client-app/README.md`.
+If `node` is still "not found", `~/.local/bin` isn't on this shell's `PATH`: `~/.profile` adds it only
+if the folder existed at login, so open a new login shell, or `export PATH="$HOME/.local/bin:$PATH"`.
+
+**3. Deploy:**
+
+```bash
+bash cloud/deploy.sh app   # optional: the same build at /app/index.html, to look at first
+bash cloud/deploy.sh page  # the site's root, https://dugyd3kkt36pw.cloudfront.net/
+```
+
+Each builds a fresh copy from `client-app/package-lock.json` in a temporary directory — no `npm install`
+in `client-app/` first. Running the panel locally and its tests: `client-app/README.md`. (The first
+`page` deploy, 2026-11-01, replaced the old single-file page; `rollback page` still brings that back.)
 
 ### The sequence for a change that spans Pi and cloud
 
@@ -1120,11 +1194,10 @@ a committed version of that page at the root and replaced it, after backing it u
 
 - **The account is shared with VMS** (github.com/vizdr/VMS). This repository deploys the
   unprefixed functions, `kvs-demo-api`, the page's bucket and distribution; VMS deploys only
-  `pir-*` copies, and `deploy.sh` refuses any `pir-*` name. Live code that equals neither this
-  tree nor HEAD was put there by someone else, and isn't overwritten without `--force`: look at
-  it first (FoundAndFixed.md #48).
-- **`clip-to-s3` is VMS's too:** its event shape and its clip rows must stay backward
-  compatible. The script warns whenever it deploys it.
+  `pir-*` copies, and `deploy.sh` refuses any `pir-*` name. Since 2026-11-15 VMS runs on copies
+  of its own, its own `pir-clip-to-s3` included (D14), so nothing this script deploys is VMS's.
+  Live code that equals neither this tree nor HEAD was put there by someone else, and isn't
+  overwritten without `--force`: look at it first (FoundAndFixed.md #48).
 - **A backup before every overwrite:** the live copy goes to
   `~/.local/state/vms-deploy-backups/<UTC time>/` first, which is what `rollback` uses.
 - **One file per function,** zipped fresh in a temporary directory. The zips are build output
@@ -1166,8 +1239,10 @@ aws apigateway test-invoke-method --rest-api-id "$API" --resource-id "$RID" --ht
   --query '[status, body]' --output text | head -c 300
 ```
 
-It hands the query string to the Lambda undecoded, unlike a real request: pass a value that
-holds a `+` decoded.
+The answer is `200` and `{"cameras": []}`: the call carries no sign-in, and the tenant check shows a
+caller without one no camera. That proves the route, the function and its read of the table work; the
+list itself needs a signed-in call (the page). It hands the query string to the Lambda undecoded,
+unlike a real request: pass a value that holds a `+` decoded.
 
 ### By hand, if the script can't be used
 
@@ -1184,17 +1259,27 @@ curl -fsS https://dugyd3kkt36pw.cloudfront.net/index.html | cmp - client-app/dis
 ```
 
 Before overwriting by hand, look at what is live (`bash cloud/deploy.sh status`, or
-`aws lambda get-function --function-name <fn> --query Code.Location` for a download link).
+`aws lambda get-function --function-name <fn> --query Code.Location` for a download link). A page
+uploaded by hand has no matching `version.json`, so the next `deploy.sh page` refuses it until `--force`;
+a function deployed by hand from a commit is "HEAD" or "this tree" to the script as usual.
 
 ### New functions, routes and permissions
 
-`deploy.sh` only updates existing functions. A new function, its role, its API route and
-authorizer, or a widened permission is created once with the commands in the guide (§8, §9).
-Its policy document goes into `cloud/iam/`, exported back from AWS in the same change
+`deploy.sh` only updates existing functions. A new feature's function, role, table, API route or
+permission is created once by a step of `cloud/provision.sh` — one per feature, each with
+`--dry-run`, listed at the top of the script and in `CLAUDE.md`; add a step there rather than typing
+the commands (the guide's §8–§9 show the original hand commands). Policy documents live in
+`cloud/iam/` and go up from there; a policy changed in AWS by hand is exported back in the same change
 (`aws iam get-role-policy … --query PolicyDocument`), so the files match what is deployed
 (FoundAndFixed.md #41).
 
 ## Known traps not obvious from a cold read
+
+- **`AccessDeniedException` with the Pi's own credentials** on `cameras`, `clips`, `camera-requests`, an
+  untagged stream, or a key outside `thumbs/<thing>/` / `clips/<camera>/<thing>/` — expected since the
+  device role was narrowed (The narrowed role, above): a Pi reads its rows through
+  `adapter/registry_reads.py`, writes through `adapter/registry_client.py`, and reaches only streams
+  tagged with its Thing. `adapter/device_access.py check` shows what it may do.
 
 - **`kvssink: no element "kvssink"`** — you're in a shell that never sourced `.bashrc`
   (any systemd unit, most non-interactive contexts). Export `GST_PLUGIN_PATH`/

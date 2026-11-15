@@ -87,16 +87,28 @@ def test_a_write_without_secrets_asks_ssm_nothing(registry):
     assert table.session.ssm.calls == []
 
 
-def test_a_refused_ssm_write_never_fails_the_registry_write_and_prints_no_secret(registry, monkeypatch, capsys):
+def test_ff97_a_refused_ssm_write_fails_the_update_and_changes_nothing(registry, monkeypatch, capsys):
+    # Since the narrowing the row keeps no copy (ROW_SECRETS=drop): a secret SSM didn't take would be lost,
+    # so the update fails before the row is touched -- every caller handles a RegistryError already.
     table = registry([CAM03])
 
     def refused(**kw):
         raise camera_secrets_error("AccessDeniedException")
     monkeypatch.setattr(table.session.ssm, "put_parameter", refused)
-    registry_client.update("cam-03", set={"onvifPassword": "new-" + PW})
-    assert table.row("cam-03")["onvifPassword"] == "new-" + PW           # the row has it; the mirror copies it later
-    out = capsys.readouterr().out
-    assert "onvifPassword not written to SSM (AccessDeniedException)" in out and PW not in out
+    with pytest.raises(registry_client.RegistryError) as e:
+        registry_client.update("cam-03", set={"onvifPassword": "new-" + PW, "updatedAt": "t"})
+    assert e.value.status is None and "onvifPassword not written to SSM (AccessDeniedException)" in e.value.message
+    assert table.route.calls == [] and table.row("cam-03") == CAM03             # the row untouched
+    assert PW not in str(e.value) and PW not in capsys.readouterr().out
+
+
+def test_ff97_a_row_write_the_route_refuses_puts_ssm_back(registry):
+    table = registry([CAM03])
+    camera_secrets.write("cam-03", {"onvifPassword": PW, "rtspUrl": MAIN})            # no liveRtspUrl
+    with pytest.raises(registry_client.ConditionFailed):
+        registry_client.update("cam-03", set={"rtspUrl": MAIN + "?moved", "liveRtspUrl": SUB},
+                               expect={"onvifHost": "192.0.2.99"})                     # the address moved meanwhile
+    assert stored(table.session.ssm, "cam-03") == {"onvifPassword": PW, "rtspUrl": MAIN}
 
 
 def camera_secrets_error(code):

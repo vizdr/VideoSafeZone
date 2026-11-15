@@ -438,8 +438,8 @@ claim (the next free one past every adapter's), adoption, clip rows — never a 
 on the Pi uses `update()` / `claim()` / `adopt()` / `add_clip()`, never `update_item`/`put_item`; tests
 reach the real function through the `registry` fixture (`table.route`). **Every read is of the Pi's own
 rows** (Phase 10.2c): `adapter/registry_reads.py` — `own_rows(fields)` / `own_row(id)`, a query on the
-`adapterId-index`, which IAM limits to the caller's Thing (the adopting Pi also scans for unstamped rows
-until 10.2f) — never `scan`/`get_item`; it always reads the fields `acts_on` needs (FoundAndFixed.md #96).
+`adapterId-index`, which IAM limits to the caller's Thing (since the narrowing of 2026-11-15 a scan or a
+read by key is refused, `ADOPT_UNSTAMPED_ROWS=no` everywhere) — never `scan`/`get_item`; it always reads the fields `acts_on` needs (FoundAndFixed.md #96).
 What needs every adapter's rows is the route's: the next free ID (`claim()`), and which discovered devices
 are another adapter's cameras (`elsewhere()`, yes or no only); so is a web-page camera request for this
 adapter (`camera_request()`, Phase 10.2f).
@@ -454,14 +454,13 @@ blocks VMS's card too (FoundAndFixed.md #65).
 **Camera secrets** — `onvifPassword`, `rtspUrl`, `liveRtspUrl` (the URIs carry the camera's login) — are
 also SSM `SecureString`s, one per field, at `/vsz/adapters/<this Thing>/cameras/<cameraId>/<field>`, which
 IAM lets only that Thing read and write (`adapter/camera_secrets.py`, `DEALER-PANEL-PLAN.md` Phase 10.2d).
-Values are JSON (an empty password is kept). Until the role is narrowed (10.2f) the row holds them too
-and stays what readers use — VMS's card may change a row, and an SSM copy taken for the truth would
-shadow it — so `registry_client.update()` writes a secret field to SSM after the row, rematch mirrors
-each row into SSM (once a day per camera, or when its row changes), and `registry_reads` fills a row
-from SSM only when the row holds none (`own_rows(secrets=False)` reads the table as it is). At 10.2f
-`provision.sh narrow` sets `vsz-registry`'s `ROW_SECRETS=drop` and `camera_secrets.py strip` empties the
-rows; `adapter/device_access.py check` then tries the narrowed role on the Pi. Never print a secret's
-value: field names only. **S3 keys** the Pi writes are under its Thing (Phase 10.2e):
+Values are JSON (an empty password is kept). **Since the narrowing (2026-11-15, Phase 10.2f) SSM is the
+only copy**: `vsz-registry`'s `ROW_SECRETS=drop` keeps every secret out of the rows, and `registry_reads`
+fills a row from SSM (`own_rows(secrets=False)` reads the table as it is). `registry_client.update()`
+writes a secret field to SSM *before* the row, and an SSM failure fails the update with nothing changed
+(FoundAndFixed.md #97); a refused row write puts SSM back. Rematch's mirror copies a row that still holds
+secrets, which none does now. `adapter/device_access.py check` tries the narrowed role on the Pi. Never
+print a secret's value: field names only. **S3 keys** the Pi writes are under its Thing (Phase 10.2e):
 thumbnails `thumbs/<thing>/<cameraId>.jpg`, outage clips `clips/<cameraId>/<thing>/…` — the camera stays
 second, where every clip reader takes it from (`clips/<cameraId>/…`).
 
@@ -475,8 +474,10 @@ credentials-endpoint call for arbitrary boto3 use — `agent.py` and
 `adapter/onvif-admin/app.py` both call it (fresh per request; the underlying token has a
 3600s TTL, so caching a session at process start would silently break a long-running
 daemon after an hour). This is why the role's IAM policy, not a second credential, is
-what's widened whenever the adapter needs a new AWS permission (e.g. `CreateStream`,
-DynamoDB access on `cameras`) — see `cloud/iam/kvs-producer-policy.json`. The files in
+what's widened whenever the adapter needs a new AWS permission. Since 2026-11-15 the role is
+narrowed (`DEALER-PANEL-PLAN.md` Phase 10.2f, `provision.sh narrow`): six policies, each scoped by
+`${credentials-iot:ThingName}` — `cloud/iam/kvs-adapter-{streams,uploads,events,own-rows,registry-route,camera-secrets}-policy.json` —
+so a widening is scoped the same way, never a wildcard over every adapter's resources. The files in
 `cloud/iam/` must match what is deployed: when you change a policy in AWS, export it back
 (`aws iam get-role-policy … --query PolicyDocument`) in the same change
 (FoundAndFixed.md #41).

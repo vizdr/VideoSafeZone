@@ -21,7 +21,7 @@ advice (guide §15 "Known traps").
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
 found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
-planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07); #92 deploying Phase 7 (2026-11-08); #93 on the cloud page after it (2026-11-08); #94 trying Phase 7's addition (2026-11-08); #95 by the D13 spike's first run (2026-11-15); #96 writing Phase 10.2c's tests (2026-11-15).
+planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07); #92 deploying Phase 7 (2026-11-08); #93 on the cloud page after it (2026-11-08); #94 trying Phase 7's addition (2026-11-08); #95 by the D13 spike's first run (2026-11-15); #96 writing Phase 10.2c's tests (2026-11-15); #97 writing the docs after the narrowing (2026-11-15); #98 reviewing LAUNCH.md for a fresh card (2026-11-15).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -121,6 +121,8 @@ planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-
 | 94 | The web page's scan offered a camera in use as new — it announced a new WS-Discovery identity — and adding it made a second camera | agent / registry | 2026-11-08 | fixed 2026-11-08, the agent restarted and the page deployed to apply it; the duplicate removed |
 | 95 | The D13 spike's first run: a role alias just made was unknown to the credentials endpoint (404), and the tool misread kvssink's log and iot-data's refusal | cloud tooling | 2026-11-15 | fixed 2026-11-15 |
 | 96 | Readers moved to the adapter index read rows without `adapterId`: every row looked unstamped, so any adapter but the adopting one would have seen none of its cameras | registry | 2026-11-15 | fixed 2026-11-15, before it reached a Pi that doesn't adopt |
+| 97 | After the narrowing, a camera secret SSM refused would have been lost silently: the registry write went through, the route kept the secret out of the row, and the failure was only logged | registry / secrets | 2026-11-15 | fixed 2026-11-15, before any secret was written after the narrowing |
+| 98 | After the narrowing, `setup-launch.sh` would have told a fresh card "every registered camera already has its producer" while it couldn't read the registry at all | setup | 2026-11-15 | fixed 2026-11-15, before a fresh card ran it |
 
 ### What they have in common
 
@@ -1855,3 +1857,54 @@ dropped) — broken on purpose both ways.
 
 **The rule:** a read that narrows the fields must keep every field its callers decide by; a check that
 passes on the adopting adapter proves nothing about the others — try a reader on a Pi that doesn't adopt.
+
+### #97 — After the narrowing, a camera secret SSM refused would have been lost silently
+
+**Found:** 2026-11-15, writing the docs after `provision.sh narrow` and `camera_secrets.py strip`
+(`DEALER-PANEL-PLAN.md` Phase 10.2f). **Referenced from:** `adapter/registry_client.py`.
+
+`registry_client.update()` wrote the registry row through the route, then the camera secrets among
+the fields to SSM (`camera_secrets.keep_beside`), and an SSM failure was logged and swallowed. That
+was right in 10.2d: the row held the secrets too, and rematch's mirror copied any SSM had missed within
+minutes. Since the narrowing the route keeps every secret out of the rows (`ROW_SECRETS=drop`) and the
+mirror has no row to copy from: a registration's password, or the address rematch writes when a camera
+moves, that SSM refused or couldn't take would have gone nowhere — the update reporting success, the
+camera unreachable until registered again. Nothing was written between the narrowing (21:34) and the
+fix, so nothing was lost.
+
+**Fix:** SSM first, then the row: `update()` reads the fields' current SSM values, writes the new ones,
+and only then calls the route. An SSM failure is a `RegistryError` (no status) with nothing changed, which
+every caller already handles as a failed registry write; a row write the route refuses puts SSM back as
+it was (`camera_secrets.restore`). `test_ff97_a_refused_ssm_write_fails_the_update_and_changes_nothing`
+and `test_ff97_a_row_write_the_route_refuses_puts_ssm_back` (`tests/adapter/test_camera_secrets.py`)
+fail without it — each broken on purpose once.
+
+**The rule:** a write whose only copy is the store it writes to can't treat that store's failure as a
+warning. When a step removes a fallback (here: the copy in the row), look again at every failure the
+fallback used to absorb.
+
+### #98 — After the narrowing, `setup-launch.sh` would have reported "every registered camera already has its producer" without reading the registry
+
+**Found:** 2026-11-15, reviewing `LAUNCH.md` Part A for a freshly flashed card, after the device role was
+narrowed (`DEALER-PANEL-PLAN.md` Phase 10.2f). **Referenced from:** `setup/setup-launch.sh`.
+
+Step 2 of `setup-launch.sh` gives every camera that is in the registry but has no producer on this Pi
+its `kvs-cam@` instance. It found them with a `Scan` of the whole `cameras` table, made with the Pi's
+own credentials — the one reader on the Pi that 10.2c's move to the `adapterId-index` had missed,
+because it is a heredoc in a shell script rather than a module. The narrowed role refuses that scan.
+Worse, the Python's traceback went to stderr and its empty output was read as an empty list, so the
+step printed `ok every registered camera already has its producer`: a fresh card would have come up
+with its ONVIF cameras' Start buttons doing nothing (#37's symptom), after a launch that said all was
+well. No fresh card ran it in between.
+
+**Fix:** the step reads this adapter's rows through `registry_reads.own_rows` (the index, its own Thing
+only) and keeps the cameras `camera_control.acts_on` keeps — not another adapter's, not a released or
+unregistered one; a read that fails is a `FAIL` in the script's verdict, never the all-done line.
+`test_ff98_the_cameras_needing_a_producer_come_from_this_adapters_rows_by_the_index` runs the script's own
+Python on the test registry with scans forbidden, and
+`test_ff98_a_registry_read_that_fails_is_a_failure_not_all_done` checks the failure path
+(`tests/adapter/test_setup_launch.py`); both fail on the old scan.
+
+**The rule:** when the way to read something changes, look for its readers in every language the
+project has — shell heredocs included, not only `import`s; and an empty answer from a command that
+failed is not "nothing to do": check the exit status before reading the output.

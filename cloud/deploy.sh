@@ -57,7 +57,6 @@ BUCKET=vms-demo-client-596633517506
 SITE=https://dugyd3kkt36pw.cloudfront.net
 LAMBDA_DIR="$VMS_HOME/cloud/lambda"
 BACKUPS="${XDG_STATE_HOME:-$HOME/.local/state}/vms-deploy-backups"
-SHARED_WITH_VMS=(clip-to-s3)
 API_NAME=kvs-demo-api
 STAGE=prod
 AUTHORIZER_NAME=CognitoAuthorizer
@@ -184,9 +183,7 @@ deploy_lambda() {
     same) say "$name: already live, unchanged -- skipped"; return 0 ;;
     OTHER) [ "$FORCE" -eq 1 ] || die "$name: live code is neither this tree nor HEAD -- someone else deployed it. Look first (bash cloud/deploy.sh status); --force overrides." ;;
   esac
-  for s in "${SHARED_WITH_VMS[@]}"; do
-    [ "$name" != "$s" ] || warn "$name is also used by VMS: its event shape and clip rows must stay backward compatible"
-  done
+  # VMS used clip-to-s3 until it ran on copies of its own (2026-11-15, D14): no function here is VMS's.
   # The tenant check enforces when TENANCY is unset: never deploy it to a function that has no
   # setting yet, or the page loses every camera at once (DEALER-PANEL-PLAN.md 3.3).
   if grep -q '^def tenancy_refusal' "$py"; then

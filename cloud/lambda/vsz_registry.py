@@ -153,8 +153,8 @@ def update(thing, camera, body):
         raise Refused(500, "ROW_SECRETS must be keep or drop")
     if ROW_SECRETS == "drop":
         # The rows hold no camera secrets any more and never get them back: the Pi keeps them in SSM
-        # (camera_secrets.keep_beside), so here a secret field is left out -- and every write takes away
-        # whatever secrets a row still holds (camera_secrets.py strip relies on that).
+        # (registry_client.update writes them there first), so here a secret field is left out -- and
+        # every write takes away whatever secrets a row still holds (camera_secrets.py strip relies on that).
         if {*expect, *exists, *missing} & {*SECRET_FIELDS}:
             raise Refused(400, "no condition on a camera secret: the rows hold none")
         sets = {k: v for k, v in sets.items() if k not in SECRET_FIELDS}

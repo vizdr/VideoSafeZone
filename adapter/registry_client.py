@@ -98,14 +98,28 @@ def _answer(status, out):
 def update(camera_id, set=None, remove=None, expect=None, exists=None, missing=None, session=None):
     """Fields of one of this adapter's rows: `set` {field: value}, `remove` [field], under the conditions
     `expect` {field: value}, `exists` [field] and `missing` [field]. Field by field, as the data contract
-    asks; never whose the row is. A camera secret among them (the ONVIF password, the RTSP URIs) is then
-    written to SSM as well (camera_secrets.keep_beside, Phase 10.2d) -- every writer on the Pi comes here."""
+    asks; never whose the row is. A camera secret among them (the ONVIF password, the RTSP URIs) goes to
+    SSM (camera_secrets, Phase 10.2d) -- every writer on the Pi comes here. SSM first, and a failure there
+    is a RegistryError with nothing changed: since the narrowing (10.2f) the row keeps no copy, so a
+    secret SSM didn't take would be lost (FoundAndFixed.md #97). A row write the route refuses puts SSM
+    back as it was."""
+    import camera_secrets
     body = {k: v for k, v in (("set", set), ("remove", remove), ("expect", expect), ("exists", exists),
                               ("missing", missing)) if v}
-    out = _answer(*call("POST", f"cameras/{camera_id}", body, session=session))
-    import camera_secrets
-    camera_secrets.keep_beside(camera_id, set, remove, session=session)
-    return out
+    fields, before = camera_secrets.secret_fields(set, remove), None
+    if fields:
+        try:
+            before = camera_secrets.read(camera_id, session)
+            camera_secrets.write(camera_id, set, remove, session)
+        except Exception as e:  # noqa: BLE001 -- SSM refused or unreachable: the whole update fails
+            code = getattr(e, "response", {}).get("Error", {}).get("Code") or type(e).__name__
+            raise RegistryError(None, f"{', '.join(fields)} not written to SSM ({code}) -- nothing changed") from e
+    try:
+        return _answer(*call("POST", f"cameras/{camera_id}", body, session=session))
+    except RegistryError:
+        if fields:
+            camera_secrets.restore(camera_id, before, fields, session)
+        raise
 
 
 def claim(camera_id=None, session=None):

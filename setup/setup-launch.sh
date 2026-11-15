@@ -37,24 +37,29 @@ systemctl --user enable --now kvs-thumbnails.timer >/dev/null 2>&1
 ok "$(for u in "${USER_UNITS[@]}"; do printf '%s=%s ' "$u" "$(systemctl --user is-active "$u")"; done)"
 
 step "2. producers for cameras registered elsewhere (provisioned, not started)"
-# The registry, read through the adapter's own identity: every passthrough camera except the
-# two with dedicated units, unless unregistered. A missing channel file means no producer here.
-mapfile -t TODO < <(env -u VMS_HOME SETUP_VMS_HOME="$VMS_HOME" "$VENV/bin/python3" - <<'PY'
+# This adapter's rows, read through its own identity by the adapterId-index -- the only read of the
+# table its narrowed role allows (DEALER-PANEL-PLAN.md Phase 10.2c, f): every passthrough camera it
+# acts on, except the two with dedicated units. A missing channel file means no producer here. A read
+# that fails is a failure, never "every camera has its producer" (FoundAndFixed.md #98).
+TODO=()
+if TODO_OUT=$(env -u VMS_HOME SETUP_VMS_HOME="$VMS_HOME" "$VENV/bin/python3" - <<'PY'
 import os, sys
 sys.path.insert(0, os.path.join(os.environ["SETUP_VMS_HOME"], "adapter"))
 import camera_control
-from aws_device_creds import get_session
-for row in get_session().resource("dynamodb").Table("cameras").scan()["Items"]:
+import registry_reads
+for row in registry_reads.own_rows(["mode"], secrets=False):
     cid = row["cameraId"]
-    if row.get("mode") != "passthrough" or cid in ("cam-01", "cam-02") or camera_control.is_unregistered(row):
+    if row.get("mode") != "passthrough" or cid in ("cam-01", "cam-02") or not camera_control.acts_on(row):
         continue
     path = camera_control.mediamtx_path_name(cid)
     if not os.path.exists(os.path.join(camera_control.CHANNELS_DIR, f"{path}.env")):
         print(cid, path)
 PY
-)
-if [ "${#TODO[@]}" -eq 0 ]; then
-  ok "every registered camera already has its producer"
+); then
+  [ -z "$TODO_OUT" ] || mapfile -t TODO <<<"$TODO_OUT"
+  [ "${#TODO[@]}" -gt 0 ] || ok "every registered camera already has its producer"
+else
+  proof "this adapter's cameras read from the registry (AWS reachable? its identity, A7?)" false
 fi
 for line in "${TODO[@]}"; do
   set -- $line

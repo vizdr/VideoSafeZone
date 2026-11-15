@@ -10,7 +10,8 @@ empty value. The default key (aws/ssm) encrypts them; the role needs no KMS gran
 Until the role is narrowed (10.2f) the row keeps the secrets as well, and stays what readers use: VMS's
 card shares the table and may change a row, and an SSM copy taken for the truth would then shadow the
 newer row. So:
-  - registry_client.update() writes a secret field to SSM after it is in the row (keep_beside);
+  - registry_client.update() writes a secret field to SSM before the row, and a failure fails the update
+    (since the narrowing SSM is the only copy: FoundAndFixed.md #97); a refused row write puts SSM back;
   - rematch mirrors every row that holds secrets into SSM (mirror) -- the older cameras' backfill, and a
     change VMS's card made -- asking SSM again for each camera once a day, or when its row changes;
   - registry_reads fills a row that holds no secrets from SSM (fill): none yet, every one after 10.2f.
@@ -79,18 +80,18 @@ def write(camera_id, set=None, remove=None, session=None):
                     raise
 
 
-def keep_beside(camera_id, set=None, remove=None, session=None):
-    """registry_client.update's follow-up: the secret fields it just wrote to the row, in SSM too. Never
-    fails the write it follows -- until 10.2f the row holds them, and rematch's mirror makes up for a
-    refusal or an outage within minutes; the failure is logged (field names only)."""
-    fields = sorted({*(set or {}), *(remove or [])} & {*FIELDS})
-    if not fields:
-        return
+def secret_fields(set=None, remove=None):
+    """The camera secrets among a registry write's fields, sorted."""
+    return sorted({*(set or {}), *(remove or [])} & {*FIELDS})
+
+
+def restore(camera_id, before, fields, session=None, log=print):
+    """SSM's `fields` put back as `before` had them (a field it didn't have, deleted) -- after the registry
+    write they went with was refused. Best effort: a failure is logged, by field name."""
     try:
-        write(camera_id, set, remove, session)
-    except Exception as e:  # noqa: BLE001 -- SSM refused or unreachable: the mirror copies it later
-        print(f"camera_secrets: {camera_id}: {', '.join(fields)} not written to SSM "
-              f"({_code(e) or type(e).__name__}) -- rematch's mirror copies it from the row", flush=True)
+        write(camera_id, {f: before[f] for f in fields if f in before}, [f for f in fields if f not in before], session)
+    except Exception as e:  # noqa: BLE001 -- the refusal is what the caller hears; this is logged beside it
+        log(f"camera_secrets: {camera_id}: {', '.join(fields)} not put back in SSM ({_code(e) or type(e).__name__})")
 
 
 def fill(row, session=None):
