@@ -23,8 +23,24 @@ source "$(dirname "$(readlink -f "$0")")/lib.sh"
 [ -s "$VMS_HOME/certs/adapter.private.key" ] || die "no device identity -- run setup-identity.sh first"
 [ -x "$VENV/bin/python3" ] || die "no venv -- run setup-user.sh first"
 
-USER_UNITS=(kvs-camera-init kvs-mediamtx kvs-camera-publish kvs-agent onvif-admin
-            kvs-event-watcher kvs-outage-buffer kvs-outage-uploader netwatch)
+USER_UNITS=(kvs-mediamtx kvs-agent onvif-admin kvs-event-watcher kvs-outage-buffer kvs-outage-uploader netwatch)
+# The USB camera's capture runs only on an adapter whose registry has a USB camera (mode transcode) --
+# today adapter-01's cam-01: a USB camera on another adapter has no ID scheme yet (DEALER-PANEL-PLAN.md
+# A6), and its units would only fail (FoundAndFixed.md #99). Read through the index, its own rows only;
+# a registry that can't be read keeps them, so the first Pi never loses its camera.
+USB_UNITS=(kvs-camera-init kvs-camera-publish)
+HAS_USB=$(env -u VMS_HOME SETUP_VMS_HOME="$VMS_HOME" "$VENV/bin/python3" - 2>/dev/null <<'PY' || echo unknown
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["SETUP_VMS_HOME"], "adapter"))
+import registry_reads
+print("yes" if any(r.get("mode") == "transcode" for r in registry_reads.own_rows(["mode"], secrets=False)) else "no")
+PY
+)
+if [ "$HAS_USB" = no ]; then
+  note "no USB camera in this adapter's registry: kvs-camera-init and kvs-camera-publish stay off (A6)"
+else
+  USER_UNITS=("${USB_UNITS[@]}" "${USER_UNITS[@]}")
+fi
 
 step "1. user units: enable (start at every boot) and start now"
 systemctl --user daemon-reload
@@ -94,7 +110,9 @@ PY
 ok "video flowing: ${FLOW%%|*}"
 [ -z "$(echo "${FLOW#*|}" | tr -d ' ')" ] || warn "no video yet from:${FLOW#*|} (camera off, or still connecting -- re-run this script)"
 for u in "${USER_UNITS[@]}"; do proof "$u active" systemctl --user is-active --quiet "$u"; done
-proof "cam01 video reaches MediaMTX (bytesReceived grows, #50)" bash -c "grep -qw cam01 <<<'${FLOW%%|*}'"
+if [ "$HAS_USB" != no ]; then
+  proof "cam01 video reaches MediaMTX (bytesReceived grows, #50)" bash -c "grep -qw cam01 <<<'${FLOW%%|*}'"
+fi
 proof "agent online with AWS IoT"            env SETUP_VMS_HOME="$VMS_HOME" "$VENV/bin/python3" -c "
 import os, sys; sys.path.insert(0, os.path.join(os.environ['SETUP_VMS_HOME'], 'adapter')); import aws_state
 s = aws_state.read_state(); assert s.get('online') and not s.get('stale')"

@@ -2,7 +2,9 @@
 
 Companion to `Demo-AWS-Video-revCosts4.md` (the narrative build guide). This file is the
 short version: what to run to actually get the system up, after everything in the guide
-has already been built once. A fresh SD card is `setup/setup-all.sh` (Part A); deploying the
+has already been built once. **Bringing up the whole system** — the cloud, the first people, the
+first adapters — is `LAUNCH-SYSTEM.md`; **a new adapter's Pi**, ready for its Cloud ID, is
+`LAUNCH-ADAPTER.md`. Both point back here for the details. A fresh SD card is `setup/setup-all.sh` (Part A); deploying the
 cloud side is `cloud/deploy.sh` (Part H). If something here doesn't work, the guide explains why it
 is built this way (search it for the section number), and `FoundAndFixed.md` has every
 bug found so far, cited here as `#N`.
@@ -36,7 +38,7 @@ why, and keeps the A1–A10 numbers that other documents cite.
 - **AWS:** this account's resources exist already (A7). A sign-in to the AWS console is needed only
   for `aws login`: the first certificate on an account, deploys (Part H), and the cloud checks.
 - **This card is `adapter-01`** (a replacement for the first Pi's card) unless you are setting up
-  another adapter: then see "A new adapter, not adapter-01" below first.
+  another adapter: then follow `LAUNCH-ADAPTER.md` instead, which takes the steps below in its order.
 
 ### Setting up a freshly flashed card, step by step
 
@@ -65,7 +67,10 @@ It runs the five scripts in the table below in order and stops at the first fail
 proof failed; every script is safe to run again, and a re-run carries on where it stopped. An
 optional `sudo apt full-upgrade` is best done *before* this: a newer GStreamer makes the SDK cache
 miss and the SDK rebuild (1.5–2.5 h, in the background). If SSH drops meanwhile, wait up to 10 minutes
-before doing anything (A1); the scripts keep running.
+before doing anything (A1). The SDK build keeps running on its own (a background unit), but
+`setup-all.sh` itself stops with the session: run it again — it carries on where it stopped — or start it
+inside `tmux` in the first place (`sudo apt install -y tmux`, `tmux new -s setup`; after a drop
+`tmux attach -t setup`).
 
 **4. The device certificate** (A7). With the identity backup on the stick, `setup-all.sh` restores it
 and doesn't stop. Without one, it stops at the certificate and says so. Then either bring the
@@ -102,19 +107,10 @@ money while they run). A new ONVIF camera: Part E.
 
 ### A new adapter, not adapter-01
 
-A second Pi serving another customer is its own adapter (`DEALER-PANEL-PLAN.md` D15): its Thing is
-made in the System console (Adapters → New adapters), and its identity by the owner, on the
-owner's machine — `bash cloud/adapter-identity.sh create adapter-02` writes a folder to copy to the
-new Pi. On the new card, before step 3's `setup-all.sh`, set its Thing:
-
-```bash
-sudo install -D -m 644 ~/Projects/VideoSafeZone/config/adapter.env.example /etc/adapter/adapter.env
-sudo sed -i 's/^THING_NAME=.*/THING_NAME=adapter-02/' /etc/adapter/adapter.env
-```
-
-then at step 4 `bash setup/setup-identity.sh restore <the folder>`, and activate it with its Cloud ID
-from the web page (Part H, "Adapters: Cloud IDs and activation"). Its cameras are added from the web
-page or the admin GUI once it is activated; `ADOPT_UNSTAMPED_ROWS` stays `no`.
+A second Pi is its own adapter, generated in the System console and activated by its customer with a
+Cloud ID: `LAUNCH-ADAPTER.md` has it step by step — the adapter and its Cloud ID, its AWS identity
+(`cloud/adapter-identity.sh create`), this Part A with its `THING_NAME` set first, the activation, its
+cameras.
 
 ### The scripts
 
@@ -784,7 +780,12 @@ USB stick. Before shutting down for a swap:
 grep -l pending-upload /mnt/vms-buffer/outage/*/state.json   # must print nothing: both
                                                              # uploaders take any capture they find
 sudo systemctl stop 'kvs-cam*' 'kvs-live@*'                    # no producer left running
+sudo poweroff                                                  # then wait for the green LED to stop
 ```
+
+**Never pull the power or the card without `sudo poweroff`:** on 2026-11-15 a power cut two seconds
+after a `git commit` left 19 of the repository's object files empty — the commit itself among them —
+because the data hadn't reached the card yet (recovered from GitHub).
 
 After the swap: since 2026-11-15 VMS keeps its own camera table (`pir-cameras`, D14), so a camera
 registered on the VMS card isn't in this registry at all — register it here too (Part E). The stick's

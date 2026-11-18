@@ -23,8 +23,9 @@
 # key -- but don't hand the stick to anyone. `backup` is therefore something you run, never
 # something the other scripts do on their own.
 #
-# Never retired automatically: the Thing is shared with the VMS card (another SD card in the same
-# board, VMS-PORT-PLAN.md D1), whose certificate must stay ACTIVE. `create` lists the others.
+# Never retired automatically: `create` lists the Thing's other certificates, and
+# `cloud/adapter-identity.sh retire-others`, run on this Pi, retires them (keeping the one it presents)
+# once their cards are gone. The VMS card has had its own Thing since 2026-11-15.
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 [ "$(id -u)" -ne 0 ] || die "run this one as your normal user, without sudo"
 CERTS="$VMS_HOME/certs"

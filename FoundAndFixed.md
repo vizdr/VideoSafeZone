@@ -21,7 +21,7 @@ advice (guide §15 "Known traps").
 project `VMS` (2026-09-27; numbers kept identical to VMS's, see #49). #52–#75 are VMS's #51–#74, ported on
 2026-10-25 (this number = VMS's + 1); #76–#82 were found on a freshly re-imaged card that day. #84 and #85 were
 found writing the pytest suite (2026-10-28); #86 during the web panel's rollout (2026-11-01); #87 while
-planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07); #92 deploying Phase 7 (2026-11-08); #93 on the cloud page after it (2026-11-08); #94 trying Phase 7's addition (2026-11-08); #95 by the D13 spike's first run (2026-11-15); #96 writing Phase 10.2c's tests (2026-11-15); #97 writing the docs after the narrowing (2026-11-15); #98 reviewing LAUNCH.md for a fresh card (2026-11-15).
+planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-11-07); #89 and #90 by Phase 2's first sign-ins (2026-11-07); #91 reading the agent for Phase 6 (2026-11-07); #92 deploying Phase 7 (2026-11-08); #93 on the cloud page after it (2026-11-08); #94 trying Phase 7's addition (2026-11-08); #95 by the D13 spike's first run (2026-11-15); #96 writing Phase 10.2c's tests (2026-11-15); #97 writing the docs after the narrowing (2026-11-15); #98 reviewing LAUNCH.md for a fresh card (2026-11-15); #99 writing LAUNCH-ADAPTER.md (2026-11-18).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -123,6 +123,7 @@ planning the dealer panel (2026-11-06); #88 by CI's first run of tests_db (2026-
 | 96 | Readers moved to the adapter index read rows without `adapterId`: every row looked unstamped, so any adapter but the adopting one would have seen none of its cameras | registry | 2026-11-15 | fixed 2026-11-15, before it reached a Pi that doesn't adopt |
 | 97 | After the narrowing, a camera secret SSM refused would have been lost silently: the registry write went through, the route kept the secret out of the row, and the failure was only logged | registry / secrets | 2026-11-15 | fixed 2026-11-15, before any secret was written after the narrowing |
 | 98 | After the narrowing, `setup-launch.sh` would have told a fresh card "every registered camera already has its producer" while it couldn't read the registry at all | setup | 2026-11-15 | fixed 2026-11-15, before a fresh card ran it |
+| 99 | `setup-launch.sh` failed every new adapter: it started and proved the USB camera's units, which only the first Pi has | setup | 2026-11-18 | fixed 2026-11-18, before a new adapter was set up |
 
 ### What they have in common
 
@@ -1908,3 +1909,26 @@ Python on the test registry with scans forbidden, and
 **The rule:** when the way to read something changes, look for its readers in every language the
 project has — shell heredocs included, not only `import`s; and an empty answer from a command that
 failed is not "nothing to do": check the exit status before reading the output.
+
+### #99 — `setup-launch.sh` failed every new adapter: it started and proved the USB camera's units
+
+**Found:** 2026-11-18, writing `LAUNCH-ADAPTER.md` (a new adapter's Pi, ready for its Cloud ID).
+**Referenced from:** `setup/setup-launch.sh`.
+
+`setup-launch.sh` enabled and started `kvs-camera-init` and `kvs-camera-publish` on every Pi and ended
+with three proofs about them: both units active, and "cam01 video reaches MediaMTX". Only the first Pi,
+`adapter-01`, has a USB camera: a USB camera on another adapter has no ID scheme or unit yet
+(`DEALER-PANEL-PLAN.md` A6), so on a new adapter the two units find no camera and fail, and the launch —
+and so `setup-all.sh` — ends "3 proof(s) failed" on a Pi that is set up exactly right. A technician
+following the guide would have had no way to tell those failures from real ones.
+
+**Fix:** the USB units and the `cam01` proof belong to an adapter whose own registry rows (read through
+the index) include a USB camera, mode `transcode`; on any other they stay off, and the script says why.
+A registry that can't be read keeps them, so the first Pi never loses its camera to a network hiccup.
+No Thing name is written into the script. `test_ff99_the_usb_units_follow_this_adapters_own_usb_camera`
+runs the script's own check on the test registry (the first Pi: yes; a new adapter, none yet, another
+adapter's USB camera: no), and `test_ff99_without_a_usb_camera_its_units_and_proof_are_left_out` checks the
+script uses it (`tests/adapter/test_setup_launch.py`).
+
+**The rule:** a setup script for "an adapter" must hold for every adapter, not only the first: what is
+specific to one adapter comes from its data (the registry), never from what the first Pi happened to have.

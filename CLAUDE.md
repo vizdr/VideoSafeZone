@@ -23,7 +23,10 @@ left behind plus a `FoundAndFixed.md #N` reference. `START.md` says where the sy
 boot order of the services, and the path from a Start press down to the producer. `LAUNCH.md` is
 the short operational runbook (what to
 actually run, in order, assuming the guide has already been followed once) — check it
-first for "how do I start/stop/verify this." Its Part A is the fresh-SD-card setup, which
+first for "how do I start/stop/verify this." `LAUNCH-SYSTEM.md` brings up the whole system step by
+step (the cloud — this account or a new one — then the first people, with or without the test adapter
+`adapter-01`), and `LAUNCH-ADAPTER.md` a new adapter's Pi up to its activation with a Cloud ID; both
+point into `LAUNCH.md` for the details. Its Part A is the fresh-SD-card setup, which
 is scripted: `setup/setup-all.sh` runs `setup/setup-{system,user,sdk,identity,launch}.sh`
 (each idempotent, each ending in PASS/FAIL proofs, the reasons in their comments), and
 `setup/setup-check.sh` says what is missing. Its Part H is deploying the cloud side with

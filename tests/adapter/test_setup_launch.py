@@ -51,3 +51,32 @@ def test_ff98_a_registry_read_that_fails_is_a_failure_not_all_done():
     assert ".scan(" not in step and "registry_reads.own_rows" in step
     assert re.search(r"^else\n  proof .*false\nfi", step, re.M), "a failed read must count as a FAIL"
     assert step.index("if TODO_OUT=$(") < step.index('ok "every registered camera already has its producer"')
+
+
+def usb_python():
+    head = SCRIPT[SCRIPT.index("USB_UNITS=("):SCRIPT.index('step "1. user units')]
+    return re.search(r"<<'PY' \|\| echo unknown\n(.*?)\nPY\n", head, re.S).group(1)
+
+
+@pytest.mark.parametrize("rows, has_usb", [
+    ([{"cameraId": "cam-01", "adapterId": "test-thing", "mode": "transcode"},
+      {"cameraId": "cam-02", "adapterId": "test-thing", "mode": "passthrough"}], "yes"),          # the first Pi
+    ([{"cameraId": "cam-07", "adapterId": "test-thing", "mode": "passthrough"}], "no"),            # a new adapter
+    ([], "no"),                                                                                  # nothing yet
+    ([{"cameraId": "cam-01", "adapterId": "adapter-02", "mode": "transcode"}], "no"),             # another's USB
+])
+def test_ff99_the_usb_units_follow_this_adapters_own_usb_camera(registry, monkeypatch, capsys, rows, has_usb):
+    monkeypatch.setattr(config, "ADOPT_UNSTAMPED_ROWS", False)
+    table = registry(rows)
+    monkeypatch.setattr(table, "scan", lambda **kw: pytest.fail("scanned the whole table"))
+    monkeypatch.setenv("SETUP_VMS_HOME", str(ROOT))
+    exec(compile(usb_python(), "setup-launch.sh USB check", "exec"), {})
+    assert capsys.readouterr().out == has_usb + "\n"
+
+
+def test_ff99_without_a_usb_camera_its_units_and_proof_are_left_out():
+    assert "kvs-camera-init" not in re.search(r"^USER_UNITS=\((.*?)\)", SCRIPT, re.M | re.S).group(1)
+    assert 'if [ "$HAS_USB" = no ]; then' in SCRIPT and 'USER_UNITS=("${USB_UNITS[@]}" "${USER_UNITS[@]}")' in SCRIPT
+    proof = SCRIPT[SCRIPT.index('if [ "$HAS_USB" != no ]; then\n  proof "cam01'):]
+    assert proof.index("cam01 video reaches MediaMTX") < proof.index("fi")        # the proof only with a USB camera
+    assert "|| echo unknown" in SCRIPT                                             # unreadable: the units stay
